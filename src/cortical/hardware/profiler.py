@@ -65,7 +65,6 @@ class HardwareProfiler:
         "llama_server_8080": ("127.0.0.1", 8080, "http://127.0.0.1:8080/v1"),
         "whisper_server_8081": ("127.0.0.1", 8081, "http://127.0.0.1:8081/inference"),
         "whisper_server_18183": ("127.0.0.1", 18183, "http://127.0.0.1:18183/inference"),
-        "omniroute_20128": ("127.0.0.1", 20128, "http://127.0.0.1:20128/v1"),
         "ollama_11434": ("127.0.0.1", 11434, "http://127.0.0.1:11434/v1"),
         "lmstudio_1234": ("127.0.0.1", 1234, "http://127.0.0.1:1234/v1"),
     }
@@ -150,7 +149,6 @@ class HardwareProfiler:
             profile.discovered_endpoints.get("llama_server_8080")
             or profile.discovered_endpoints.get("ollama_11434")
             or profile.discovered_endpoints.get("lmstudio_1234")
-            or profile.discovered_endpoints.get("omniroute_20128")
         )
         reuse = bool(existing_llm)
         base_url = existing_llm or "http://127.0.0.1:8080/v1"
