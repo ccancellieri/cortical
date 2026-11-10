@@ -462,7 +462,11 @@ class TestCorticalSystem(unittest.TestCase):
         graph_data = json.loads(mcp_resp["result"]["content"][0]["text"])
         self.assertIn("nodes", graph_data)
         self.assertIn("edges", graph_data)
-        self.assertGreaterEqual(graph_data["stats"]["node_count"], 2)
+        self.assertGreaterEqual(graph_data["stats"]["node_count"], 3)
+        node_kinds = {n.get("kind") for n in graph_data["nodes"]}
+        self.assertIn("concept", node_kinds)
+        self.assertNotIn("file", node_kinds)
+        self.assertNotIn("dir", node_kinds)
 
     def test_13_skills_hub_3plus1_synthesis_and_task_deletion(self) -> None:
         """Tests expressive Italian TTS shaping, parallel 3+1 memory vs procedural skills, and task deletion."""

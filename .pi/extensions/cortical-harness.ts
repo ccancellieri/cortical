@@ -104,10 +104,16 @@ function isExplicitTaskStart(text: string): boolean {
 }
 
 export default function corticalHarnessExtension(pi: ExtensionAPI) {
+  const g = globalThis as Record<string, unknown>;
+  if (g.__CORTICAL_HARNESS_REGISTERED__) {
+    return;
+  }
+  g.__CORTICAL_HARNESS_REGISTERED__ = true;
+
   let pendingGroundedAnswer: string | null = null;
   let activeTask: ActiveTaskState | null = null;
 
-  // Register Cortical Multi-Agent & Skill Hub Slash Commands in `pi`
+  // Register Cortical Multi-Agent & Adaptive Skill Slash Commands in `pi`
   pi.registerCommand?.("task", {
     description: "Apri un Task Multi-Agente esplicito con memoria 3+1 e valutazione Skill (/task <obiettivo>)",
     handler: async (args, ctx) => {
@@ -228,12 +234,6 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
         ctx.ui?.notify?.(`[Cortical Grounding] ${groundedSummary}`, "info");
-        return {
-          systemPrompt:
-            `Sei Cortical, assistente AI italiano creato da Carlo Cancellieri.\n` +
-            `Rispondi SOLO riportando esattamente questa frase senza parafrasare e senza aggiungere altro:\n` +
-            `${groundedSummary}`,
-        };
       }
 
       // B. Auto-start explicit task if user asks in natural language ("crea un task per...")
@@ -255,19 +255,114 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
           detail: userPrompt.slice(0, 300),
         });
       }
+    } catch {
+      // Continue normally if CLI is unreachable
+    }
+    return undefined;
+  });
 
-      // C. Parallel 3+1 Memory + Procedural Skill & Tool Enhancement (when working on a task or technical request)
-      if (activeTask || userPrompt.split(/\s+/).length >= 5) {
-        const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", userPrompt]);
+  // 1b. Direct Provider Payload Grounding (ensures small local models 1.5B-4B reply accurately in Italian)
+  pi.on("before_provider_request", (event) => {
+    try {
+      const payload = (event as unknown as Record<string, unknown>).payload as
+        | { messages?: Array<{ role: string; content: unknown }> }
+        | undefined;
+      if (!payload || !Array.isArray(payload.messages)) return undefined;
+
+      let lastUserText = "";
+      for (let i = payload.messages.length - 1; i >= 0; i--) {
+        const m = payload.messages[i];
+        if (m.role === "user") {
+          if (typeof m.content === "string") {
+            lastUserText = m.content;
+          } else if (Array.isArray(m.content)) {
+            lastUserText = m.content
+              .map((p: Record<string, unknown>) => (typeof p?.text === "string" ? p.text : ""))
+              .join(" ");
+          }
+          break;
+        }
+      }
+      if (!lastUserText) return undefined;
+      const norm = lastUserText.toLowerCase().trim();
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+      const dateStr = now.toLocaleDateString("it-IT", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      });
+
+      // Deterministic Clock / Date Grounding
+      if (
+        norm.includes("che ore sono") ||
+        norm.includes("che ora è") ||
+        norm.includes("che ora e") ||
+        norm.includes("che giorno")
+      ) {
+        const clockAnswer = `Sono le ${timeStr} di ${dateStr}.`;
+        pendingGroundedAnswer = clockAnswer;
+        return {
+          ...payload,
+          temperature: 0.0,
+          messages: [
+            {
+              role: "system",
+              content: "Rispondi in italiano riportando fedelmente l'orario e la data indicati.",
+            },
+            {
+              role: "user",
+              content: `Ripeti esattamente questa frase in italiano: "${clockAnswer}"`,
+            },
+          ],
+        };
+      }
+
+      // Deterministic Weather & Chrome Grounding
+      if (pendingGroundedAnswer || isWeatherQuery(lastUserText)) {
+        let grounded = pendingGroundedAnswer;
+        if (!grounded) {
+          const res = invokeCorticalCLI(["weather", "--query", lastUserText, "--open-chrome"]);
+          grounded = String(res.summary_it || JSON.stringify(res));
+          pendingGroundedAnswer = grounded;
+        }
+        return {
+          ...payload,
+          temperature: 0.0,
+          messages: [
+            {
+              role: "system",
+              content:
+                "Sei Cortical. Rispondi in italiano perfetto riportando fedelmente i dati meteo reali già verificati e confermando di aver aperto Chrome.",
+            },
+            {
+              role: "user",
+              content: `Ecco i dati meteo verificati da riportare fedelmente all'utente in italiano:\n\n"${grounded}"\n\nRiporta esattamente questa previsione in italiano chiaro.`,
+            },
+          ],
+        };
+      }
+
+      // Parallel 3+1 Memory + Adaptive Skill Enhancement when working on a task or technical prompt
+      if (activeTask || lastUserText.split(/\s+/).length >= 6) {
+        const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", lastUserText]);
         const enhancedSys = String(enh.enhanced_system_instructions || "");
-        if (enhancedSys && activeTask) {
+        if (enhancedSys) {
           return {
-            systemPrompt: `${event.systemPrompt}\n\n${enhancedSys}`,
+            ...payload,
+            messages: [
+              {
+                role: "system",
+                content: `Data e ora locale: ${dateStr}, ${timeStr}.\n\n${enhancedSys}`,
+              },
+              ...payload.messages,
+            ],
           };
         }
       }
     } catch {
-      // Continue normally if CLI is unreachable
+      // Ignore if CLI not reachable
     }
     return undefined;
   });

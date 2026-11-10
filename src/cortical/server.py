@@ -573,8 +573,7 @@ class PiAgentManager:
     def open_native_pi_terminal(self) -> dict[str, Any]:
         """Opens a native OS Terminal window running interactive `pi` with the Cortical harness loaded."""
         sys_name = platform.system()
-        ext_path = self.repo_root / ".pi/extensions/cortical-harness.ts"
-        cmd_str = f"cd {json.dumps(str(self.repo_root))} && pi -e {json.dumps(str(ext_path))}"
+        cmd_str = f"cd {json.dumps(str(self.repo_root))} && pi"
         try:
             if sys_name == "Darwin":
                 apple_script = (
@@ -600,20 +599,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cortical Mission Control — Agentic IDE, 4-Tier Second Brain & Voice</title>
+  <title>Cortical Mission Control — Concept Graph, 3+1 Second Brain & Multi-Agent Workbench</title>
   <style>
     :root {
-      --bg: #090d16;
-      --bg-sidebar: #0d1322;
-      --panel: #131c31;
-      --panel-hover: #192540;
-      --border: #233253;
+      --bg: #070b14;
+      --bg-sidebar: #0c1221;
+      --panel: #111a2e;
+      --panel-hover: #17233d;
+      --border: #223254;
       --accent: #38bdf8;
       --accent-glow: rgba(56, 189, 248, 0.18);
       --indigo: #818cf8;
       --emerald: #34d399;
       --amber: #fbbf24;
       --rose: #f87171;
+      --violet: #c084fc;
       --text: #f1f5f9;
       --muted: #94a3b8;
       --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -625,27 +625,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--bg); color: var(--text); overflow: hidden;
     }
     .topbar {
-      height: 58px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
+      height: 62px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
-      flex-shrink: 0;
+      flex-shrink: 0; gap: 14px;
     }
-    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 240px; }
     .brand-logo {
-      width: 32px; height: 32px; border-radius: 8px;
+      width: 34px; height: 34px; border-radius: 9px;
       background: linear-gradient(135deg, var(--accent), var(--indigo));
       display: flex; align-items: center; justify-content: center;
-      font-weight: 900; color: #090d16; font-family: var(--mono);
+      font-weight: 900; font-size: 1.05rem; color: #070b14; font-family: var(--mono);
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
     }
-    .brand-title { font-weight: 700; font-size: 1.05rem; letter-spacing: -0.02em; }
-    .brand-sub { font-size: 0.75rem; color: var(--muted); }
+    .brand-title { font-weight: 800; font-size: 1.05rem; letter-spacing: -0.02em; }
+    .brand-sub { font-size: 0.72rem; color: var(--muted); max-width: 340px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* PRIMARY CENTRAL VIEW SWITCHER */
+    .main-nav {
+      display: flex; align-items: center; gap: 6px;
+      background: #080d19; padding: 5px; border-radius: 11px; border: 1px solid var(--border);
+    }
+    .nav-tab {
+      padding: 8px 16px; border-radius: 8px; font-size: 0.83rem; font-weight: 700;
+      cursor: pointer; color: var(--muted); border: 1px solid transparent;
+      display: inline-flex; align-items: center; gap: 7px; transition: all 0.15s;
+    }
+    .nav-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .nav-tab.active {
+      background: linear-gradient(135deg, rgba(56,189,248,0.2), rgba(129,140,248,0.2));
+      color: var(--accent); border-color: rgba(56,189,248,0.5);
+      box-shadow: 0 2px 10px rgba(56,189,248,0.12);
+    }
+
     .voice-bar {
-      display: flex; align-items: center; gap: 10px;
+      display: flex; align-items: center; gap: 8px;
       background: var(--panel); border: 1px solid var(--border);
-      padding: 6px 12px; border-radius: 999px;
+      padding: 5px 11px; border-radius: 999px;
     }
     .pulse-dot {
       width: 10px; height: 10px; border-radius: 50%; background: var(--muted);
-      transition: all 0.2s;
+      transition: all 0.2s; flex-shrink: 0;
     }
     .pulse-dot.listening {
       background: var(--emerald);
@@ -658,19 +677,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       100% { transform: scale(0.95); opacity: 1; }
     }
     .live-transcript {
-      font-size: 0.82rem; color: var(--accent); font-family: var(--mono);
-      min-width: 220px; max-width: 340px; white-space: nowrap;
+      font-size: 0.78rem; color: var(--accent); font-family: var(--mono);
+      min-width: 170px; max-width: 240px; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
     }
     .btn {
       background: linear-gradient(135deg, var(--accent), var(--indigo));
-      color: #090d16; border: none; border-radius: 7px; padding: 7px 12px;
-      font-size: 0.8rem; font-weight: 700; cursor: pointer; display: inline-flex;
-      align-items: center; gap: 6px; transition: opacity 0.15s;
+      color: #070b14; border: none; border-radius: 8px; padding: 7px 12px;
+      font-size: 0.79rem; font-weight: 700; cursor: pointer; display: inline-flex;
+      align-items: center; gap: 6px; transition: all 0.15s; white-space: nowrap;
     }
-    .btn:hover { opacity: 0.92; }
+    .btn:hover { opacity: 0.92; transform: translateY(-1px); }
     .btn-ghost {
-      background: #17223b; color: var(--text); border: 1px solid var(--border);
+      background: #152038; color: var(--text); border: 1px solid var(--border);
       font-weight: 600;
     }
     .btn-danger {
@@ -678,26 +697,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: 1px solid rgba(248, 113, 113, 0.4); font-weight: 700;
     }
     select, input, textarea {
-      background: #0b1120; color: var(--text); border: 1px solid var(--border);
-      border-radius: 7px; padding: 7px 10px; font-size: 0.83rem;
+      background: #0a101f; color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 7px 10px; font-size: 0.82rem;
     }
     .workspace {
       flex: 1; display: grid;
-      grid-template-columns: 300px 1fr 410px;
+      grid-template-columns: 310px 1fr;
       min-height: 0;
     }
-    .pane {
+    .sidebar {
       display: flex; flex-direction: column; min-height: 0;
-      border-right: 1px solid var(--border);
+      border-right: 1px solid var(--border); background: var(--bg-sidebar);
     }
-    .pane:last-child { border-right: none; }
+    .main-stage {
+      display: flex; flex-direction: column; min-height: 0; background: var(--bg);
+    }
+    .stage-view {
+      flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+    }
     .pane-header {
-      padding: 11px 14px; font-size: 0.76rem; font-weight: 700;
+      padding: 11px 15px; font-size: 0.75rem; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
       border-bottom: 1px solid var(--border); background: var(--bg-sidebar);
       display: flex; justify-content: space-between; align-items: center;
+      flex-shrink: 0;
     }
-    .pane-body { flex: 1; overflow-y: auto; padding: 12px; }
+    .pane-body { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
     .agent-item {
       padding: 10px 12px; border-radius: 9px; background: var(--panel);
       border: 1px solid var(--border); margin-bottom: 8px; cursor: pointer;
@@ -711,7 +736,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 0.8rem; font-weight: 700; margin-bottom: 4px;
     }
     .status-pill {
-      font-size: 0.68rem; padding: 2px 7px; border-radius: 999px;
+      font-size: 0.66rem; padding: 2px 7px; border-radius: 999px;
       font-family: var(--mono); text-transform: uppercase;
     }
     .status-working { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
@@ -720,7 +745,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .status-stopped, .status-error { background: rgba(248, 113, 113, 0.2); color: var(--rose); }
     .step-card {
       background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+      border-radius: 10px; padding: 12px 15px; margin-bottom: 10px;
       border-left: 3px solid var(--accent);
     }
     .step-card.tool_call { border-left-color: var(--indigo); }
@@ -731,46 +756,99 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: flex; justify-content: space-between; font-size: 0.74rem;
       color: var(--muted); font-family: var(--mono); margin-bottom: 5px;
     }
-    .step-title { font-weight: 700; font-size: 0.88rem; margin-bottom: 6px; color: var(--text); }
+    .step-title { font-weight: 700; font-size: 0.9rem; margin-bottom: 6px; color: var(--text); }
     .step-detail {
-      margin: 0; font-family: var(--mono); font-size: 0.78rem;
-      color: #cbd5e1; white-space: pre-wrap; background: #070b13;
-      padding: 9px; border-radius: 6px; border: 1px solid #1a2640;
-      max-height: 240px; overflow-y: auto;
+      margin: 0; font-family: var(--mono); font-size: 0.79rem;
+      color: #cbd5e1; white-space: pre-wrap; background: #060911;
+      padding: 10px; border-radius: 7px; border: 1px solid #1a2640;
+      max-height: 260px; overflow-y: auto; line-height: 1.45;
     }
     .composer {
-      padding: 12px 16px; background: var(--bg-sidebar);
+      padding: 11px 18px; background: var(--bg-sidebar);
       border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px;
+      flex-shrink: 0;
     }
     .composer-row { display: flex; gap: 8px; align-items: center; }
-    .composer input { flex: 1; padding: 10px 12px; font-size: 0.9rem; }
+    .composer input { flex: 1; padding: 10px 13px; font-size: 0.9rem; }
+
+    /* DEDICATED CENTRAL CONCEPT GRAPH VIEW */
+    .graph-stage-grid {
+      flex: 1; display: grid; grid-template-columns: 1fr 370px; min-height: 0;
+    }
+    .graph-main-area {
+      display: flex; flex-direction: column; min-height: 0; padding: 14px;
+      border-right: 1px solid var(--border);
+    }
+    .graph-toolbar {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .filter-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+    .pill {
+      padding: 5px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 600;
+      cursor: pointer; background: var(--panel); color: var(--muted);
+      border: 1px solid var(--border); transition: all 0.15s;
+    }
+    .pill.active {
+      background: var(--accent-glow); color: var(--accent); border-color: var(--accent);
+    }
+    .graph-canvas-wrap {
+      flex: 1; background: radial-gradient(circle at center, #0d1629 0%, #060a12 100%);
+      border: 1px solid var(--border); border-radius: 12px;
+      position: relative; overflow: hidden; min-height: 360px;
+      cursor: grab;
+    }
+    .graph-canvas-wrap:active { cursor: grabbing; }
+    .graph-zoom-controls {
+      position: absolute; bottom: 14px; right: 14px; display: flex; gap: 6px;
+      background: rgba(12, 18, 33, 0.9); padding: 6px; border-radius: 9px;
+      border: 1px solid var(--border);
+    }
+    .graph-legend {
+      position: absolute; top: 12px; left: 14px;
+      display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.73rem; color: #cbd5e1;
+      background: rgba(12, 18, 33, 0.85); padding: 7px 12px; border-radius: 8px;
+      border: 1px solid var(--border); font-family: var(--mono); pointer-events: none;
+    }
+    .legend-dot {
+      width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle;
+    }
+    .concept-drawer {
+      display: flex; flex-direction: column; min-height: 0; background: var(--bg-sidebar);
+      padding: 16px; overflow-y: auto;
+    }
+    .concept-badge {
+      display: inline-block; padding: 3px 9px; border-radius: 999px;
+      font-size: 0.7rem; font-family: var(--mono); text-transform: uppercase;
+      background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(56,189,248,0.4);
+      margin-bottom: 8px;
+    }
+    .tier-box {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+      padding: 10px 12px; margin-bottom: 10px;
+    }
+    .tier-label {
+      font-size: 0.7rem; font-family: var(--mono); color: var(--accent);
+      text-transform: uppercase; font-weight: 700; margin-bottom: 4px;
+    }
+    .second-brain-grid {
+      flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+      padding: 14px; overflow-y: auto; min-height: 0;
+    }
+    .card-panel {
+      background: var(--bg-sidebar); border: 1px solid var(--border);
+      border-radius: 12px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+    }
     .tree-node {
-      padding: 6px 8px; border-radius: 6px; font-family: var(--mono);
+      padding: 6px 9px; border-radius: 6px; font-family: var(--mono);
       font-size: 0.78rem; cursor: pointer; display: flex; justify-content: space-between;
       color: #cbd5e1;
     }
     .tree-node:hover { background: var(--panel-hover); color: var(--accent); }
-    .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
-    .tab {
-      padding: 4px 8px; border-radius: 6px; font-size: 0.71rem; cursor: pointer;
-      background: #0b1120; color: var(--muted); border: 1px solid var(--border);
-    }
-    .tab.active { background: var(--accent-glow); color: var(--accent); border-color: var(--accent); }
-    .graph-canvas-wrap {
-      background: #060a12; border: 1px solid var(--border); border-radius: 8px;
-      height: 360px; position: relative; overflow: hidden; margin-bottom: 8px;
-    }
-    .graph-legend {
-      display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.71rem; color: var(--muted);
-      margin-bottom: 8px; font-family: var(--mono);
-    }
-    .legend-dot {
-      width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 4px;
-    }
   </style>
 </head>
 <body>
-  <!-- TOP MISSION CONTROL BAR -->
+  <!-- TOP MISSION CONTROL BAR WITH PRIMARY CENTRAL NAVIGATION -->
   <div class="topbar">
     <div class="brand">
       <div class="brand-logo">C</div>
@@ -780,171 +858,241 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- ALWAYS-ON VOICE CONTROL BAR WITH SELF-ECHO GUARD & DUCKING -->
-    <div class="voice-bar">
-      <div class="pulse-dot" id="mic-dot"></div>
-      <span class="live-transcript" id="live-transcript">Anti-Echo & Ducking attivi · Di' "Hei Cortical, meteo a Roma domani"</span>
-      <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Ascolto Continuo: OFF</button>
-      <select id="tts-voice" title="Voce Italiana Espressiva">
-        <option value="IsabellaNeural" selected>🇮🇹 Voce: Isabella Neurale (Espressiva)</option>
-        <option value="GiuseppeNeural">🇮🇹 Voce: Giuseppe Neurale (Multilingue)</option>
-        <option value="ElsaNeural">🇮🇹 Voce: Elsa Neurale (Brillante)</option>
-        <option value="DiegoNeural">🇮🇹 Voce: Diego Neurale (Dinamico)</option>
-        <option value="Alice">🇮🇹 Voce: Alice (Locale Offline)</option>
-      </select>
-      <button class="btn btn-danger" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti">🛑 BASTA / STOP</button>
+    <!-- DEDICATED CENTRAL WORKSPACE TABS -->
+    <div class="main-nav">
+      <div class="nav-tab active" id="main-tab-stream" onclick="switchMainStage('stream')">
+        ⚡ Stream Operativo & Voce
+      </div>
+      <div class="nav-tab" id="main-tab-graph" onclick="switchMainStage('graph')">
+        🧠 Grafo dei Concetti <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.72rem; opacity:0.85;">(MCP)</span>
+      </div>
+      <div class="nav-tab" id="main-tab-brain" onclick="switchMainStage('brain')">
+        🧭 Second Brain 3+1, Skill & Permessi
+      </div>
     </div>
 
-    <div style="display:flex; gap:8px;">
-      <button class="btn btn-ghost" onclick="openNativePiTerminal()">🖥️ Apri `pi` in Terminale</button>
+    <!-- VOICE & TERMINAL CONTROLS -->
+    <div class="voice-bar">
+      <div class="pulse-dot" id="mic-dot"></div>
+      <span class="live-transcript" id="live-transcript">Scudo Anti-Eco attivo · Di' "Ehi Cortical..."</span>
+      <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Mic: OFF</button>
+      <select id="tts-voice" title="Voce Italiana Espressiva">
+        <option value="IsabellaNeural" selected>🇮🇹 Isabella Neurale</option>
+        <option value="GiuseppeNeural">🇮🇹 Giuseppe Neurale</option>
+        <option value="ElsaNeural">🇮🇹 Elsa Neurale</option>
+        <option value="DiegoNeural">🇮🇹 Diego Neurale</option>
+        <option value="Alice">🇮🇹 Alice (Offline)</option>
+      </select>
+      <button class="btn btn-danger" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti">🛑 Stop</button>
+      <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale">🖥️ `pi`</button>
     </div>
   </div>
 
-  <!-- 3-PANE IDE WORKSPACE -->
+  <!-- MAIN WORKSPACE: LEFT TASK SIDEBAR + CENTRAL MULTI-STAGE VIEW -->
   <div class="workspace">
-    <!-- LEFT PANE: EXPLICIT TASKS & 4-TIER WIKI TREE -->
-    <div class="pane">
+    <!-- LEFT SIDEBAR: EXPLICIT MULTI-AGENT TASKS & QUICK CONCEPT SUMMARY -->
+    <div class="sidebar">
       <div class="pane-header">
-        <span>Task Multi-Agente `pi`</span>
+        <span>Task Espliciti `pi`</span>
         <div style="display:flex; gap:5px;">
           <button class="btn btn-ghost" style="padding:3px 7px; font-size:0.68rem;" onclick="clearArchivedTasks()" title="Rimuove tutti i task già archiviati">🧹 Pulisci</button>
           <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
         </div>
       </div>
-      <div class="pane-body" id="agent-roster" style="max-height: 46%;">
+      <div class="pane-body" id="agent-roster" style="flex: 1;">
         <div style="color:var(--muted); font-size:0.78rem;">
-          Le chiacchierate normali non creano task. I task vengono creati solo su richiesta esplicita ("crea un task..." o "+ Nuovo Task") e restano isolati fino all'archiviazione.
+          Le conversazioni normali non aprono task. Crea un task solo quando vuoi orchestrare un lavoro strutturato con sintesi 3+1 finale.
         </div>
       </div>
 
-      <div class="pane-header">
-        <span>Second Brain (4-Tier Merkle)</span>
-        <select id="wiki-depth" onchange="navigateWiki(currentWikiPath)" style="padding:2px 6px; font-size:0.72rem;">
-          <option value="light">LIGHT (~50t)</option>
-          <option value="medium" selected>MEDIUM (~250t)</option>
-          <option value="high">HIGH (~1000t)</option>
-          <option value="max">MAX (Raw)</option>
-        </select>
+      <!-- QUICK CONCEPT GRAPH LAUNCHER CARD -->
+      <div style="padding: 12px 14px; border-top: 1px solid var(--border); background: #090f1d;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span style="font-size:0.74rem; font-weight:700; color:var(--accent); text-transform:uppercase;">🧠 Mappa Concettuale</span>
+          <span id="sidebar-graph-stats" style="font-size:0.71rem; font-family:var(--mono); color:var(--muted);">-- concetti</span>
+        </div>
+        <div style="font-size:0.76rem; color:var(--muted); margin-bottom:9px;">
+          Esplora i concetti semantici, gli insight appresi, le skill e le relazioni tra i task al centro dello schermo.
+        </div>
+        <button class="btn" style="width:100%; justify-content:center;" onclick="switchMainStage('graph')">
+          🧠 Apri Grafo dei Concetti al Centro
+        </button>
       </div>
-      <div class="pane-body" id="wiki-tree"></div>
     </div>
 
-    <!-- CENTER PANE: LIVE STREAM -->
-    <div class="pane">
-      <div class="pane-header">
-        <span id="stream-title">Conversazione & Stream Esecutivo (Anti-Echo · Ducking · Meteo Live)</span>
-        <span style="font-family:var(--mono); font-size:0.72rem; color:var(--accent);" id="active-session-badge">CHAT & VOICE</span>
-      </div>
-      <div class="pane-body" id="agent-stream">
-        <div class="step-card output">
-          <div class="step-meta"><span>CORTICAL v0.2 READY</span><span>Anti-Echo · Smart Memory · MCP Graph</span></div>
-          <div class="step-title">Novità attive in Cortical</div>
-          <pre class="step-detail">• Isolamento Eco & Audio Ducking: Cortical ignora la propria voce e abbassa/interrompe la risposta se inizi a parlare, ricalcolando subito per la nuova domanda.
-• Zero Task Automatici: le chiacchierate quotidiane ("che ore sono", "cerca il meteo a Roma domani") non creano task. Usa "Crea un task per..." o "+ Nuovo Task" per i task.
-• Memoria Intelligente & Archiviazione Task: le domande effimere restano in un buffer leggero auto-pulito (max 20 turni); quando archivi un task, la memoria pesante del task viene rimossa lasciando solo una traccia sintetica nel grafo.
-• Grafo della Conoscenza MCP: clicca sul tab "🕸️ Grafo MCP" a destra per visualizzare i nodi tramite protocollo MCP standard.</pre>
+    <!-- CENTRAL STAGE (3 SWITCHABLE FULL-SIZE VIEWS + PERSISTENT COMPOSER) -->
+    <div class="main-stage">
+      <!-- STAGE 1: LIVE CONVERSATION & MULTI-AGENT EXECUTION STREAM -->
+      <div class="stage-view" id="stage-stream">
+        <div class="pane-header">
+          <span>Stream Conversazionale & Multi-Agente (Scudo Anti-Eco · Voce Neurale · Grounding Live)</span>
+          <span style="font-family:var(--mono); font-size:0.73rem; color:var(--accent);" id="active-session-badge">CHAT & VOICE</span>
+        </div>
+        <div class="pane-body" id="agent-stream">
+          <div class="step-card output">
+            <div class="step-meta"><span>CORTICAL v0.3 READY</span><span>Voce Isabella Neurale · Grafo dei Concetti · Memoria 3+1</span></div>
+            <div class="step-title">Pannello di Controllo Cortical Rinnovato</div>
+            <pre class="step-detail">• 🧠 Grafo dei Concetti al Centro: clicca sulla tab centrale "🧠 Grafo dei Concetti" in alto per navigare i concetti architetturali, gli insight appresi, le skill e i task (con zoom, trascinamento nodi, filtri per categoria e scheda 3+1).
+• 🔇 Scudo Acustico Anti-Eco: mentre Cortical parla, il microfono ignora l'audio degli altoparlanti senza mai auto-interrompersi. Per interromperlo a voce, pronuncia "Ehi Cortical..." oppure "Stop / Basta".
+• ⚡ Memoria 3+1 & Skill in Parallelo: quando chiudi un task ("📦 Archivia" o `/task-close` in `pi`), Cortical sintetizza la discussione nei 3+1 livelli della Wiki e valuta se compilare una nuova Skill riutilizzabile.</pre>
+          </div>
         </div>
       </div>
 
-      <!-- PROMPT COMPOSER -->
+      <!-- STAGE 2: DEDICATED CENTRAL CONCEPT KNOWLEDGE GRAPH -->
+      <div class="stage-view" id="stage-graph" style="display:none;">
+        <div class="graph-stage-grid">
+          <div class="graph-main-area">
+            <div class="graph-toolbar">
+              <div class="filter-pills" id="graph-filter-pills">
+                <span class="pill active" onclick="setGraphFilter('all', this)">Tutti i Nodi</span>
+                <span class="pill" onclick="setGraphFilter('concept', this)">🧠 Concetti</span>
+                <span class="pill" onclick="setGraphFilter('memoria', this)">📚 Memoria 3+1</span>
+                <span class="pill" onclick="setGraphFilter('agenti', this)">🤖 Agenti & MCP</span>
+                <span class="pill" onclick="setGraphFilter('voce', this)">🎙️ Voce</span>
+                <span class="pill" onclick="setGraphFilter('sicurezza', this)">🛡️ Sicurezza</span>
+                <span class="pill" onclick="setGraphFilter('insight', this)">💡 Insight</span>
+                <span class="pill" onclick="setGraphFilter('skill', this)">⚡ Skill</span>
+                <span class="pill" onclick="setGraphFilter('task', this)">🎯 Task</span>
+              </div>
+              <div style="display:flex; gap:6px; align-items:center;">
+                <input id="graph-search-input" placeholder="Filtra concetto..." style="width:170px; padding:5px 9px;" oninput="renderKnowledgeGraphSvg()" />
+                <button class="btn btn-ghost" style="padding:5px 10px;" onclick="loadMcpKnowledgeGraph()">🔄 Sincronizza MCP</button>
+              </div>
+            </div>
+
+            <div class="graph-canvas-wrap" id="graph-canvas-container">
+              <div class="graph-legend">
+                <span><i class="legend-dot" style="background:#38bdf8;"></i>Nucleo / Memoria</span>
+                <span><i class="legend-dot" style="background:#c084fc;"></i>Concetto Dominio</span>
+                <span><i class="legend-dot" style="background:#34d399;"></i>Insight Appreso</span>
+                <span><i class="legend-dot" style="background:#fbbf24;"></i>Skill / Task Attivo</span>
+                <span><i class="legend-dot" style="background:#818cf8;"></i>Task Archiviato</span>
+              </div>
+              <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 920 560"></svg>
+              <div class="graph-zoom-controls">
+                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="zoomGraph(1.2)" title="Ingrandisci">＋</button>
+                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="zoomGraph(0.84)" title="Riduci">－</button>
+                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="resetGraphView()" title="Centra grafo">Centra</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT CONCEPT INSPECTOR DRAWER INSIDE GRAPH STAGE -->
+          <div class="concept-drawer">
+            <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:10px;">
+              Scheda Concetto & Sintesi 3+1
+            </div>
+            <div id="concept-detail-panel">
+              <div class="concept-badge" id="cd-badge">CONCETTO CORE</div>
+              <h3 id="cd-title" style="margin: 0 0 8px 0; font-size: 1.1rem; color: var(--text);">Cortical Second Brain</h3>
+              <div class="tier-box">
+                <div class="tier-label">Livello 1 — Sintesi Light (~50 token)</div>
+                <div id="cd-summary-l1" style="font-size:0.83rem; color:#e2e8f0; line-height:1.45;">
+                  Clicca su qualsiasi nodo concettuale nel grafo a sinistra per esplorarne la definizione, le sintesi a 3+1 livelli e le relazioni semantiche.
+                </div>
+              </div>
+              <div class="tier-box">
+                <div class="tier-label">Livello 2 — Struttura & Relazioni (~250 token)</div>
+                <div id="cd-summary-l2" style="font-size:0.8rem; color:var(--muted); line-height:1.45;">
+                  Il grafo mostra esclusivamente concetti di dominio, insight appresi, skill procedurali e task (non la lista piatta dei file).
+                </div>
+              </div>
+              <div class="tier-box">
+                <div class="tier-label">Connessioni Semantiche</div>
+                <div id="cd-connections" style="font-size:0.78rem; font-family:var(--mono); color:#cbd5e1;">--</div>
+              </div>
+              <div class="tier-box">
+                <div class="tier-label">Fonti Indicizzate (Merkle Reference)</div>
+                <div id="cd-sources" style="font-size:0.76rem; font-family:var(--mono); color:var(--accent);">/</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STAGE 3: SECOND BRAIN 3+1, ADAPTIVE SKILLS & PERMISSIONS -->
+      <div class="stage-view" id="stage-brain" style="display:none;">
+        <div class="second-brain-grid">
+          <!-- CARD A: PARALLEL 3+1 MEMORY SKILLS + PROCEDURAL SKILLS & PROMPT ROUTER -->
+          <div class="card-panel">
+            <div class="pane-header">
+              <span>⚡ Skill Attive (3+1 Memoria & Procedurali) + Prompt Router</span>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSkillsHub()">🔄 Aggiorna</button>
+            </div>
+            <div class="pane-body">
+              <div style="display:flex; gap:6px; margin-bottom:10px;">
+                <input id="skill-test-input" placeholder="Testa arricchimento prompt (es: 'rifattorizza permessi RBAC e verifica wiki')" style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
+                <button class="btn" onclick="testPromptEnhancer()">Analizza Prompt</button>
+              </div>
+              <pre class="step-detail" id="skill-enhance-view" style="max-height:150px; margin-bottom:12px;">Inserisci una richiesta tecnica sopra per vedere quale livello 3+1 della Wiki, quali Skill e quali Agenti vengono attivati in parallelo.</pre>
+              <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
+                Catalogo Skill (Corsia A: Memoria 3+1 · Corsia B: Procedurali & Apprese)
+              </div>
+              <div id="skills-list-view"></div>
+            </div>
+          </div>
+
+          <!-- CARD B: 3+1 WIKI EXPLORER, SMART MEMORY & PERMISSION GATE -->
+          <div class="card-panel">
+            <div class="pane-header">
+              <span>🧭 Esploratore Wiki 3+1, Memoria & Adaptive Gate</span>
+              <select id="wiki-depth" onchange="navigateWiki(currentWikiPath)" style="padding:2px 6px; font-size:0.72rem;">
+                <option value="light">LIGHT (~50t)</option>
+                <option value="medium" selected>MEDIUM (~250t)</option>
+                <option value="high">HIGH (~1000t)</option>
+                <option value="max">MAX (Raw)</option>
+              </select>
+            </div>
+            <div class="pane-body">
+              <div style="display:flex; gap:6px; margin-bottom:8px;">
+                <input id="wiki-search-input" placeholder="Cerca nei 3+1 livelli della Wiki (FTS5)..." style="flex:1;" onkeydown="if(event.key==='Enter') searchWiki()" />
+                <button class="btn btn-ghost" onclick="searchWiki()">Cerca Wiki</button>
+                <button class="btn btn-ghost" onclick="loadSmartMemory()">🧠 Stato Memoria</button>
+              </div>
+              <div id="wiki-tree" style="margin-bottom:8px; max-height:110px; overflow-y:auto; border:1px solid var(--border); border-radius:7px; padding:4px;"></div>
+              <pre class="step-detail" id="wiki-node-view" style="max-height:150px; margin-bottom:12px;">Seleziona o cerca un documento per ispezionare le sintesi L1 Light, L2 Medium, L3 High e +1 Max.</pre>
+
+              <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
+                🛡️ Adaptive Permission Gate
+              </div>
+              <div style="display:flex; gap:6px; margin-bottom:8px;">
+                <select id="perm-tool">
+                  <option value="bash">bash</option>
+                  <option value="write_file">write_file</option>
+                  <option value="chrome">chrome</option>
+                </select>
+                <input id="perm-cmd" value="pytest tests/" style="flex:1;" />
+                <button class="btn" onclick="evalPerm()">Valuta</button>
+                <button class="btn btn-ghost" onclick="feedbackPerm(true)">👍 Impara</button>
+                <button class="btn btn-danger" onclick="testHardBlock()">Test Block</button>
+              </div>
+              <pre class="step-detail" id="perm-view" style="max-height:100px;">Adaptive Permission Gate pronto.</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PERSISTENT PROMPT & VOICE COMPOSER (ACTIVE ACROSS ALL STAGES) -->
       <div class="composer">
         <div class="composer-row">
           <select id="dispatch-mode">
             <option value="auto">💬 Conversazione & Voce (Crea task solo se richiesto esplicitamente)</option>
-            <option value="agent">🤖 Crea Task Esplicito `pi` (Con Memoria Isolata)</option>
+            <option value="agent">🤖 Apri Nuovo Task Multi-Agente `pi` (Con Sintesi 3+1)</option>
           </select>
           <select id="agent-depth">
-            <option value="light">Contesto Wiki: LIGHT</option>
-            <option value="medium" selected>Contesto Wiki: MEDIUM</option>
-            <option value="high">Contesto Wiki: HIGH</option>
-            <option value="max">Contesto Wiki: MAX (Full File)</option>
+            <option value="light">Memoria 3+1: L1 LIGHT</option>
+            <option value="medium" selected>Memoria 3+1: L2 MEDIUM</option>
+            <option value="high">Memoria 3+1: L3 HIGH</option>
+            <option value="max">Memoria 3+1: +1 MAX (Full)</option>
           </select>
-          <label style="font-size:0.78rem; color:var(--muted); display:flex; align-items:center; gap:4px;">
-            <input type="checkbox" id="chk-speak" checked /> Pronuncia risposta (TTS Ita)
+          <label style="font-size:0.79rem; color:var(--muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
+            <input type="checkbox" id="chk-speak" checked /> Pronuncia risposta (Voce Neurale Ita)
           </label>
         </div>
         <div class="composer-row">
-          <input id="prompt-input" placeholder="Prova: 'procedi cerca il meteo a roma per domani' oppure 'crea un task per analizzare la wiki'..." onkeydown="if(event.key==='Enter') submitComposer()" />
+          <input id="prompt-input" placeholder="Chiedi a Cortical (es: 'procedi cerca il meteo a roma per domani' o 'crea un task per...')" onkeydown="if(event.key==='Enter') submitComposer()" />
           <button class="btn" onclick="submitComposer()">Invia ↵</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- RIGHT PANE: INSPECTOR (MCP GRAPH VISUALIZER / MEMORY / WIKI / PERMISSIONS) -->
-    <div class="pane">
-      <div class="pane-header">
-        <span>Inspector</span>
-        <div class="tabs">
-          <span class="tab active" id="tab-graph" onclick="switchInspector('graph')">🕸️ Grafo MCP</span>
-          <span class="tab" id="tab-skills" onclick="switchInspector('skills')">⚡ Skill & 3+1</span>
-          <span class="tab" id="tab-mem" onclick="switchInspector('mem')">🧠 Memoria</span>
-          <span class="tab" id="tab-wiki" onclick="switchInspector('wiki')">Wiki</span>
-          <span class="tab" id="tab-perm" onclick="switchInspector('perm')">Permessi</span>
-        </div>
-      </div>
-      <div class="pane-body">
-        <!-- Interactive MCP Knowledge Graph Visualizer -->
-        <div id="insp-graph">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <button class="btn btn-ghost" style="padding:4px 9px; font-size:0.74rem;" onclick="loadMcpKnowledgeGraph()">🔄 Aggiorna via MCP (`wiki_get_knowledge_graph`)</button>
-            <span id="graph-stats" style="font-size:0.72rem; font-family:var(--mono); color:var(--accent);"></span>
-          </div>
-          <div class="graph-legend">
-            <span><i class="legend-dot" style="background:#38bdf8;"></i>Dir/Merkle</span>
-            <span><i class="legend-dot" style="background:#94a3b8;"></i>File</span>
-            <span><i class="legend-dot" style="background:#fbbf24;"></i>Task Attivo</span>
-            <span><i class="legend-dot" style="background:#818cf8;"></i>Task Archiviato</span>
-            <span><i class="legend-dot" style="background:#34d399;"></i>Insight Memoria</span>
-          </div>
-          <div class="graph-canvas-wrap">
-            <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 380 350"></svg>
-          </div>
-          <pre class="step-detail" id="graph-view" style="max-height: 190px;">Clicca un nodo nel grafo sopra per ispezionare la traccia MCP.</pre>
-        </div>
-
-        <!-- Parallel 3+1 Memory Synthesis & Learned Skills Hub -->
-        <div id="insp-skills" style="display:none;">
-          <div style="display:flex; gap:6px; margin-bottom:8px;">
-            <input id="skill-test-prompt" placeholder="Testa Prompt Enhancer (es: 'implementa un endpoint FastAPI con wiki')" style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
-            <button class="btn" onclick="testPromptEnhancer()">Arricchisci</button>
-            <button class="btn btn-ghost" onclick="loadSkillsHub()">🔄 Skill</button>
-          </div>
-          <pre class="step-detail" id="skills-view" style="max-height: calc(100vh - 180px);">Caricamento Skill Hub (3+1 Memory Skills + Skill Apprese)...</pre>
-        </div>
-
-        <!-- Smart Memory & Chat Buffer Inspector -->
-        <div id="insp-mem" style="display:none;">
-          <div style="display:flex; gap:6px; margin-bottom:8px;">
-            <button class="btn btn-ghost" onclick="loadSmartMemory()">🔄 Aggiorna Stato Memoria</button>
-          </div>
-          <pre class="step-detail" id="mem-view" style="max-height: calc(100vh - 180px);">Caricamento memoria...</pre>
-        </div>
-
-        <!-- Wiki Inspector -->
-        <div id="insp-wiki" style="display:none;">
-          <div style="display:flex; gap:6px; margin-bottom:8px;">
-            <input id="wiki-search-input" placeholder="Cerca nella Wiki (FTS5)..." style="flex:1;" onkeydown="if(event.key==='Enter') searchWiki()" />
-            <button class="btn btn-ghost" onclick="searchWiki()">Cerca</button>
-          </div>
-          <pre class="step-detail" id="wiki-node-view" style="max-height: calc(100vh - 180px);">Seleziona un file a sinistra per ispezionare le sintesi light/medium/high/max.</pre>
-        </div>
-
-        <!-- Permissions Inspector -->
-        <div id="insp-perm" style="display:none;">
-          <div style="display:flex; gap:6px; margin-bottom:8px;">
-            <select id="perm-tool">
-              <option value="bash">bash</option>
-              <option value="write_file">write_file</option>
-              <option value="chrome">chrome</option>
-            </select>
-            <input id="perm-cmd" value="pytest tests/" style="flex:1;" />
-          </div>
-          <div style="display:flex; gap:6px; margin-bottom:10px;">
-            <button class="btn" onclick="evalPerm()">Valuta</button>
-            <button class="btn btn-ghost" onclick="feedbackPerm(true)">👍 Approva & Impara</button>
-            <button class="btn btn-danger" onclick="testHardBlock()">🛡️ Test rm -rf /</button>
-          </div>
-          <pre class="step-detail" id="perm-view">Adaptive Permission Gate pronto.</pre>
         </div>
       </div>
     </div>
@@ -959,6 +1107,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let lastSpokenAtMs = 0;
     let localTtsShieldUntilMs = 0;
     let activeAbortController = null;
+
+    // Interactive Concept Graph State
+    let cachedGraphData = { nodes: [], edges: [], stats: {} };
+    let currentGraphFilter = 'all';
+    let graphZoom = 1.0;
+    let graphPanX = 0;
+    let graphPanY = 0;
+    let isPanningGraph = false;
+    let panStartX = 0;
+    let panStartY = 0;
+    let draggedNodeId = null;
+    let nodePositions = {};
+
+    function switchMainStage(stage) {
+      ['stream', 'graph', 'brain'].forEach(s => {
+        const view = document.getElementById(`stage-${s}`);
+        const tab = document.getElementById(`main-tab-${s}`);
+        if (view) view.style.display = (s === stage) ? 'flex' : 'none';
+        if (tab) tab.classList.toggle('active', s === stage);
+      });
+      if (stage === 'graph') {
+        loadMcpKnowledgeGraph();
+      } else if (stage === 'brain') {
+        loadSkillsHub();
+        navigateWiki(currentWikiPath);
+      }
+    }
 
     function hasWakeOrBargeInWord(s) {
       return /\\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta)\\b/i.test(s || '');
@@ -981,11 +1156,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         .filter(w => w.length > 1);
     }
 
-    // Client-side Self-Echo Guard: detects if WebSpeech picked up Cortical's own spoken output
     function isSelfEchoClient(candidate) {
       if (!candidate) return false;
       if (hasWakeOrBargeInWord(candidate)) return false;
-      // While Cortical is actively speaking (or in acoustic tail cooldown), any non-wake-word mic input is speaker bleed
       if (isTtsShieldActive()) return true;
       if (!lastSpokenResponseText) return false;
       const elapsedSec = (Date.now() - lastSpokenAtMs) / 1000.0;
@@ -1004,7 +1177,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const r = await fetch('/health');
       const d = await r.json();
       document.getElementById('hw-banner').textContent =
-        `${d.os_name} (${d.arch}) · Tier: ${d.tier} · Voce: Italiana (${d.tts_engine}) · LLM: ${d.active_base_url}`;
+        `${d.os_name} (${d.arch}) · ${d.tier} · ${d.tts_engine} · LLM: ${d.active_base_url}`;
     }
 
     function appendStreamCard(type, metaLeft, metaRight, title, detail) {
@@ -1027,13 +1200,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!text) return;
       if (!fromMic) input.value = '';
 
-      // 1. Self-Echo & Acoustic Shield Check for Microphone Input
       if (fromMic && isSelfEchoClient(text)) {
         document.getElementById('live-transcript').textContent = `🔇 [Eco altoparlante ignorato]`;
         return;
       }
 
-      // 2. Barge-in Abort only when typed manually or when user explicitly says Wake/Stop word
       if (activeAbortController) {
         activeAbortController.abort();
       }
@@ -1051,12 +1222,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const voice = document.getElementById('tts-voice').value;
 
       if (mode === 'agent') {
+        switchMainStage('stream');
         await spawnAgentSession(text, depth, speak);
         return;
       }
 
       if (speak) {
-        // Pre-arm acoustic shield before server starts speaking
         localTtsShieldUntilMs = Date.now() + 4500;
       }
 
@@ -1079,7 +1250,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           lastSpokenResponseText = d.spoken_response;
           lastSpokenAtMs = Date.now();
           if (speak && d.route !== 'stop') {
-            // Keep acoustic shield active for the full duration of the spoken response + 2.2s tail
             const estMs = Math.max(4800, d.spoken_response.length * 82 + 2400);
             localTtsShieldUntilMs = Date.now() + estMs;
           } else {
@@ -1124,8 +1294,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function spawnQuickAgent() {
-      const goal = prompt("Inserisci l'obiettivo per il nuovo Task esplicito pi:", "Analizza la struttura del repository e riassumi i moduli principali");
-      if (goal) spawnAgentSession(goal, document.getElementById('agent-depth').value, true);
+      const goal = prompt("Inserisci l'obiettivo per il nuovo Task esplicito pi:", "Analizza la struttura del repository e riassumi i concetti chiave");
+      if (goal) {
+        switchMainStage('stream');
+        spawnAgentSession(goal, document.getElementById('agent-depth').value, true);
+      }
     }
 
     async function closeAndArchiveTask(event, sessionId) {
@@ -1205,7 +1378,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; gap:4px;">
             <span style="font-size:0.68rem; color:var(--muted); font-family:var(--mono);">
-              Wiki: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
+              3+1: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
             </span>
             <div style="display:flex; gap:4px;">
               ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 6px; font-size:0.67rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')" title="Archivia nei 3+1 livelli e valuta nuova Skill">📦 Archivia</button>` : ''}
@@ -1233,6 +1406,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function selectSession(sid) {
       selectedSessionId = sid;
+      switchMainStage('stream');
       refreshAgents();
     }
 
@@ -1253,7 +1427,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       appendStreamCard('subagent', 'TERMINAL LAUNCHER', d.platform || 'CLI', 'Apertura sessione interattiva `pi`', JSON.stringify(d, null, 2));
     }
 
-    // Continuous Always-On Wake-Word Microphone with Self-Echo Filtering & Audio Ducking
     function toggleAlwaysOnMic() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) {
@@ -1264,15 +1437,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         alwaysOnActive = false;
         if (recognition) recognition.stop();
         document.getElementById('mic-dot').classList.remove('listening');
-        document.getElementById('btn-always-on').textContent = '🎤 Ascolto Continuo: OFF';
+        document.getElementById('btn-always-on').textContent = '🎤 Mic: OFF';
         document.getElementById('live-transcript').textContent = 'Microfono in pausa.';
         return;
       }
 
       alwaysOnActive = true;
       document.getElementById('mic-dot').classList.add('listening');
-      document.getElementById('btn-always-on').textContent = '🟢 Ascolto Attivo (Anti-Echo)';
-      document.getElementById('live-transcript').textContent = 'In ascolto... (ignoro la mia voce, abbasso il volume se parli)';
+      document.getElementById('btn-always-on').textContent = '🟢 Mic Attivo';
+      document.getElementById('live-transcript').textContent = 'In ascolto (Scudo Anti-Eco attivo)...';
 
       recognition = new SR();
       recognition.lang = 'it-IT';
@@ -1292,7 +1465,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             submitComposer(transcript);
           } else {
             interim += transcript + ' ';
-            // Only interrupt ongoing TTS during interim speech if user explicitly says a Wake/Stop word
             if (hasWakeOrBargeInWord(interim)) {
               fetch('/api/voice/duck', {
                 method: 'POST',
@@ -1316,7 +1488,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       recognition.start();
     }
 
-    // Standard MCP Call (`POST /api/mcp`) to render the Interactive SVG Knowledge Graph
+    // =========================================================================
+    // INTERACTIVE CONCEPT KNOWLEDGE GRAPH (MCP `wiki_get_knowledge_graph`)
+    // =========================================================================
     async function loadMcpKnowledgeGraph() {
       const mcpReq = {
         jsonrpc: '2.0',
@@ -1324,7 +1498,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         method: 'tools/call',
         params: {
           name: 'wiki_get_knowledge_graph',
-          arguments: { max_nodes: 45 }
+          arguments: { max_nodes: 60 }
         }
       };
       const r = await fetch('/api/mcp', {
@@ -1334,83 +1508,214 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
       const mcpRes = await r.json();
       const rawText = mcpRes?.result?.content?.[0]?.text || '{}';
-      const graph = JSON.parse(rawText);
-      const stats = graph.stats || {};
-      document.getElementById('graph-stats').textContent =
-        `${stats.node_count || 0} nodi · ${stats.edge_count || 0} archi`;
-      renderKnowledgeGraphSvg(graph);
+      cachedGraphData = JSON.parse(rawText);
+      const stats = cachedGraphData.stats || {};
+      const label = `${stats.concept_count || stats.node_count || 0} concetti · ${stats.edge_count || 0} relazioni`;
+      document.getElementById('sidebar-graph-stats').textContent = label;
+      document.getElementById('nav-graph-count').textContent = `(${stats.node_count || 0})`;
+      computeConceptLayout(cachedGraphData);
+      renderKnowledgeGraphSvg();
     }
 
-    function renderKnowledgeGraphSvg(graph) {
-      const svg = document.getElementById('mcp-graph-svg');
+    function setGraphFilter(filter, el) {
+      currentGraphFilter = filter;
+      document.querySelectorAll('#graph-filter-pills .pill').forEach(p => p.classList.remove('active'));
+      if (el) el.classList.add('active');
+      renderKnowledgeGraphSvg();
+    }
+
+    function zoomGraph(factor) {
+      graphZoom = Math.max(0.45, Math.min(2.6, graphZoom * factor));
+      renderKnowledgeGraphSvg();
+    }
+
+    function resetGraphView() {
+      graphZoom = 1.0;
+      graphPanX = 0;
+      graphPanY = 0;
+      computeConceptLayout(cachedGraphData, true);
+      renderKnowledgeGraphSvg();
+    }
+
+    function computeConceptLayout(graph, forceReset = false) {
       const nodes = graph.nodes || [];
-      const edges = graph.edges || [];
-      if (!nodes.length) {
-        svg.innerHTML = '<text x="190" y="175" fill="#94a3b8" text-anchor="middle" font-size="12">Nessun nodo nel grafo</text>';
-        return;
-      }
+      const W = 920, H = 560, cx = W / 2, cy = H / 2;
+      const primaryConcepts = nodes.filter(n => n.kind === 'concept');
+      const otherNodes = nodes.filter(n => n.kind !== 'hub' && n.kind !== 'concept');
 
-      const W = 380, H = 350, cx = W / 2, cy = H / 2;
-      const posMap = {};
-      const colorMap = {
-        dir: '#38bdf8',
-        file: '#94a3b8',
-        task_active: '#fbbf24',
-        task_archived: '#818cf8',
-        insight: '#34d399'
-      };
-
-      nodes.forEach((n, idx) => {
-        if (n.id === 'subtree:/' || n.id === 'node:/') {
-          posMap[n.id] = { x: cx, y: cy };
+      nodes.forEach((n) => {
+        if (!forceReset && nodePositions[n.id]) return;
+        if (n.kind === 'hub') {
+          nodePositions[n.id] = { x: cx, y: cy };
           return;
         }
-        const nType = n.type || n.kind || 'file';
-        const ring = nType === 'dir' ? 75 : (nType.startsWith('task_') ? 128 : 148);
-        const angle = (2 * Math.PI * idx) / Math.max(1, nodes.length - 1);
-        posMap[n.id] = {
+        const pIdx = primaryConcepts.findIndex(c => c.id === n.id);
+        if (pIdx !== -1) {
+          const ring = (pIdx % 2 === 0) ? 155 : 210;
+          const angle = (2 * Math.PI * pIdx) / Math.max(1, primaryConcepts.length) - Math.PI / 2;
+          nodePositions[n.id] = {
+            x: Math.round(cx + ring * Math.cos(angle)),
+            y: Math.round(cy + ring * Math.sin(angle))
+          };
+          return;
+        }
+        const oIdx = Math.max(0, otherNodes.findIndex(o => o.id === n.id));
+        const ring = 250;
+        const angle = (2 * Math.PI * oIdx) / Math.max(1, otherNodes.length) + 0.35;
+        nodePositions[n.id] = {
           x: Math.round(cx + ring * Math.cos(angle)),
           y: Math.round(cy + ring * Math.sin(angle))
         };
       });
+    }
 
-      let html = '';
+    function nodeMatchesFilter(n, q) {
+      if (q) {
+        const hay = `${n.label || ''} ${n.summary || ''} ${n.category || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (currentGraphFilter === 'all') return true;
+      if (n.kind === 'hub') return true;
+      if (currentGraphFilter === 'concept') return n.kind === 'concept';
+      if (currentGraphFilter === 'insight') return n.kind === 'insight';
+      if (currentGraphFilter === 'skill') return n.kind === 'skill';
+      if (currentGraphFilter === 'task') return (n.kind || '').startsWith('task_');
+      return n.category === currentGraphFilter;
+    }
+
+    function renderKnowledgeGraphSvg() {
+      const svg = document.getElementById('mcp-graph-svg');
+      if (!svg) return;
+      const q = (document.getElementById('graph-search-input')?.value || '').trim().toLowerCase();
+      const allNodes = cachedGraphData.nodes || [];
+      const allEdges = cachedGraphData.edges || [];
+      const nodes = allNodes.filter(n => nodeMatchesFilter(n, q));
+      const visibleIds = new Set(nodes.map(n => n.id));
+      const edges = allEdges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target));
+
+      if (!nodes.length) {
+        svg.innerHTML = '<text x="460" y="280" fill="#94a3b8" text-anchor="middle" font-size="14">Nessun concetto corrispondente al filtro selezionato</text>';
+        return;
+      }
+
+      const colorByKind = {
+        hub: '#38bdf8',
+        concept: '#c084fc',
+        insight: '#34d399',
+        skill: '#fbbf24',
+        task_active: '#fbbf24',
+        task_archived: '#818cf8'
+      };
+      const catColor = {
+        memoria: '#38bdf8',
+        architettura: '#c084fc',
+        agenti: '#fbbf24',
+        voce: '#34d399',
+        sicurezza: '#f87171'
+      };
+
+      let html = `<g transform="translate(${graphPanX}, ${graphPanY}) scale(${graphZoom})">`;
+
+      // Render semantic edges with relation labels
       edges.forEach(e => {
-        const s = posMap[e.source];
-        const t = posMap[e.target];
+        const s = nodePositions[e.source];
+        const t = nodePositions[e.target];
         if (!s || !t) return;
-        const stroke = e.kind === 'macro' ? '#fbbf24' : '#233253';
-        const dash = e.kind === 'macro' ? 'stroke-dasharray="4,3"' : '';
-        html += `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${stroke}" stroke-width="1.3" ${dash} opacity="0.75" />`;
+        const mx = (s.x + t.x) / 2;
+        const my = (s.y + t.y) / 2;
+        const stroke = e.kind === 'macro' ? '#fbbf24' : (e.kind === 'insight_link' ? '#34d399' : '#2b3f66');
+        const dash = e.kind === 'macro' ? 'stroke-dasharray="5,4"' : '';
+        html += `
+          <line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${stroke}" stroke-width="1.8" ${dash} opacity="0.82" />
+          <text x="${mx}" y="${my - 4}" fill="#64748b" font-size="9.5" font-family="monospace" text-anchor="middle">${e.relation || ''}</text>
+        `;
       });
 
+      // Render interactive concept nodes (pill/circle badges)
       nodes.forEach(n => {
-        const p = posMap[n.id];
+        const p = nodePositions[n.id];
         if (!p) return;
-        const col = colorMap[n.type] || '#38bdf8';
-        const r = n.id === 'node:/' ? 10 : (n.type.startsWith('task_') ? 8 : 6);
-        const safeJson = encodeURIComponent(JSON.stringify(n));
-        const shortLabel = (n.label || '').slice(0, 16);
+        const col = n.kind === 'concept' ? (catColor[n.category] || '#c084fc') : (colorByKind[n.kind] || '#38bdf8');
+        const r = n.kind === 'hub' ? 18 : (n.kind === 'concept' ? 13 : 10);
+        const safeId = n.id.replace(/'/g, "\\\\'");
+        const label = n.label || n.key;
         html += `
-          <g style="cursor:pointer;" onclick="inspectGraphNode('${safeJson}')">
-            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" stroke="#090d16" stroke-width="2" />
-            <text x="${p.x}" y="${p.y + r + 10}" fill="#cbd5e1" font-size="9" font-family="monospace" text-anchor="middle">${shortLabel}</text>
+          <g style="cursor:pointer;" onmousedown="startDragNode(event, '${safeId}')" onclick="inspectConceptById('${safeId}')">
+            <circle cx="${p.x}" cy="${p.y}" r="${r + 5}" fill="${col}" opacity="0.14" />
+            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" stroke="#070b14" stroke-width="2.5" />
+            <rect x="${p.x - Math.min(115, label.length * 3.8 + 10)}" y="${p.y + r + 5}" width="${Math.min(230, label.length * 7.6 + 20)}" height="19" rx="5" fill="rgba(7,11,20,0.88)" stroke="rgba(56,189,248,0.25)" />
+            <text x="${p.x}" y="${p.y + r + 18}" fill="#f1f5f9" font-size="11" font-weight="600" text-anchor="middle">${label}</text>
           </g>
         `;
       });
 
+      html += `</g>`;
       svg.innerHTML = html;
     }
 
-    function inspectGraphNode(encoded) {
-      const node = JSON.parse(decodeURIComponent(encoded));
-      document.getElementById('graph-view').textContent = JSON.stringify(node, null, 2);
+    function startDragNode(event, nodeId) {
+      event.stopPropagation();
+      draggedNodeId = nodeId;
+    }
+
+    // Setup pan & node drag on the central SVG canvas
+    (function initGraphCanvasInteractions() {
+      window.addEventListener('DOMContentLoaded', () => {
+        const wrap = document.getElementById('graph-canvas-container');
+        const svg = document.getElementById('mcp-graph-svg');
+        if (!wrap || !svg) return;
+
+        wrap.addEventListener('mousedown', (e) => {
+          if (draggedNodeId) return;
+          isPanningGraph = true;
+          panStartX = e.clientX - graphPanX;
+          panStartY = e.clientY - graphPanY;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+          if (draggedNodeId && nodePositions[draggedNodeId]) {
+            const rect = svg.getBoundingClientRect();
+            const svgX = ((e.clientX - rect.left) * (920 / rect.width) - graphPanX) / graphZoom;
+            const svgY = ((e.clientY - rect.top) * (560 / rect.height) - graphPanY) / graphZoom;
+            nodePositions[draggedNodeId] = { x: Math.round(svgX), y: Math.round(svgY) };
+            renderKnowledgeGraphSvg();
+          } else if (isPanningGraph) {
+            graphPanX = e.clientX - panStartX;
+            graphPanY = e.clientY - panStartY;
+            renderKnowledgeGraphSvg();
+          }
+        });
+
+        window.addEventListener('mouseup', () => {
+          draggedNodeId = null;
+          isPanningGraph = false;
+        });
+      });
+    })();
+
+    function inspectConceptById(nodeId) {
+      const node = (cachedGraphData.nodes || []).find(n => n.id === nodeId);
+      if (!node) return;
+      document.getElementById('cd-badge').textContent = `${(node.kind || 'concept').toUpperCase()} · ${(node.category || 'dominio').toUpperCase()}`;
+      document.getElementById('cd-title').textContent = node.label || node.key;
+      document.getElementById('cd-summary-l1').textContent = node.summary || 'Nessuna sintesi L1 disponibile.';
+      document.getElementById('cd-summary-l2').textContent = node.summary_medium || node.summary || 'Nessun dettaglio L2 aggiuntivo.';
+
+      const connected = (cachedGraphData.edges || [])
+        .filter(e => e.source === node.id || e.target === node.id)
+        .map(e => {
+          const otherId = e.source === node.id ? e.target : e.source;
+          const otherNode = (cachedGraphData.nodes || []).find(n => n.id === otherId);
+          return `• [${e.relation}] → ${otherNode ? otherNode.label : otherId}`;
+        });
+      document.getElementById('cd-connections').textContent = connected.length ? connected.join('\\n') : 'Nessuna connessione diretta.';
+      document.getElementById('cd-sources').textContent = (node.sources || ['/']).join(', ');
     }
 
     async function loadSmartMemory() {
       const r = await fetch('/api/memory/state');
       const d = await r.json();
-      document.getElementById('mem-view').textContent = JSON.stringify(d, null, 2);
+      document.getElementById('wiki-node-view').textContent = JSON.stringify(d, null, 2);
     }
 
     async function navigateWiki(path = '/') {
@@ -1443,30 +1748,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('wiki-node-view').textContent = JSON.stringify(await r.json(), null, 2);
     }
 
-    function switchInspector(tab) {
-      ['graph', 'skills', 'mem', 'wiki', 'perm'].forEach(t => {
-        const el = document.getElementById(`insp-${t}`);
-        const tb = document.getElementById(`tab-${t}`);
-        if (el) el.style.display = (t === tab) ? 'block' : 'none';
-        if (tb) tb.classList.toggle('active', t === tab);
-      });
-      if (tab === 'graph') loadMcpKnowledgeGraph();
-      if (tab === 'skills') loadSkillsHub();
-      if (tab === 'mem') loadSmartMemory();
-    }
-
     async function loadSkillsHub() {
       const r = await fetch('/api/skills/state');
       const d = await r.json();
       const box = document.getElementById('skills-list-view');
       const skills = d.skills || [];
       box.innerHTML = skills.map(s => `
-        <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:6px; padding:6px 8px; margin-bottom:5px; font-size:0.75rem;">
+        <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:0.77rem;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
-            <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--ok)' : '#f8fafc'};">${s.name}</b>
-            <span class="tag">${s.category}</span>
+            <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--emerald)' : '#f8fafc'};">${s.name}</b>
+            <span class="status-pill" style="background:rgba(255,255,255,0.06); color:var(--muted);">${s.category}</span>
           </div>
-          <div style="color:var(--muted); margin-top:2px;">${s.description}</div>
+          <div style="color:var(--muted); margin-top:3px;">${s.description}</div>
         </div>
       `).join('');
     }
@@ -1481,10 +1774,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
       const d = await r.json();
       document.getElementById('skill-enhance-view').textContent =
-        `[Mode]: ${d.mode} | [Depth 3+1]: ${d.recommended_depth}\n` +
-        `[Memory Skill]: ${d.memory_tier_skill}\n` +
-        `[Procedural Skills]: ${(d.selected_procedural_skills || []).join(', ')}\n` +
-        `[Team Roster]: ${(d.team_roster || []).map(x => x.id).join(' -> ')}\n\n` +
+        `[Mode]: ${d.mode} | [Livello 3+1]: ${d.recommended_depth}\\n` +
+        `[Memory Skill]: ${d.memory_tier_skill}\\n` +
+        `[Procedural Skills]: ${(d.selected_procedural_skills || []).join(', ')}\\n` +
+        `[Team Roster]: ${(d.team_roster || []).map(x => x.id).join(' -> ')}\\n\\n` +
         (d.context_injection || '(Conversazione casual: nessun overhead iniettato)');
     }
 
@@ -1656,7 +1949,7 @@ class CorticalLiveService:
             ag_res = self.agent_mgr.clear_archived_sessions()
             return (HTTPStatus.OK, {**mem_res, **ag_res})
 
-        # Skills Hub & Prompt Enhancer Endpoints (mcp-skill-hub evolution)
+        # Adaptive Skills & Prompt Router Endpoints
         if method == "GET" and path == "/api/skills/state":
             return (
                 HTTPStatus.OK,

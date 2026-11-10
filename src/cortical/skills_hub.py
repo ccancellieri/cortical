@@ -1,21 +1,18 @@
-"""Cortical Skills & Prompt Intelligence Hub — Lessons Learned from `mcp-skill-hub`.
+"""Cortical Adaptive Skills & Prompt Intelligence Router.
 
-Why `mcp-skill-hub` failed in prior A/B evaluations (and how Cortical fixes it):
-1. `mcp-skill-hub` truncated documents to lossy 1,500-token / 4,077-char snippets to "save tokens",
-   forcing the LLM to distrust the preview and re-read all files from scratch (+20.7% token overhead
-   and lower 11/32 quality).
-   -> FIX: Cortical never injects arbitrary lossy character cuts. It uses the deterministic
-      3+1 Tier Wiki Memory (`light` L1, `medium` L2, `high` L3, `max` Full) in parallel with
-      complete procedural Skill playbooks.
-2. `mcp-skill-hub` injected only 1-line skill descriptions without actionable procedures or tool bindings.
-   -> FIX: Cortical's `SkillAndToolRouter` matches bilingual (IT/EN) user intent, loads the full
-      actionable steps of the top matching skills, binds the exact MCP/CLI tools to call, and
-      resolves a Multi-Agent Team Roster (`arch_analyst`, `code_implementer`, `reviewer`, `web_researcher`).
-3. `mcp-skill-hub` conflated Wiki memory with generated skills.
-   -> FIX: Cortical keeps two explicit parallel lanes:
-      - Lane A (3+1 Tier Discussion & Knowledge Memory in `CorticalWikiDB` + 3+1 Memory Synthesis Skills)
-      - Lane B (Learned Procedural Skills in `.pi/skills/` + Task-Close Skill Compiler that evaluates
-        completed tasks and generates reusable `SKILL.md` files when a durable pattern is learned).
+Architectural Principles:
+1. No Lossy Character Truncation:
+   Cortical never injects arbitrary character cuts. It uses the deterministic
+   3+1 Tier Wiki Memory (`light` L1, `medium` L2, `high` L3, `max` Full) in parallel with
+   complete procedural Skill playbooks.
+2. Full Playbook & Tool Binding:
+   Matches bilingual (IT/EN) user intent, loads the full actionable steps of the top matching
+   skills, binds the exact MCP/CLI tools to call, and resolves a Multi-Agent Team Roster
+   (`arch_analyst`, `code_implementer`, `reviewer`, `web_researcher`).
+3. Parallel Lanes (3+1 Memory vs Learned Procedural Skills):
+   - Lane A: 3+1 Tier Discussion & Knowledge Memory in `CorticalWikiDB` + 3+1 Memory Synthesis Skills.
+   - Lane B: Learned Procedural Skills in `.pi/skills/` + Task-Close Skill Compiler that evaluates
+     completed tasks and generates reusable `SKILL.md` files when a durable pattern is learned.
 """
 
 from __future__ import annotations
@@ -45,7 +42,7 @@ STOP_WORDS = frozenset(
     }
 )
 
-# Bilingual IT -> EN concept bridge (expanded from mcp-skill-hub's skill_retrieval.py)
+# Bilingual IT -> EN concept bridge for deterministic skill & tool matching
 ITALIAN_CONCEPT_BRIDGE = {
     "architettura": "architecture",
     "architetturale": "architecture",
@@ -86,7 +83,7 @@ ITALIAN_CONCEPT_BRIDGE = {
     "vocale": "voice",
 }
 
-# Specialized Multi-Agent Team Policy (adapted & simplified from mcp-skill-hub/src/skill_hub/team/policy.py)
+# Specialized Multi-Agent Team Policy
 MULTIAGENT_ROLES: dict[str, dict[str, Any]] = {
     "arch_analyst": {
         "name": "Architecture & Memory Analyst",
@@ -297,7 +294,7 @@ class CorticalSkillHub:
                 "description: Orchestratore Multi-Agente locale per pi e Cortical. Coordina Analyst, Implementer e Reviewer solo quando l'utente apre un task esplicito, salvando la discussione nei 3+1 livelli della Wiki e generando nuove skill.\n"
                 "---\n\n"
                 "# Cortical Multi-Agent Orchestrator\n\n"
-                "## Regole Fondamentali (Lezioni da `mcp-skill-hub` + Karpathy Guidelines)\n"
+                "## Regole Fondamentali (Karpathy Guidelines & Cortical 3+1)\n"
                 "1. **Zero Task Automatici:** Non aprire un task per domande conversazionali o rapide. Apri un task solo su richiesta esplicita (`/task <obiettivo>` o `'crea un task...'`).\n"
                 "2. **Niente Tagli Lossy:** Usa i livelli `light` -> `medium` -> `high` -> `max` della Wiki MCP invece di troncare i file a metà.\n"
                 "3. **Flusso Multi-Agente in 3 Fasi:**\n"

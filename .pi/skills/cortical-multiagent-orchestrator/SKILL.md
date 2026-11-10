@@ -5,7 +5,7 @@ description: Orchestratore Multi-Agente locale per pi e Cortical. Coordina Analy
 
 # Cortical Multi-Agent Orchestrator
 
-## Regole Fondamentali (Lezioni da `mcp-skill-hub` + Karpathy Guidelines)
+## Regole Fondamentali (Karpathy Guidelines & Cortical 3+1)
 1. **Zero Task Automatici:** Non aprire un task per domande conversazionali o rapide. Apri un task solo su richiesta esplicita (`/task <obiettivo>` o `'crea un task...'`).
 2. **Niente Tagli Lossy:** Usa i livelli `light` -> `medium` -> `high` -> `max` della Wiki MCP invece di troncare i file a metà.
 3. **Flusso Multi-Agente in 3 Fasi:**

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -508,52 +509,201 @@ class CorticalWikiDB:
         ctx: AccessContext,
         max_nodes: int = 60,
     ) -> dict[str, Any]:
-        """Builds the unified Knowledge Graph (Merkle roots/files + Tasks + Curated Insights + Edges)."""
+        """Builds a Semantic Concept Knowledge Graph (Concepts, Insights, Skills & Tasks — NOT raw file listings)."""
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        concept_by_slug: dict[str, dict[str, Any]] = {}
+        path_to_primary_concept: dict[str, str] = {}
+
+        def _slugify(text: str) -> str:
+            s = re.sub(r"[^a-z0-9àèéìòù]+", "-", text.lower()).strip("-")
+            return s[:42] or "concetto"
+
+        def _infer_category(label: str, body: str) -> str:
+            low = f"{label} {body}".lower()
+            if any(w in low for w in ("rbac", "acl", "permission", "permess", "security", "sicurezza", "guardrail")):
+                return "sicurezza"
+            if any(w in low for w in ("merkle", "memory", "memoria", "wiki", "3+1", "tier", "sqlite", "fts")):
+                return "memoria"
+            if any(w in low for w in ("voice", "voce", "tts", "audio", "speech", "echo", "barge")):
+                return "voce"
+            if any(w in low for w in ("agent", "multi-agent", "subagent", "orchestr", "pi", "mcp", "skill")):
+                return "agenti"
+            return "architettura"
+
+        # 0. Root Semantic Hub
+        hub_id = "concept:cortical-second-brain"
+        seen_ids.add(hub_id)
+        nodes.append(
+            {
+                "id": hub_id,
+                "key": "cortical-second-brain",
+                "label": "Cortical Second Brain",
+                "kind": "hub",
+                "category": "memoria",
+                "summary": "Nucleo semantico 3+1 livelli (Light, Medium, High, Max) con Grafo dei Concetti, Voce Dual-Path e Orchestratore Multi-Agente.",
+                "summary_medium": "Architettura cognitiva locale che separa la memoria strutturata a 3+1 livelli dalle capacità procedurali (Skill) e collega i concetti chiave estratti dai compiti svolti.",
+                "sources": ["/"],
+            }
+        )
 
         with self._connect() as conn:
-            # 1. Merkle nodes (prioritize directories and top-level files)
+            # 1. Extract Semantic Concepts from accessible Wiki knowledge (excluding raw directory listings)
             m_rows = conn.execute(
-                """SELECT path, parent_path, node_type, summary_light, subtree_hash
+                """SELECT path, summary_light, summary_medium, summary_high, raw_content
                    FROM merkle_nodes
-                   WHERE tenant_id = ? AND workspace_id = ?
-                   ORDER BY CASE WHEN node_type = 'dir' THEN 0 ELSE 1 END, LENGTH(path) ASC
+                   WHERE tenant_id = ? AND workspace_id = ? AND node_type = 'file'
+                   ORDER BY LENGTH(path) ASC
                    LIMIT ?""",
                 (ctx.tenant_id, ctx.workspace_id, max_nodes),
             ).fetchall()
+
             for r in m_rows:
-                if not self.check_access(ctx, r["path"], write=False):
+                doc_path = str(r["path"])
+                if not self.check_access(ctx, doc_path, write=False):
                     continue
-                nid = f"subtree:{r['path']}"
-                seen_ids.add(nid)
-                nodes.append(
-                    {
-                        "id": nid,
-                        "key": r["path"],
-                        "label": r["path"] if r["path"] == "/" else r["path"].split("/")[-1],
-                        "kind": "dir" if r["node_type"] == "dir" else "file",
-                        "summary": r["summary_light"],
-                        "hash": r["subtree_hash"][:10],
+                raw = str(r["raw_content"] or r["summary_high"] or r["summary_medium"] or "")
+                headings = [
+                    m.group(2).strip()
+                    for m in re.finditer(r"^(#{1,3})\s+(.+)$", raw, flags=re.MULTILINE)
+                    if len(m.group(2).strip()) >= 3
+                ]
+                bold_concepts = [
+                    m.group(1).strip()
+                    for m in re.finditer(r"\*\*([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9\s\-/+]{3,34})\*\*", raw)
+                ]
+                extracted_titles: list[str] = []
+                for h in headings + bold_concepts:
+                    clean_h = re.sub(r"[`*_#]+", "", h).strip(" :-–—")
+                    if clean_h and clean_h.lower() not in {"indice", "note", "esempio", "todo"}:
+                        if clean_h not in extracted_titles:
+                            extracted_titles.append(clean_h)
+
+                if not extracted_titles:
+                    stem = Path(doc_path).stem.replace("_", " ").replace("-", " ").title()
+                    extracted_titles = [stem or "Concetto Dominio"]
+
+                primary_title = extracted_titles[0]
+                primary_slug = _slugify(primary_title)
+                primary_id = f"concept:{primary_slug}"
+                path_to_primary_concept[doc_path] = primary_id
+
+                if primary_id not in concept_by_slug:
+                    cat = _infer_category(primary_title, raw)
+                    c_node = {
+                        "id": primary_id,
+                        "key": primary_slug,
+                        "label": primary_title[:32],
+                        "kind": "concept",
+                        "category": cat,
+                        "summary": str(r["summary_light"] or primary_title)[:220],
+                        "summary_medium": str(r["summary_medium"] or r["summary_light"] or "")[:500],
+                        "summary_high": str(r["summary_high"] or "")[:1000],
+                        "sources": [doc_path],
                     }
-                )
-                if r["parent_path"]:
-                    parent_id = f"subtree:{r['parent_path']}"
+                    concept_by_slug[primary_id] = c_node
+                    seen_ids.add(primary_id)
+                    nodes.append(c_node)
                     edges.append(
                         {
-                            "source": parent_id,
-                            "target": nid,
-                            "relation": "contains",
-                            "kind": "merkle",
+                            "source": hub_id,
+                            "target": primary_id,
+                            "relation": "pilastro",
+                            "kind": "concept_link",
+                        }
+                    )
+                else:
+                    if doc_path not in concept_by_slug[primary_id]["sources"]:
+                        concept_by_slug[primary_id]["sources"].append(doc_path)
+
+                # Extract up to 3 sub-concepts per document and link them to the primary concept
+                for sub_title in extracted_titles[1:4]:
+                    sub_slug = _slugify(sub_title)
+                    sub_id = f"concept:{sub_slug}"
+                    if sub_id == primary_id or len(nodes) >= max_nodes:
+                        continue
+                    if sub_id not in concept_by_slug:
+                        cat = _infer_category(sub_title, raw)
+                        sub_node = {
+                            "id": sub_id,
+                            "key": sub_slug,
+                            "label": sub_title[:32],
+                            "kind": "concept",
+                            "category": cat,
+                            "summary": f"Concetto correlato a '{primary_title}': {str(r['summary_light'])[:160]}",
+                            "summary_medium": str(r["summary_medium"] or r["summary_light"] or "")[:450],
+                            "sources": [doc_path],
+                        }
+                        concept_by_slug[sub_id] = sub_node
+                        seen_ids.add(sub_id)
+                        nodes.append(sub_node)
+                    edges.append(
+                        {
+                            "source": primary_id,
+                            "target": sub_id,
+                            "relation": "include",
+                            "kind": "concept_link",
                         }
                     )
 
-            # 2. Task episodes (active & archived traces)
+            # 2. If the Wiki has very few documents yet, seed core architectural concepts so the graph is immediately rich
+            default_core_concepts = [
+                (
+                    "memoria-3plus1-merkle",
+                    "Memoria 3+1 Livelli",
+                    "memoria",
+                    "Sintesi gerarchica deterministica: L1 Light (~50 tok), L2 Medium (~250 tok), L3 High (~1000 tok), +1 Max integrale.",
+                ),
+                (
+                    "orchestratore-multi-agente",
+                    "Orchestratore Multi-Agente",
+                    "agenti",
+                    "Coordinamento su richiesta tra Analyst, Implementer e Reviewer con isolamento della memoria di task.",
+                ),
+                (
+                    "voce-neurale-anti-eco",
+                    "Voce Neurale & Scudo Anti-Eco",
+                    "voce",
+                    "Sintesi vocale espressiva italiana con isolamento dell'eco degli altoparlanti e barge-in tramite wake-word.",
+                ),
+                (
+                    "adaptive-permission-gate",
+                    "Adaptive Permission Gate",
+                    "sicurezza",
+                    "Guardrail deterministici contro comandi distruttivi e apprendimento progressivo dei pattern approvati.",
+                ),
+            ]
+            for slug, label, cat, desc in default_core_concepts:
+                cid = f"concept:{slug}"
+                if cid not in seen_ids and len(nodes) < max_nodes:
+                    seen_ids.add(cid)
+                    c_node = {
+                        "id": cid,
+                        "key": slug,
+                        "label": label,
+                        "kind": "concept",
+                        "category": cat,
+                        "summary": desc,
+                        "summary_medium": desc,
+                        "sources": ["/"],
+                    }
+                    concept_by_slug[cid] = c_node
+                    nodes.append(c_node)
+                    edges.append(
+                        {
+                            "source": hub_id,
+                            "target": cid,
+                            "relation": "pilastro",
+                            "kind": "concept_link",
+                        }
+                    )
+
+            # 3. Task Episodes (active & archived traces connected to concepts)
             ep_rows = conn.execute(
                 """SELECT * FROM task_episodes
                    WHERE tenant_id = ? AND workspace_id = ?
-                   ORDER BY created_at DESC LIMIT 25""",
+                   ORDER BY created_at DESC LIMIT 18""",
                 (ctx.tenant_id, ctx.workspace_id),
             ).fetchall()
             for ep in ep_rows:
@@ -562,18 +712,44 @@ class CorticalWikiDB:
                 seen_ids.add(nid)
                 state = ep_dict.get("lifecycle_state", ep_dict.get("outcome_status", "active"))
                 trace = ep_dict.get("archived_trace") or ep_dict.get("learned_summary", "")
+                cat = _infer_category(ep_dict["title"], f"{ep_dict.get('goal', '')} {trace}")
                 nodes.append(
                     {
                         "id": nid,
                         "key": ep_dict["episode_id"],
-                        "label": ep_dict["title"][:28],
+                        "label": ep_dict["title"][:30],
                         "kind": "task_archived" if state == "archived" else "task_active",
+                        "category": cat,
                         "state": state,
-                        "summary": trace[:180],
+                        "summary": trace[:220] or ep_dict.get("goal", ""),
+                        "sources": [f"task:{ep_dict['episode_id']}"],
                     }
                 )
+                # Connect task episode to matching category concept or hub
+                linked = False
+                for cid, cnode in concept_by_slug.items():
+                    if cnode.get("category") == cat:
+                        edges.append(
+                            {
+                                "source": nid,
+                                "target": cid,
+                                "relation": "alimenta",
+                                "kind": "macro",
+                            }
+                        )
+                        linked = True
+                        break
+                if not linked:
+                    edges.append(
+                        {
+                            "source": nid,
+                            "target": hub_id,
+                            "relation": "alimenta",
+                            "kind": "macro",
+                        }
+                    )
 
-            # 3. Curated Memory Insights (if table initialized)
+            # 4. Curated Memory Insights (connected to concepts)
             has_insights = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_insights'"
             ).fetchone()
@@ -581,23 +757,74 @@ class CorticalWikiDB:
                 ins_rows = conn.execute(
                     """SELECT * FROM memory_insights
                        WHERE tenant_id = ? AND workspace_id = ?
-                       ORDER BY created_at DESC LIMIT 20""",
+                       ORDER BY created_at DESC LIMIT 15""",
                     (ctx.tenant_id, ctx.workspace_id),
                 ).fetchall()
                 for ins in ins_rows:
-                    nid = f"episode:{ins['insight_id']}"
+                    nid = f"insight:{ins['insight_id']}"
                     seen_ids.add(nid)
+                    cat = _infer_category(ins["category"], ins["insight_text"])
                     nodes.append(
                         {
                             "id": nid,
                             "key": ins["insight_id"],
-                            "label": f"💡 {ins['category']}",
+                            "label": f"💡 {ins['category'][:24]}",
                             "kind": "insight",
+                            "category": cat,
                             "summary": ins["insight_text"],
+                            "sources": ["conversazione"],
+                        }
+                    )
+                    target_cid = next(
+                        (cid for cid, cn in concept_by_slug.items() if cn.get("category") == cat),
+                        hub_id,
+                    )
+                    edges.append(
+                        {
+                            "source": nid,
+                            "target": target_cid,
+                            "relation": "arricchisce",
+                            "kind": "insight_link",
                         }
                     )
 
-            # 4. High-level Macro-Graph edges
+            # 5. Learned Skills (connected to concepts)
+            has_learned = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='learned_skills_registry'"
+            ).fetchone()
+            if has_learned:
+                sk_rows = conn.execute(
+                    """SELECT * FROM learned_skills_registry
+                       WHERE tenant_id = ? AND workspace_id = ?
+                       ORDER BY created_at DESC LIMIT 12""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+                for sk in sk_rows:
+                    nid = f"skill:{sk['skill_id']}"
+                    seen_ids.add(nid)
+                    cat = _infer_category(sk["name"], sk["description"])
+                    nodes.append(
+                        {
+                            "id": nid,
+                            "key": sk["skill_id"],
+                            "label": f"⚡ {sk['name'][:26]}",
+                            "kind": "skill",
+                            "category": cat,
+                            "summary": sk["description"],
+                            "sources": [sk["skill_path"]],
+                        }
+                    )
+                    src_ep = f"episode:{sk['source_episode_id']}"
+                    edges.append(
+                        {
+                            "source": src_ep if src_ep in seen_ids else hub_id,
+                            "target": nid,
+                            "relation": "genera_skill",
+                            "kind": "skill_link",
+                        }
+                    )
+
+            # 6. High-level Macro-Graph edges (mapped from file subtrees to their primary concept)
             e_rows = conn.execute(
                 """SELECT * FROM macro_edges
                    WHERE tenant_id = ? AND workspace_id = ?
@@ -606,8 +833,12 @@ class CorticalWikiDB:
             ).fetchall()
             for ed in e_rows:
                 src = f"{ed['source_type']}:{ed['source_id']}"
-                dst = f"{ed['target_type']}:{ed['target_id']}"
-                if src in seen_ids and dst in seen_ids:
+                dst = (
+                    path_to_primary_concept.get(ed["target_id"], hub_id)
+                    if ed["target_type"] == "subtree"
+                    else f"{ed['target_type']}:{ed['target_id']}"
+                )
+                if src in seen_ids and dst in seen_ids and src != dst:
                     edges.append(
                         {
                             "source": src,
@@ -618,7 +849,7 @@ class CorticalWikiDB:
                     )
 
         for n in nodes:
-            n.setdefault("type", n.get("kind", "file"))
+            n.setdefault("type", n.get("kind", "concept"))
 
         return {
             "nodes": nodes,
@@ -626,5 +857,6 @@ class CorticalWikiDB:
             "stats": {
                 "node_count": len(nodes),
                 "edge_count": len(edges),
+                "concept_count": sum(1 for n in nodes if n.get("kind") in {"hub", "concept"}),
             },
         }
