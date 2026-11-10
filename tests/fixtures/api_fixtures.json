@@ -1,0 +1,53 @@
+{
+  "nli_decisions": {
+    "Cortical uses a 4-tier deterministic Merkle tree with light, medium, high, and max levels.": {
+      "label": "entailment",
+      "confidence": 0.96
+    },
+    "Cortical requires a 100GB cloud GPU cluster to index markdown files.": {
+      "label": "contradiction",
+      "confidence": 0.98
+    }
+  },
+  "reflex_responses": {
+    "che ore sono": "Sono le 18:10, tutti i sistemi locali sono operativi.",
+    "stato memoria": "La Wiki Merkle è sincronizzata e il server locale risponde in 0.8 secondi."
+  },
+  "hardware_profiles": {
+    "linux_laptop_mx250": {
+      "os_name": "Linux",
+      "arch": "x86_64",
+      "cpu_brand": "Intel(R) Core(TM) i7-10510U CPU @ 1.80GHz",
+      "cpu_cores": 8,
+      "ram_total_gb": 16.0,
+      "gpu_vendor": "nvidia_cuda",
+      "gpu_name": "NVIDIA GeForce MX250",
+      "vram_gb": 4.0,
+      "unified_memory": false,
+      "discovered_endpoints": {
+        "llama_server_8080": "http://127.0.0.1:8080/v1",
+        "whisper_server_8081": "http://127.0.0.1:8081/inference"
+      },
+      "installed_tools": {
+        "llama-server": "/usr/local/bin/llama-server",
+        "whisper-server": "/usr/local/bin/whisper-server"
+      }
+    },
+    "mac_m2_pro_16gb": {
+      "os_name": "Darwin",
+      "arch": "arm64",
+      "cpu_brand": "Apple M2 Pro",
+      "cpu_cores": 12,
+      "ram_total_gb": 16.0,
+      "gpu_vendor": "apple_metal",
+      "gpu_name": "Apple M2 Pro Metal GPU",
+      "vram_gb": 11.5,
+      "unified_memory": true,
+      "discovered_endpoints": {},
+      "installed_tools": {
+        "pi": "/opt/homebrew/bin/pi",
+        "chrome-devtools-mcp": "/opt/homebrew/bin/chrome-devtools-mcp"
+      }
+    }
+  }
+}

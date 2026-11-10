@@ -1,0 +1,13 @@
+{
+  "name": "cortical-pi-harness",
+  "version": "0.1.0",
+  "description": "Cortical Agentic Harness, Second Brain MCP, Adaptive Permission Gate & Voice Engine for pi",
+  "license": "Apache-2.0",
+  "author": "Carlo Cancellieri <ccancellieri@hotmail.com> (https://github.com/ccancellieri)",
+  "type": "module",
+  "scripts": {
+    "setup": "bash ./scripts/setup.sh",
+    "doctor": "python3 -m cortical.cli doctor",
+    "test": ".venv/bin/python -m unittest discover -s tests -v"
+  }
+}

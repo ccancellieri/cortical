@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cortical-agent"
+version = "0.1.0"
+description = "Cortical: Cross-Platform Agentic Harness for pi, 4-Tier Merkle/Macro-Graph Second Brain MCP, Adaptive Permission Gate, and Dual-Path Voice Engine."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+  {name = "Carlo Cancellieri", email = "ccancellieri@hotmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+cortical = "cortical.cli:main"
+cortical-wiki-mcp = "cortical.wiki.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
