@@ -12,7 +12,8 @@ from cortical.grounding import extract_weather_intent, fetch_weather_forecast
 from cortical.hardware.profiler import HardwareProfiler
 from cortical.memory import MemoryCurator, is_ephemeral_utterance, is_explicit_task_request
 from cortical.permissions.gate import AdaptivePermissionGate
-from cortical.server import CorticalLiveService
+from cortical.server import CorticalLiveService, shape_expressive_italian_text
+from cortical.skills_hub import CorticalSkillHub
 from cortical.voice.engine import CorticalVoiceEngine, is_self_echo, is_stop_command, strip_wake_word
 from cortical.wiki.crawler import DeterministicMerkleCrawler
 from cortical.wiki.db import AccessContext, CorticalWikiDB, DepthTier
@@ -446,5 +447,79 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertIn("nodes", graph_data)
         self.assertIn("edges", graph_data)
         self.assertGreaterEqual(graph_data["stats"]["node_count"], 2)
+
+    def test_13_skills_hub_3plus1_synthesis_and_task_deletion(self) -> None:
+        """Tests expressive Italian TTS shaping, parallel 3+1 memory vs procedural skills, and task deletion."""
+        # 1. Expressive Italian text naturalization
+        shaped = shape_expressive_italian_text("Cielo poco nuvoloso (min 12°C, max 24°C, pioggia 10%) su API MCP.")
+        self.assertIn("gradi", shaped)
+        self.assertIn("per cento", shaped)
+        self.assertNotIn("(", shaped)
+
+        # 2. CorticalSkillHub parallel lanes: 3+1 Memory Tier Skills + Procedural Domain Skills
+        db = CorticalWikiDB(self.wiki_db_path)
+        DeterministicMerkleCrawler(db).crawl_directory(self.sample_docs)
+        skills_dir = self.root / ".pi" / "skills"
+        hub = CorticalSkillHub(db, skills_dir)
+
+        discovered_names = {s.name for s in hub.discover_skills()}
+        self.assertIn("cortical-memory-l1-light", discovered_names)
+        self.assertIn("cortical-memory-l2-medium", discovered_names)
+        self.assertIn("cortical-memory-l3-high", discovered_names)
+        self.assertIn("cortical-multiagent-orchestrator", discovered_names)
+
+        # Enhance a technical prompt -> selects right 3+1 tier skill + procedural skills + team roster
+        enh = hub.enhance_prompt("Rifattorizza il modulo di sicurezza RBAC e verifica le citazioni nella wiki")
+        self.assertEqual(enh["mode"], "enhanced")
+        self.assertEqual(enh["recommended_depth"], "high")
+        self.assertEqual(enh["memory_tier_skill"], "cortical-memory-l3-high")
+        self.assertGreaterEqual(len(enh["team_roster"]), 2)
+        self.assertIn("CORTICAL HARNESS", enh["context_injection"])
+
+        # 3. Task 3+1 discussion synthesis + learned skill compilation + task deletion
+        curator = MemoryCurator(db)
+        ctx = AccessContext()
+        db.record_episode(
+            ctx,
+            episode_id="task-skill-202",
+            title="Automazione Pipeline Test RBAC",
+            goal="Creare una procedura ripetibile per validare i permessi relazionali RBAC",
+            outcome_status="active",
+            learned_summary="Pipeline RBAC verificata con 3 step deterministici.",
+            skills_used=["cortical-multiagent-orchestrator"],
+            relations=[{"relation": "modifies", "target_type": "subtree", "target_id": "/security/rbac.md"}],
+        )
+        curator.add_task_working_note("task-skill-202", "Step 1: lettura schema acl_permissions")
+        curator.add_task_working_note("task-skill-202", "Step 2: esecuzione query parametrizzata con ruolo reader")
+        curator.add_task_working_note("task-skill-202", "Step 3: verifica blocco path non autorizzati")
+
+        synth = hub.synthesize_task_discussion_3plus1(
+            "task-skill-202",
+            user_closing_notes="Ottimo pattern riutilizzabile: crea una skill per validare RBAC in futuro.",
+        )
+        self.assertEqual(synth["status"], "synthesized")
+        self.assertTrue(synth["l1_light"])
+        self.assertTrue(synth["l2_medium"])
+        self.assertTrue(synth["l3_high"])
+        self.assertTrue(synth["l4_max_raw"])
+
+        compiled = hub.evaluate_and_compile_skill(
+            "task-skill-202",
+            user_closing_notes="Crea una skill riutilizzabile per validare RBAC.",
+        )
+        self.assertTrue(compiled["created"])
+        self.assertTrue(Path(compiled["skill_path"]).exists())
+
+        # 4. Task deletion endpoint removes task and working notes completely
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path, repo_root=self.root)
+        st_del, del_res = svc.handle_api("POST", "/api/tasks/delete", {}, {"episode_id": "task-skill-202"})
+        self.assertEqual(st_del, 200)
+        self.assertEqual(del_res["status"], "deleted")
+        self.assertEqual(del_res["deleted_episode"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..memory import MemoryCurator
+from ..skills_hub import CorticalSkillHub
 from .crawler import DeterministicMerkleCrawler
 from .db import AccessContext, CorticalWikiDB, DepthTier
 from .fact_check import CitationVerifier
@@ -124,6 +125,44 @@ MCP_TOOLS = [
             "required": ["episode_id"],
         },
     },
+    {
+        "name": "wiki_delete_task",
+        "description": "Permanently delete a task episode, its isolated working notes, and its macro-graph edges.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {"type": "string"},
+            },
+            "required": ["episode_id"],
+        },
+    },
+    {
+        "name": "wiki_enhance_prompt",
+        "description": "Enhance a prompt with right-sized 3+1 Wiki Memory (L1/L2/L3/Max) + matched Procedural Skills + recommended Tools + Multi-Agent Team Roster.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "wiki_synthesize_discussion_3plus1",
+        "description": "Synthesize a task's discussion at 3+1 levels (L1 Light, L2 Medium, L3 High, +1 Max) and optionally compile a reusable SKILL.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {"type": "string"},
+                "goal": {"type": "string"},
+                "discussion_steps": {"type": "array", "items": {"type": "object"}},
+                "user_closing_notes": {"type": "string", "default": ""},
+                "evaluate_skill": {"type": "boolean", "default": True},
+                "force_create_skill": {"type": "boolean", "default": False},
+            },
+            "required": ["episode_id", "goal"],
+        },
+    },
 ]
 
 
@@ -139,6 +178,11 @@ class CorticalWikiMCPServer:
         self.crawler = DeterministicMerkleCrawler(self.db)
         self.verifier = CitationVerifier(self.db)
         self.curator = MemoryCurator(self.db)
+        default_skills = os.environ.get(
+            "CORTICAL_SKILLS_DIR",
+            str(Path(__file__).resolve().parents[3] / ".pi" / "skills"),
+        )
+        self.skill_hub = CorticalSkillHub(self.db, default_skills)
 
     def handle_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
         method = req.get("method")
@@ -249,6 +293,35 @@ class CorticalWikiMCPServer:
                 user_closing_answer=args.get("user_closing_answer", ""),
                 target_subtree=args.get("target_subtree", "/"),
             )
+        if name == "wiki_delete_task":
+            return self.curator.delete_task(ctx, episode_id_optional=args["episode_id"])
+        if name == "wiki_enhance_prompt":
+            res = self.skill_hub.enhance_prompt(args["prompt"], ctx=ctx)
+            return dataclasses.asdict(res)
+        if name == "wiki_synthesize_discussion_3plus1":
+            ep_id = args["episode_id"]
+            goal = args["goal"]
+            steps = args.get("discussion_steps") or []
+            notes = args.get("user_closing_notes", "")
+            synth = self.skill_hub.synthesize_task_discussion_3plus1(
+                episode_id=ep_id,
+                goal=goal,
+                discussion_steps=steps,
+                user_closing_notes=notes,
+                ctx=ctx,
+            )
+            skill_eval = None
+            if args.get("evaluate_skill", True):
+                ev = self.skill_hub.evaluate_and_compile_skill(
+                    episode_id=ep_id,
+                    goal=goal,
+                    lessons_learned=synth["lessons_learned"],
+                    discussion_steps=steps,
+                    force_create=bool(args.get("force_create_skill", False)),
+                    ctx=ctx,
+                )
+                skill_eval = dataclasses.asdict(ev)
+            return {"synthesis_3plus1": synth, "skill_evaluation": skill_eval}
         raise ValueError(f"Unknown tool: {name}")
 
 

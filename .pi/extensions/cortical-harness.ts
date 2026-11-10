@@ -1,16 +1,20 @@
 /**
- * Cortical Agentic Harness Extension for `pi` (@earendil-works/pi-coding-agent)
+ * Cortical Multi-Agent Harness & 3+1 Skill/Memory Extension for `pi` (@earendil-works/pi-coding-agent)
  * Copyright 2026 Carlo Cancellieri — Licensed under Apache-2.0
  *
- * Capabilities:
- * 1. Pre-Flight Grounding Hook (`pi.on("before_agent_start")` & `pi.on("before_provider_request")`):
- *    Automatically executes real-time weather/Chrome grounding (e.g. "procedi cerca il meteo
- *    a roma per domani"), opens Google Chrome on the weather page, and injects verified
- *    Open-Meteo data with a focused Italian system prompt so local models answer accurately.
- * 2. Adaptive Permission Gate (`pi.on("tool_call")`): Evaluates risk score via Cortical's
- *    SQLite learning gate, blocks hard guardrails / focus-stealing commands, and learns
- *    from interactive user approvals.
- * 3. Eager Grounding & Second Brain Tools (`meteo_forecast`, `delegate_subagent`, `submit_report`).
+ * How to use Cortical inside `pi`:
+ * 1. Normal Conversation / Coding (Default):
+ *    - Does NOT create tasks automatically.
+ *    - Automatically enriches technical prompts with the right 3+1 Wiki Memory tier
+ *      (L1 Light, L2 Medium, L3 High, +1 Max) + matched Procedural Skills & Tools in parallel.
+ * 2. Explicit Multi-Agent Task Mode (`/task <obiettivo>` or "crea un task per..."):
+ *    - Opens an explicit task with the local Multi-Agent Orchestrator (Analyst -> Implementer -> Reviewer).
+ *    - Tracks the discussion and tool executions inside the isolated task.
+ * 3. Task Closure, 3+1 Synthesis & Automatic Skill Generation (`/task-close [lezioni]`):
+ *    - Synthesizes the discussion at 3+1 levels in the Wiki MCP (`L1`, `L2`, `L3`, `Max`).
+ *    - Evaluates whether the work produced a reusable pattern and compiles a new `.pi/skills/learned-<slug>/SKILL.md`.
+ *    - Archives the compact trace and purges bulky temporary logs.
+ * 4. Task Deletion (`/task-delete <id>`) & Skills Inspector (`/skills`).
  */
 
 import { execFileSync } from "node:child_process";
@@ -27,7 +31,13 @@ interface PermissionVerdict {
   learned_approvals: number;
 }
 
-function resolveCorticalPaths(): { pythonBin: string; pythonPath: string } {
+interface ActiveTaskState {
+  episodeId: string;
+  goal: string;
+  steps: Array<{ type: string; title: string; detail: string }>;
+}
+
+function resolveCorticalPaths(): { pythonBin: string; pythonPath: string; skillsDir: string } {
   const candidates = [
     process.env.CORTICAL_ROOT,
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."),
@@ -38,29 +48,36 @@ function resolveCorticalPaths(): { pythonBin: string; pythonPath: string } {
   for (const root of candidates) {
     const srcDir = path.join(root, "src");
     const venvPy = path.join(root, ".venv", "bin", "python");
+    const skillsDir = path.join(root, ".pi", "skills");
     if (existsSync(srcDir)) {
       return {
         pythonBin: process.env.CORTICAL_PYTHON || (existsSync(venvPy) ? venvPy : "python3"),
         pythonPath: process.env.CORTICAL_PYTHONPATH || srcDir,
+        skillsDir,
       };
     }
   }
   return {
     pythonBin: process.env.CORTICAL_PYTHON || "python3",
     pythonPath: process.env.CORTICAL_PYTHONPATH || "./src",
+    skillsDir: "./.pi/skills",
   };
 }
 
 function invokeCorticalCLI(args: string[]): Record<string, unknown> {
-  const { pythonBin, pythonPath } = resolveCorticalPaths();
-  const out = execFileSync(pythonBin, ["-m", "cortical.cli", ...args], {
-    encoding: "utf-8",
-    env: {
-      ...process.env,
-      PYTHONPATH: pythonPath,
-    },
-    timeout: 12000,
-  });
+  const { pythonBin, pythonPath, skillsDir } = resolveCorticalPaths();
+  const out = execFileSync(
+    pythonBin,
+    ["-m", "cortical.cli", "--skills-dir", skillsDir, ...args],
+    {
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PYTHONPATH: pythonPath,
+      },
+      timeout: 14000,
+    }
+  );
   return JSON.parse(out) as Record<string, unknown>;
 }
 
@@ -74,10 +91,125 @@ function isWeatherQuery(text: string): boolean {
   );
 }
 
+function isExplicitTaskStart(text: string): boolean {
+  const norm = text.toLowerCase();
+  return (
+    norm.includes("crea un task") ||
+    norm.includes("crea task") ||
+    norm.includes("apri un task") ||
+    norm.includes("nuovo task") ||
+    norm.includes("lavora in multiagent") ||
+    norm.includes("orchestra un sottoagente")
+  );
+}
+
 export default function corticalHarnessExtension(pi: ExtensionAPI) {
   let pendingGroundedAnswer: string | null = null;
+  let activeTask: ActiveTaskState | null = null;
 
-  // 1. Pre-Flight Real-Time Weather & Chrome Grounding Hook on `before_agent_start`
+  // Register Cortical Multi-Agent & Skill Hub Slash Commands in `pi`
+  pi.registerCommand?.("task", {
+    description: "Apri un Task Multi-Agente esplicito con memoria 3+1 e valutazione Skill (/task <obiettivo>)",
+    handler: async (args, ctx) => {
+      const goal = args.trim();
+      if (!goal) {
+        ctx.ui?.notify?.("Uso: /task <obiettivo del task>", "warning");
+        return;
+      }
+      const opened = invokeCorticalCLI(["task-open", "--goal", goal]);
+      const epId = String(opened.episode_id || "pi-task");
+      activeTask = {
+        episodeId: epId,
+        goal,
+        steps: [{ type: "thinking", title: "Avvio Task Multi-Agente", detail: goal }],
+      };
+      pi.setSessionName?.(`[Task ${epId}] ${goal.slice(0, 40)}`);
+      ctx.ui?.notify?.(
+        `✅ Task Multi-Agente aperto: ${epId} (Usa /task-close a fine lavoro per salvare la sintesi 3+1 e generare eventuali Skill)`,
+        "info"
+      );
+      pi.sendUserMessage?.(
+        `[TASK MULTI-AGENTE ATTIVO: ${epId}]\nObiettivo: ${goal}\n` +
+          `Coordina i ruoli (Analyst -> Implementer -> Reviewer) usando la Wiki MCP e i tool appropriati.`
+      );
+    },
+  });
+
+  pi.registerCommand?.("task-status", {
+    description: "Mostra lo stato del Task Multi-Agente attivo in pi",
+    handler: async (_args, ctx) => {
+      if (!activeTask) {
+        ctx.ui?.notify?.("Nessun task attivo. Le conversazioni normali non creano task. Usa /task <obiettivo> per aprirne uno.", "info");
+        return;
+      }
+      ctx.ui?.notify?.(
+        `Task attivo: ${activeTask.episodeId} | Obiettivo: ${activeTask.goal} | Passi registrati: ${activeTask.steps.length}`,
+        "info"
+      );
+    },
+  });
+
+  pi.registerCommand?.("task-close", {
+    description: "Chiudi e archivia il task attivo, sintetizzando la discussione a 3+1 livelli e valutando se creare una nuova Skill (/task-close [lezioni])",
+    handler: async (args, ctx) => {
+      if (!activeTask) {
+        ctx.ui?.notify?.("Nessun task attivo da chiudere.", "warning");
+        return;
+      }
+      const notes = args.trim();
+      const res = invokeCorticalCLI([
+        "task-close",
+        "--episode-id",
+        activeTask.episodeId,
+        "--goal",
+        activeTask.goal,
+        "--notes",
+        notes,
+        "--steps-json",
+        JSON.stringify(activeTask.steps),
+      ]);
+      const skillEval = (res.skill_evaluation || {}) as Record<string, unknown>;
+      const skillMsg = skillEval.should_create_skill
+        ? `✨ Nuova Skill generata: ${skillEval.skill_id} (${skillEval.skill_path})`
+        : `ℹ️ Nessuna nuova skill necessaria (${skillEval.reason})`;
+      ctx.ui?.notify?.(
+        `📦 Task ${activeTask.episodeId} archiviato nei 3+1 livelli della Wiki MCP! ${skillMsg}`,
+        "info"
+      );
+      activeTask = null;
+      pi.setSessionName?.("Cortical Session (No Active Task)");
+    },
+  });
+
+  pi.registerCommand?.("task-delete", {
+    description: "Cancella definitivamente un task e i suoi log temporanei (/task-delete <episode_id>)",
+    handler: async (args, ctx) => {
+      const targetId = args.trim() || activeTask?.episodeId || "";
+      if (!targetId) {
+        ctx.ui?.notify?.("Specifica l'ID del task da cancellare: /task-delete <id>", "warning");
+        return;
+      }
+      invokeCorticalCLI(["task-delete", "--episode-id", targetId]);
+      if (activeTask && activeTask.episodeId === targetId) {
+        activeTask = null;
+      }
+      ctx.ui?.notify?.(`🗑️ Task ${targetId} cancellato definitivamente.`, "info");
+    },
+  });
+
+  pi.registerCommand?.("skills", {
+    description: "Elenca le Skill attive (Core, 3+1 Memory Synthesis, e Skill Apprese dai task)",
+    handler: async (_args, ctx) => {
+      const res = invokeCorticalCLI(["skills-list"]);
+      const list = (res.skills || []) as Array<Record<string, unknown>>;
+      const summary = list
+        .map((s) => `${s.skill_id} [${s.kind}]`)
+        .join(", ");
+      ctx.ui?.notify?.(`Skill Cortical (${list.length}): ${summary}`, "info");
+    },
+  });
+
+  // 1. Pre-Flight Grounding + Parallel 3+1 Memory & Skill Enhancement Hook
   pi.on("before_agent_start", (event, ctx) => {
     pendingGroundedAnswer = null;
     try {
@@ -85,6 +217,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
       if (!userPrompt) return undefined;
 
+      // A. Deterministic Weather & Chrome Grounding
       if (isWeatherQuery(userPrompt)) {
         const res = invokeCorticalCLI([
           "weather",
@@ -94,10 +227,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         ]);
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
-        ctx.ui?.notify?.(
-          `[Cortical Grounding] ${groundedSummary}`,
-          "info"
-        );
+        ctx.ui?.notify?.(`[Cortical Grounding] ${groundedSummary}`, "info");
         return {
           systemPrompt:
             `Sei Cortical, assistente AI italiano creato da Carlo Cancellieri.\n` +
@@ -105,13 +235,44 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             `${groundedSummary}`,
         };
       }
+
+      // B. Auto-start explicit task if user asks in natural language ("crea un task per...")
+      if (!activeTask && isExplicitTaskStart(userPrompt)) {
+        const opened = invokeCorticalCLI(["task-open", "--goal", userPrompt]);
+        const epId = String(opened.episode_id || "pi-task");
+        activeTask = {
+          episodeId: epId,
+          goal: userPrompt,
+          steps: [{ type: "thinking", title: "Avvio Task Esplicito da Prompt", detail: userPrompt }],
+        };
+        ctx.ui?.notify?.(`🤖 Task Multi-Agente avviato: ${epId}`, "info");
+      }
+
+      if (activeTask) {
+        activeTask.steps.push({
+          type: "user_turn",
+          title: `Richiesta utente nel task ${activeTask.episodeId}`,
+          detail: userPrompt.slice(0, 300),
+        });
+      }
+
+      // C. Parallel 3+1 Memory + Procedural Skill & Tool Enhancement (when working on a task or technical request)
+      if (activeTask || userPrompt.split(/\s+/).length >= 5) {
+        const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", userPrompt]);
+        const enhancedSys = String(enh.enhanced_system_instructions || "");
+        if (enhancedSys && activeTask) {
+          return {
+            systemPrompt: `${event.systemPrompt}\n\n${enhancedSys}`,
+          };
+        }
+      }
     } catch {
-      // Fallback to default behavior if CLI is unreachable
+      // Continue normally if CLI is unreachable
     }
     return undefined;
   });
 
-  // Ensure zero spelling errors from small 1.5B local models on grounded responses
+  // Record assistant output in active task & ensure clean grounded answers
   pi.on("message_end", (event) => {
     if (pendingGroundedAnswer && event.message && event.message.role === "assistant") {
       const answer = pendingGroundedAnswer;
@@ -123,6 +284,20 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         },
       };
     }
+    if (activeTask && event.message && event.message.role === "assistant") {
+      const parts = (event.message.content || []) as Array<Record<string, unknown>>;
+      const text = parts
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .join("\n")
+        .trim();
+      if (text) {
+        activeTask.steps.push({
+          type: "output",
+          title: "Risposta Orchestratore / Agente",
+          detail: text.slice(0, 500),
+        });
+      }
+    }
     return undefined;
   });
 
@@ -132,6 +307,14 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     const toolArgs = ((event as unknown as Record<string, unknown>).input ||
       (event as unknown as Record<string, unknown>).args ||
       {}) as Record<string, unknown>;
+
+    if (activeTask) {
+      activeTask.steps.push({
+        type: "tool_call",
+        title: `Tool: ${toolName}`,
+        detail: JSON.stringify(toolArgs).slice(0, 260),
+      });
+    }
 
     try {
       const decision = invokeCorticalCLI([
@@ -216,12 +399,12 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     },
   });
 
-  // 4. Terminating structured report tool for subagents
+  // 4. Terminating structured report tool for subagents + 3+1 Synthesis & Skill Evaluation
   pi.registerTool?.({
     name: "submit_report",
-    label: "Submit Cortical Report",
+    label: "Submit Cortical Report & Evaluate Skill",
     description:
-      "Submit structured subagent progress report to the Cortical Orchestrator and terminate the subagent loop.",
+      "Conclude un task o sottoagente salvando la sintesi a 3+1 livelli nella Wiki MCP e valutando se creare una nuova Skill per il futuro.",
     parameters: {
       type: "object",
       properties: {
@@ -234,19 +417,45 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
           type: "string",
           enum: ["light", "medium", "high", "max"],
         },
+        create_skill: {
+          type: "boolean",
+          default: false,
+          description: "Se true, compila una nuova Skill (.pi/skills/learned-.../SKILL.md) dalle lezioni apprese.",
+        },
         touched_paths: { type: "array", items: { type: "string" } },
-        verified_citations: { type: "array", items: { type: "string" } },
       },
       required: ["status", "summary"],
     } as any,
     execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      let closeResult: Record<string, unknown> = {};
+      if (activeTask && args.status === "completed") {
+        try {
+          closeResult = invokeCorticalCLI([
+            "task-close",
+            "--episode-id",
+            activeTask.episodeId,
+            "--goal",
+            activeTask.goal,
+            "--notes",
+            String(args.summary || ""),
+            "--steps-json",
+            JSON.stringify(activeTask.steps),
+            ...(args.create_skill ? ["--force-skill"] : []),
+          ]);
+          activeTask = null;
+        } catch (err) {
+          closeResult = { warning: String(err) };
+        }
+      }
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
               {
-                subagent_report: params,
+                subagent_report: args,
+                task_consolidation: closeResult,
                 timestamp: new Date().toISOString(),
               },
               null,
@@ -254,51 +463,42 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             ),
           },
         ],
-        details: params,
+        details: closeResult,
       };
     },
   });
 
-  // 5. Orchestrator Subagent Spawner with Progressive Wiki Depth Escalation
+  // 5. Orchestrator Subagent Spawner with Parallel 3+1 Wiki Memory & Procedural Skills
   pi.registerTool?.({
     name: "delegate_subagent",
-    label: "Delegate Cortical Subagent",
+    label: "Delegate Cortical Multi-Agent Role",
     description:
-      "Spawn a specialized Cortical subagent with selected skills, bounded maxTurns, and progressive Second Brain synthesis depth ('light' -> 'medium' -> 'high' -> 'max').",
+      "Avvia un ruolo specializzato (arch_analyst, code_implementer, reviewer, web_researcher) iniettando in parallelo il livello 3+1 della Wiki MCP e le Skill pertinenti.",
     parameters: {
       type: "object",
       properties: {
-        role: { type: "string" },
-        goal: { type: "string" },
-        skills: {
-          type: "array",
-          items: { type: "string" },
+        role: {
+          type: "string",
+          enum: ["arch_analyst", "code_implementer", "reviewer", "web_researcher"],
         },
+        goal: { type: "string" },
         wiki_path: { type: "string", default: "/" },
         initial_depth: {
           type: "string",
           enum: ["light", "medium", "high", "max"],
-          default: "light",
+          default: "medium",
         },
-        max_turns: { type: "number", default: 6 },
       },
       required: ["role", "goal"],
     } as any,
     execute: async (_toolCallId, params) => {
       const args = (params || {}) as Record<string, unknown>;
-      const wikiPath = String(args.wiki_path || "/");
-      const depth = String(args.initial_depth || "light");
-      let wikiContext: Record<string, unknown> = {};
+      const goal = String(args.goal || "");
+      let enhancement: Record<string, unknown> = {};
       try {
-        wikiContext = invokeCorticalCLI([
-          "navigate",
-          "--path",
-          wikiPath,
-          "--depth",
-          depth,
-        ]);
+        enhancement = invokeCorticalCLI(["enhance-prompt", "--prompt", goal]);
       } catch (err) {
-        wikiContext = { warning: String(err) };
+        enhancement = { warning: String(err) };
       }
 
       return {
@@ -309,11 +509,8 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
               {
                 orchestrator_dispatch: {
                   role: args.role,
-                  goal: args.goal,
-                  skills_loaded: args.skills || ["cortical-second-brain"],
-                  max_turns: args.max_turns || 6,
-                  injected_wiki_tier: depth,
-                  wiki_snapshot: wikiContext,
+                  goal,
+                  enhancement,
                 },
               },
               null,
@@ -321,7 +518,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             ),
           },
         ],
-        details: wikiContext,
+        details: enhancement,
       };
     },
   });

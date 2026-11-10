@@ -32,6 +32,7 @@ from .grounding import extract_weather_intent, fetch_weather_forecast
 from .hardware.profiler import HardwareProfiler
 from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
+from .skills_hub import CorticalSkillHub
 from .voice.engine import CorticalVoiceEngine, is_self_echo
 from .wiki.db import AccessContext, CorticalWikiDB, DepthTier
 from .wiki.fact_check import CitationVerifier
@@ -42,6 +43,40 @@ _ACTIVE_TTS_PROC: Optional[subprocess.Popen[bytes]] = None
 _LAST_SPOKEN_TEXT: str = ""
 _LAST_SPOKEN_AT: float = 0.0
 _TTS_DUCKED: bool = False
+
+NEURAL_ITALIAN_VOICES = {
+    "IsabellaNeural": "it-IT-IsabellaNeural",
+    "GiuseppeNeural": "it-IT-GiuseppeMultilingualNeural",
+    "ElsaNeural": "it-IT-ElsaNeural",
+    "DiegoNeural": "it-IT-DiegoNeural",
+    "it-IT-IsabellaNeural": "it-IT-IsabellaNeural",
+    "it-IT-GiuseppeMultilingualNeural": "it-IT-GiuseppeMultilingualNeural",
+    "it-IT-ElsaNeural": "it-IT-ElsaNeural",
+    "it-IT-DiegoNeural": "it-IT-DiegoNeural",
+}
+
+
+def shape_expressive_italian_text(text: str) -> str:
+    """Naturalizes technical symbols, numbers, and punctuation for expressive Italian speech."""
+    import re as _re
+
+    out = text.strip()
+    out = _re.sub(r"[`*_#]+", "", out)
+    out = _re.sub(r"\(\s*", ", ", out)
+    out = _re.sub(r"\s*\)", ", ", out)
+    out = _re.sub(r"\bmin\s+(\d+)", r"minima \1", out, flags=_re.IGNORECASE)
+    out = _re.sub(r"\bmax\s+(\d+)", r"massima \1", out, flags=_re.IGNORECASE)
+    out = _re.sub(r"(\d+)[.,](\d+)\s*°C", r"\1 virgola \2 gradi", out)
+    out = _re.sub(r"(\d+)\s*°C", r"\1 gradi", out)
+    out = _re.sub(r"(\d+)[.,](\d+)\s*km/h", r"\1 chilometri orari", out)
+    out = _re.sub(r"(\d+)\s*km/h", r"\1 chilometri orari", out)
+    out = _re.sub(r"(\d+)\s*%", r"\1 per cento", out)
+    out = _re.sub(r"\bMCP\b", "emme ci pì", out)
+    out = _re.sub(r"\bpi\b", "pì", out)
+    out = _re.sub(r",\s*,+", ", ", out)
+    out = _re.sub(r",\s*\.", ".", out)
+    out = _re.sub(r"\s+", " ", out).strip()
+    return out
 
 
 def is_tts_speaking() -> bool:
@@ -65,6 +100,7 @@ def stop_native_tts() -> None:
             _ACTIVE_TTS_PROC = None
     if platform.system() == "Darwin":
         subprocess.run(["pkill", "-x", "say"], stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["pkill", "-x", "afplay"], stderr=subprocess.DEVNULL, check=False)
 
 
 def duck_native_tts() -> dict[str, Any]:
@@ -77,8 +113,13 @@ def duck_native_tts() -> dict[str, Any]:
     return {"ducked": True, "was_speaking": was_speaking}
 
 
-def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188, volume: float = 1.0) -> bool:
-    """Speaks Italian text using native macOS Italian voice (`Alice`) or Linux Piper (`paola`)."""
+def speak_native_tts(
+    text: str,
+    voice: str = "IsabellaNeural",
+    rate: int = 192,
+    volume: float = 1.0,
+) -> bool:
+    """Speaks Italian text using Expressive Neural TTS (`edge-tts` Isabella/Giuseppe) or Piper/Prosodic say fallback."""
     global _ACTIVE_TTS_PROC, _LAST_SPOKEN_TEXT, _LAST_SPOKEN_AT, _TTS_DUCKED
     if not text or not text.strip():
         return False
@@ -86,13 +127,57 @@ def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188, volume: f
     _LAST_SPOKEN_TEXT = text.strip()
     _LAST_SPOKEN_AT = time.monotonic()
     _TTS_DUCKED = False
+    spoken_natural = shape_expressive_italian_text(text)
+    vol_clamp = max(0.15, min(1.0, float(volume)))
+
     try:
         sys_name = platform.system()
+        # 1. Expressive Neural Italian TTS via edge-tts (`it-IT-IsabellaNeural`, `it-IT-GiuseppeMultilingualNeural`, etc.)
+        edge_bin = (
+            shutil.which("edge-tts")
+            or str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "edge-tts")
+        )
+        neural_voice = NEURAL_ITALIAN_VOICES.get(voice)
+        if neural_voice and Path(edge_bin).exists():
+            mp3_path = f"/tmp/cortical_tts_{os.getpid()}.mp3"
+            pitch = "+2Hz" if "Isabella" in neural_voice or "Elsa" in neural_voice else "+0Hz"
+            rate_str = "+7%"
+            if sys_name == "Darwin" and shutil.which("afplay"):
+                cmd = (
+                    f'"{edge_bin}" --voice "{neural_voice}" --rate="{rate_str}" --pitch="{pitch}" '
+                    f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
+                    f'&& afplay -v {vol_clamp:.2f} "{mp3_path}" >/dev/null 2>&1 '
+                    f'|| say -v Alice -r {rate} {json.dumps(spoken_natural)}'
+                )
+                with _ACTIVE_TTS_LOCK:
+                    _ACTIVE_TTS_PROC = subprocess.Popen(
+                        ["bash", "-c", cmd],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return True
+            if sys_name == "Linux" and (shutil.which("mpv") or shutil.which("ffplay")):
+                player = "mpv --no-terminal" if shutil.which("mpv") else "ffplay -nodisp -autoexit -loglevel quiet"
+                cmd = (
+                    f'"{edge_bin}" --voice "{neural_voice}" --rate="{rate_str}" --pitch="{pitch}" '
+                    f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
+                    f'&& {player} "{mp3_path}" >/dev/null 2>&1'
+                )
+                with _ACTIVE_TTS_LOCK:
+                    _ACTIVE_TTS_PROC = subprocess.Popen(
+                        ["bash", "-c", cmd],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                return True
+
+        # 2. Offline Local Fallbacks (macOS Prosody-Modulated say / Linux Neural Piper)
         if sys_name == "Darwin" and shutil.which("say"):
             allowed_voices = {"Alice", "Reed", "Shelley", "Eddy", "Sandy", "Flo", "Federica", "Luca"}
             chosen_voice = voice if voice in allowed_voices else "Alice"
-            vol_clamp = max(0.15, min(1.0, float(volume)))
-            styled_text = f"[[volm {vol_clamp:.2f}]] {text}"
+            # Add Apple Speech Synthesis prosody tags (pauses & pitch modulation) for less mechanical cadence
+            prosodic = spoken_natural.replace(". ", ". [[slnc 140]] ").replace(", ", ", [[slnc 65]] ")
+            styled_text = f"[[volm {vol_clamp:.2f}]] [[pbas +1]] {prosodic}"
             with _ACTIVE_TTS_LOCK:
                 _ACTIVE_TTS_PROC = subprocess.Popen(
                     ["say", "-v", chosen_voice, "-r", str(rate), styled_text],
@@ -106,7 +191,8 @@ def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188, volume: f
             paola_model = Path.home() / ".local/share/local-ai/models/piper/it_IT-paola-medium.onnx"
             if Path(piper_bin).exists() and paola_model.exists() and shutil.which("aplay"):
                 cmd = (
-                    f'printf %s {json.dumps(text)} | "{piper_bin}" --model "{paola_model}" --output-raw '
+                    f'printf %s {json.dumps(spoken_natural)} | "{piper_bin}" --model "{paola_model}" '
+                    f"--length_scale 0.94 --noise_w 0.85 --output-raw "
                     f"| aplay -r 22050 -f S16_LE -t raw - >/dev/null 2>&1"
                 )
                 with _ACTIVE_TTS_LOCK:
@@ -119,7 +205,7 @@ def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188, volume: f
             if shutil.which("spd-say"):
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
-                        ["spd-say", "-l", "it", text],
+                        ["spd-say", "-l", "it", spoken_natural],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -262,11 +348,29 @@ class PiAgentManager:
                         "index": 1,
                         "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
                         "type": "output",
-                        "title": "📦 Task Archiviato (Memoria di lavoro isolata rimossa, traccia sintetica nel Macro-Grafo)",
+                        "title": "📦 Task Archiviato (Memoria di lavoro isolata rimossa, sintesi 3+1 e traccia nel Macro-Grafo)",
                         "detail": archived_trace,
                         "meta": {"archived": True},
                     }
                 ]
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            proc = self.processes.pop(session_id, None)
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:  # noqa: BLE001
+                    pass
+            return self.sessions.pop(session_id, None) is not None
+
+    def clear_archived_sessions(self) -> int:
+        removed = 0
+        with self._lock:
+            for sid in [k for k, v in self.sessions.items() if v.get("status") == "archived"]:
+                self.sessions.pop(sid, None)
+                removed += 1
+        return removed
 
     def stop_all(self) -> int:
         stopped = 0
@@ -660,11 +764,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="pulse-dot" id="mic-dot"></div>
       <span class="live-transcript" id="live-transcript">Anti-Echo & Ducking attivi · Di' "Hei Cortical, meteo a Roma domani"</span>
       <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Ascolto Continuo: OFF</button>
-      <select id="tts-voice" title="Voce Italiana">
-        <option value="Alice">🇮🇹 Voce: Alice (Nativa)</option>
-        <option value="Reed">🇮🇹 Voce: Reed (Ita)</option>
-        <option value="Shelley">🇮🇹 Voce: Shelley (Ita)</option>
-        <option value="Eddy">🇮🇹 Voce: Eddy (Ita)</option>
+      <select id="tts-voice" title="Voce Italiana Espressiva">
+        <option value="IsabellaNeural" selected>🇮🇹 Voce: Isabella Neurale (Espressiva)</option>
+        <option value="GiuseppeNeural">🇮🇹 Voce: Giuseppe Neurale (Multilingue)</option>
+        <option value="ElsaNeural">🇮🇹 Voce: Elsa Neurale (Brillante)</option>
+        <option value="DiegoNeural">🇮🇹 Voce: Diego Neurale (Dinamico)</option>
+        <option value="Alice">🇮🇹 Voce: Alice (Locale Offline)</option>
       </select>
       <button class="btn btn-danger" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti">🛑 BASTA / STOP</button>
     </div>
@@ -679,8 +784,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- LEFT PANE: EXPLICIT TASKS & 4-TIER WIKI TREE -->
     <div class="pane">
       <div class="pane-header">
-        <span>Task Espliciti `pi` (Isolati)</span>
-        <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
+        <span>Task Multi-Agente `pi`</span>
+        <div style="display:flex; gap:5px;">
+          <button class="btn btn-ghost" style="padding:3px 7px; font-size:0.68rem;" onclick="clearArchivedTasks()" title="Rimuove tutti i task già archiviati">🧹 Pulisci</button>
+          <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
+        </div>
       </div>
       <div class="pane-body" id="agent-roster" style="max-height: 46%;">
         <div style="color:var(--muted); font-size:0.78rem;">
@@ -747,6 +855,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span>Inspector</span>
         <div class="tabs">
           <span class="tab active" id="tab-graph" onclick="switchInspector('graph')">🕸️ Grafo MCP</span>
+          <span class="tab" id="tab-skills" onclick="switchInspector('skills')">⚡ Skill & 3+1</span>
           <span class="tab" id="tab-mem" onclick="switchInspector('mem')">🧠 Memoria</span>
           <span class="tab" id="tab-wiki" onclick="switchInspector('wiki')">Wiki</span>
           <span class="tab" id="tab-perm" onclick="switchInspector('perm')">Permessi</span>
@@ -770,6 +879,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 380 350"></svg>
           </div>
           <pre class="step-detail" id="graph-view" style="max-height: 190px;">Clicca un nodo nel grafo sopra per ispezionare la traccia MCP.</pre>
+        </div>
+
+        <!-- Parallel 3+1 Memory Synthesis & Learned Skills Hub -->
+        <div id="insp-skills" style="display:none;">
+          <div style="display:flex; gap:6px; margin-bottom:8px;">
+            <input id="skill-test-prompt" placeholder="Testa Prompt Enhancer (es: 'implementa un endpoint FastAPI con wiki')" style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
+            <button class="btn" onclick="testPromptEnhancer()">Arricchisci</button>
+            <button class="btn btn-ghost" onclick="loadSkillsHub()">🔄 Skill</button>
+          </div>
+          <pre class="step-detail" id="skills-view" style="max-height: calc(100vh - 180px);">Caricamento Skill Hub (3+1 Memory Skills + Skill Apprese)...</pre>
         </div>
 
         <!-- Smart Memory & Chat Buffer Inspector -->
@@ -961,8 +1080,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const prev = await prevRes.json();
       const questions = (prev.closing_questions || []).join('\\n• ');
       const notes = prompt(
-        `Chiusura & Archiviazione Task ${sessionId}\\n\\nDomande di chiusura di Cortical:\\n• ${questions}\\n\\nInserisci una nota finale (o lascia vuoto per salvare solo la traccia sintetica e pulire la memoria di lavoro del task):`,
-        "Confermo la sintesi e archivio il task."
+        `Chiusura & Archiviazione Task ${sessionId}\\n\\nDomande di chiusura di Cortical:\\n• ${questions}\\n\\nInserisci la lezione appresa (Cortical salverà la sintesi a 3+1 livelli e valuterà se creare una nuova Skill per il futuro):`,
+        "Confermo la sintesi e salvo le lezioni apprese nei 3+1 livelli."
       );
       if (notes === null) return;
       const archRes = await fetch('/api/tasks/archive', {
@@ -971,13 +1090,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         body: JSON.stringify({episode_id: sessionId, user_closing_notes: notes})
       });
       const arch = await archRes.json();
+      const skillInfo = arch.skill_evaluation?.should_create_skill
+        ? `\\n✨ Nuova Skill Generata: ${arch.skill_evaluation.skill_id} (${arch.skill_evaluation.skill_path})`
+        : `\\nℹ️ Valutazione Skill: ${arch.skill_evaluation?.reason || 'nessuna nuova skill richiesta'}`;
       appendStreamCard(
         'output',
-        `TASK ARCHIVED → ${sessionId}`,
+        `TASK ARCHIVED (3+1 MEMORY + SKILL EVAL) → ${sessionId}`,
         `Note rimosse: ${arch.purged_working_notes}`,
-        `📦 Task ${sessionId} archiviato nel Macro-Grafo`,
-        `Traccia sintetica conservata: ${arch.archived_trace}`
+        `📦 Task ${sessionId} archiviato nei 3+1 livelli`,
+        `Traccia L1 conservata: ${arch.archived_trace}${skillInfo}`
       );
+      await refreshAgents();
+      await loadMcpKnowledgeGraph();
+    }
+
+    async function deleteTask(event, sessionId) {
+      event.stopPropagation();
+      if (!confirm(`Vuoi cancellare definitivamente il task ${sessionId} e tutti i suoi dati?`)) return;
+      await fetch('/api/tasks/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({episode_id: sessionId})
+      });
+      if (selectedSessionId === sessionId) selectedSessionId = null;
+      appendStreamCard('permission', `TASK DELETED → ${sessionId}`, 'REMOVED', `🗑️ Task ${sessionId} cancellato definitivamente.`, '');
+      await refreshAgents();
+      await loadMcpKnowledgeGraph();
+    }
+
+    async function clearArchivedTasks() {
+      const r = await fetch('/api/tasks/clear-archived', {method: 'POST', body: '{}'});
+      const d = await r.json();
+      appendStreamCard('system', 'CLEANUP ARCHIVED TASKS', `${d.deleted_count || 0} rimossi`, '🧹 Task archiviati rimossi dalla lista.', JSON.stringify(d, null, 2));
       await refreshAgents();
       await loadMcpKnowledgeGraph();
     }
@@ -987,7 +1131,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const data = await r.json();
       const sessions = data.sessions || [];
       const roster = document.getElementById('agent-roster');
-      if (!sessions.length) return;
+      if (!sessions.length) {
+        roster.innerHTML = `<div style="color:var(--muted); font-size:0.78rem;">Nessun task attivo. Le chiacchierate non creano task. Usa "+ Nuovo Task" o "/task" in pi per aprirne uno.</div>`;
+        return;
+      }
 
       roster.innerHTML = sessions.map(s => `
         <div class="agent-item ${s.session_id === selectedSessionId ? 'active' : ''}" onclick="selectSession('${s.session_id}')">
@@ -998,11 +1145,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="font-size:0.78rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
             ${s.goal}
           </div>
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-            <span style="font-size:0.7rem; color:var(--muted); font-family:var(--mono);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; gap:4px;">
+            <span style="font-size:0.68rem; color:var(--muted); font-family:var(--mono);">
               Wiki: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
             </span>
-            ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 7px; font-size:0.68rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')">🏁 Archivia</button>` : ''}
+            <div style="display:flex; gap:4px;">
+              ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 6px; font-size:0.67rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')" title="Archivia nei 3+1 livelli e valuta nuova Skill">📦 Archivia</button>` : ''}
+              <button class="btn btn-danger" style="padding:2px 6px; font-size:0.67rem;" onclick="deleteTask(event, '${s.session_id}')" title="Cancella definitivamente il task">🗑️ Cancella</button>
+            </div>
           </div>
         </div>
       `).join('');
@@ -1232,12 +1382,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function switchInspector(tab) {
-      ['graph', 'mem', 'wiki', 'perm'].forEach(t => {
-        document.getElementById(`insp-${t}`).style.display = (t === tab) ? 'block' : 'none';
-        document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
+      ['graph', 'skills', 'mem', 'wiki', 'perm'].forEach(t => {
+        const el = document.getElementById(`insp-${t}`);
+        const tb = document.getElementById(`tab-${t}`);
+        if (el) el.style.display = (t === tab) ? 'block' : 'none';
+        if (tb) tb.classList.toggle('active', t === tab);
       });
       if (tab === 'graph') loadMcpKnowledgeGraph();
+      if (tab === 'skills') loadSkillsHub();
       if (tab === 'mem') loadSmartMemory();
+    }
+
+    async function loadSkillsHub() {
+      const r = await fetch('/api/skills/state');
+      const d = await r.json();
+      const box = document.getElementById('skills-list-view');
+      const skills = d.skills || [];
+      box.innerHTML = skills.map(s => `
+        <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:6px; padding:6px 8px; margin-bottom:5px; font-size:0.75rem;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--ok)' : '#f8fafc'};">${s.name}</b>
+            <span class="tag">${s.category}</span>
+          </div>
+          <div style="color:var(--muted); margin-top:2px;">${s.description}</div>
+        </div>
+      `).join('');
+    }
+
+    async function testPromptEnhancer() {
+      const prompt = document.getElementById('skill-test-input').value.trim();
+      if (!prompt) return;
+      const r = await fetch('/api/skills/enhance', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      const d = await r.json();
+      document.getElementById('skill-enhance-view').textContent =
+        `[Mode]: ${d.mode} | [Depth 3+1]: ${d.recommended_depth}\n` +
+        `[Memory Skill]: ${d.memory_tier_skill}\n` +
+        `[Procedural Skills]: ${(d.selected_procedural_skills || []).join(', ')}\n` +
+        `[Team Roster]: ${(d.team_roster || []).map(x => x.id).join(' -> ')}\n\n` +
+        (d.context_injection || '(Conversazione casual: nessun overhead iniettato)');
     }
 
     async function evalPerm() {
@@ -1301,6 +1487,7 @@ class CorticalLiveService:
             return query_local_reflex_llm(prompt, self.model_rec.active_base_url)
 
         self.memory_curator = MemoryCurator(self.wiki_db, llm_fn=_reflex)
+        self.skill_hub = CorticalSkillHub(self.wiki_db, self.repo_root / ".pi" / "skills", llm_fn=_reflex)
         self.mcp_server = CorticalWikiMCPServer(wiki_db_path)
 
         self.agent_mgr = PiAgentManager(
@@ -1343,16 +1530,16 @@ class CorticalLiveService:
 
         if method == "GET" and path == "/health":
             tts_engine = (
-                "macOS say (Alice it_IT)"
+                "Edge-TTS Neural (Isabella/Giuseppe it-IT) + macOS say"
                 if self.hw_profile.os_name == "Darwin"
-                else "Piper Neural (it_IT-paola)"
+                else "Edge-TTS Neural (Isabella/Giuseppe it-IT) + Piper Neural"
             )
             return (
                 HTTPStatus.OK,
                 {
                     "status": "ok",
                     "service": "cortical-live",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                     "uptime_sec": round(time.time() - self.started_at, 2),
                     "os_name": self.hw_profile.os_name,
                     "arch": self.hw_profile.arch,
@@ -1387,10 +1574,55 @@ class CorticalLiveService:
         if method == "POST" and path == "/api/tasks/archive":
             ep_id = str(body.get("episode_id", ""))
             notes = str(body.get("user_closing_notes", ""))
+            synth = self.skill_hub.synthesize_task_discussion_3plus1(ep_id, notes)
+            skill_eval = self.skill_hub.evaluate_and_compile_skill(ep_id, notes).to_dict()
             res = self.memory_curator.archive_task(ep_id, user_closing_notes=notes)
             if res.get("status") == "archived":
                 self.agent_mgr.mark_archived(ep_id, str(res.get("archived_trace", "")))
+            res["synthesis_3plus1"] = synth
+            res["skill_evaluation"] = skill_eval
             return (HTTPStatus.OK, res)
+
+        if method == "POST" and path == "/api/tasks/delete":
+            ep_id = str(body.get("episode_id", ""))
+            mem_res = self.memory_curator.delete_task(ep_id)
+            ag_res = self.agent_mgr.delete_session(ep_id)
+            return (HTTPStatus.OK, {**mem_res, "agent_session": ag_res})
+
+        if method == "POST" and path == "/api/tasks/clear-archived":
+            mem_res = self.memory_curator.clear_archived_tasks()
+            ag_res = self.agent_mgr.clear_archived_sessions()
+            return (HTTPStatus.OK, {**mem_res, **ag_res})
+
+        # Skills Hub & Prompt Enhancer Endpoints (mcp-skill-hub evolution)
+        if method == "GET" and path == "/api/skills/state":
+            return (
+                HTTPStatus.OK,
+                {
+                    "skills": [
+                        {
+                            "name": s.name,
+                            "description": s.description,
+                            "category": s.category,
+                            "recommended_tools": s.recommended_tools,
+                        }
+                        for s in self.skill_hub.discover_skills()
+                    ],
+                    "learned_registry": self.skill_hub.list_learned_skills(),
+                    "syntheses_3plus1": self.skill_hub.get_task_syntheses(limit=15),
+                },
+            )
+
+        if method == "POST" and path == "/api/skills/enhance":
+            prompt_text = str(body.get("prompt", "")).strip()
+            active_ep = body.get("active_episode_id")
+            return (
+                HTTPStatus.OK,
+                self.skill_hub.enhance_prompt(
+                    prompt_text,
+                    active_episode_id=str(active_ep) if active_ep else None,
+                ).to_dict(),
+            )
 
         # Voice Ducking & Echo State Endpoints
         if method == "POST" and path == "/api/voice/duck":

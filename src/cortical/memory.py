@@ -473,3 +473,67 @@ class MemoryCurator:
             "isolated_notes_purged": deleted_notes,
             "linked_subtree": target_subtree or "/",
         }
+
+    def delete_task(
+        self,
+        ctx_or_ep: AccessContext | str,
+        episode_id_optional: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Permanently deletes a task episode, its isolated working notes, and its macro edges."""
+        if isinstance(ctx_or_ep, AccessContext):
+            ctx = ctx_or_ep
+            episode_id = episode_id_optional or ""
+        else:
+            ctx = AccessContext()
+            episode_id = ctx_or_ep
+
+        with self.db._connect() as conn:
+            deleted_notes = conn.execute(
+                """DELETE FROM task_isolated_notes
+                   WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id),
+            ).rowcount
+            deleted_edges = conn.execute(
+                """DELETE FROM macro_edges
+                   WHERE tenant_id = ? AND workspace_id = ?
+                     AND (source_id = ? OR target_id = ?)""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id, episode_id),
+            ).rowcount
+            deleted_ep = conn.execute(
+                """DELETE FROM task_episodes
+                   WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id),
+            ).rowcount
+            has_synth = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='task_discussion_synthesis'"
+            ).fetchone()
+            if has_synth:
+                conn.execute(
+                    """DELETE FROM task_discussion_synthesis
+                       WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
+                    (ctx.tenant_id, ctx.workspace_id, episode_id),
+                )
+
+        return {
+            "status": "deleted",
+            "episode_id": episode_id,
+            "deleted_episode": int(deleted_ep),
+            "deleted_working_notes": int(deleted_notes),
+            "deleted_macro_edges": int(deleted_edges),
+        }
+
+    def clear_archived_tasks(self, ctx: Optional[AccessContext] = None) -> dict[str, Any]:
+        """Removes all archived task episodes and their edges to keep the workspace clean."""
+        c = ctx or AccessContext()
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                """SELECT episode_id FROM task_episodes
+                   WHERE tenant_id = ? AND workspace_id = ?
+                     AND (lifecycle_state = 'archived' OR outcome_status = 'archived')""",
+                (c.tenant_id, c.workspace_id),
+            ).fetchall()
+            ep_ids = [r["episode_id"] for r in rows]
+        for eid in ep_ids:
+            self.delete_task(c, eid)
+        return {"status": "cleared_archived", "deleted_count": len(ep_ids), "episode_ids": ep_ids}
+
