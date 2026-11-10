@@ -961,7 +961,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let activeAbortController = null;
 
     function hasWakeOrBargeInWord(s) {
-      return /\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta)\b/i.test(s || '');
+      return /\\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta)\\b/i.test(s || '');
     }
 
     function isTtsShieldActive() {
@@ -971,13 +971,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function normalizeTokens(s) {
       return (s || '')
         .toLowerCase()
-        .replace(/(\d+)[.,](\d+)\s*°c/gi, '$1 virgola $2 gradi')
-        .replace(/(\d+)\s*°c/gi, '$1 gradi')
-        .replace(/\bmin\s+(\d+)/gi, 'minima $1')
-        .replace(/\bmax\s+(\d+)/gi, 'massima $1')
-        .replace(/(\d+)\s*%/g, '$1 per cento')
-        .replace(/[^\w\sàèéìòù]/g, ' ')
-        .split(/\s+/)
+        .replace(/(\\d+)[.,](\\d+)\\s*°c/gi, '$1 virgola $2 gradi')
+        .replace(/(\\d+)\\s*°c/gi, '$1 gradi')
+        .replace(/\\bmin\\s+(\\d+)/gi, 'minima $1')
+        .replace(/\\bmax\\s+(\\d+)/gi, 'massima $1')
+        .replace(/(\\d+)\\s*%/g, '$1 per cento')
+        .replace(/[^\\w\\sàèéìòù]/g, ' ')
+        .split(/\\s+/)
         .filter(w => w.length > 1);
     }
 
