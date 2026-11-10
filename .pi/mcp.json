@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "cortical-wiki": {
+      "command": "/Users/ccancellieri/work/code/cortical/.venv/bin/python",
+      "args": [
+        "-m",
+        "cortical.wiki.mcp_server"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/ccancellieri/work/code/cortical/src",
+        "CORTICAL_WIKI_DB": "/Users/ccancellieri/work/code/cortical/.cortical_data/wiki.db"
+      },
+      "exposure": "deferred",
+      "description": "Cortical 4-Tier Merkle Second Brain, Fact-Checking & Episode Macro-Graph."
+    },
+    "chrome": {
+      "command": "/opt/homebrew/bin/chrome-devtools-mcp",
+      "args": [
+        "--no-usage-statistics",
+        "--no-performance-crux",
+        "--workspace=/Users/ccancellieri/work/code/cortical"
+      ],
+      "exposure": "deferred",
+      "description": "Inspect and automate Chrome tabs, DOM, network, console and forms."
+    }
+  }
+}

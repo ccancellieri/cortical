@@ -1,0 +1,34 @@
+{
+  "profile": {
+    "os_name": "Darwin",
+    "arch": "arm64",
+    "cpu_brand": "Apple M2 Pro",
+    "cpu_cores": 12,
+    "ram_total_gb": 16.0,
+    "gpu_vendor": "apple_metal",
+    "gpu_name": "Apple Silicon Metal GPU",
+    "vram_gb": 11.5,
+    "unified_memory": true,
+    "tier": "tier2_pro_16gb",
+    "discovered_endpoints": {},
+    "installed_tools": {
+      "pi": "/opt/homebrew/bin/pi",
+      "chrome-devtools-mcp": "/opt/homebrew/bin/chrome-devtools-mcp",
+      "ollama": "/opt/homebrew/bin/ollama",
+      "playwright": "/Library/Frameworks/Python.framework/Versions/3.12/bin/playwright"
+    }
+  },
+  "recommendation": {
+    "tier": "tier2_pro_16gb",
+    "reuse_existing_endpoint": false,
+    "active_base_url": "http://127.0.0.1:8080/v1",
+    "fast_reflex_model": "LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf",
+    "orchestrator_model": "Qwen3-8B-Q6_K.gguf",
+    "coder_model": "Qwen2.5-Coder-7B-Instruct-Q6_K.gguf",
+    "vision_gui_model": "UI-TARS-1.5-7B-Q4_K_M.gguf",
+    "notes": [
+      "16GB Unified/Mid-Range GPU profile: uses Qwen3-8B/14B for orchestration, Qwen2.5-Coder-7B for coding, and UI-TARS-1.5-7B for GUI automation."
+    ]
+  },
+  "mcp_config_path": "/Users/ccancellieri/work/code/cortical/.pi/mcp.json"
+}
