@@ -537,6 +537,88 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(del_res["status"], "deleted")
         self.assertEqual(del_res["deleted_episode"], 1)
 
+    def test_14_scoped_context_attachments_and_concept_config_delete(self) -> None:
+        """Tests accented character TTS unescaping, ChatGPT-style context attachments, concept config and deletion."""
+        # 1. Accented characters and escaped unicode sanitization (prevents 'barra inversa 00...')
+        raw_escaped = "Oggi a Roma la citt\\u00e0 ha una temperatura di 20\\u00b0C e l'attivit\\u00e0 \\u00e8 terminata."
+        clean_speech = shape_expressive_italian_text(raw_escaped)
+        self.assertIn("città", clean_speech)
+        self.assertIn("attività", clean_speech)
+        self.assertIn("è", clean_speech)
+        self.assertIn("gradi", clean_speech)
+        self.assertNotIn("\\u00", clean_speech)
+        self.assertNotIn("barra", clean_speech)
+
+        # 2. Scoped Context Attachments
+        db = CorticalWikiDB(self.wiki_db_path)
+        ctx = AccessContext()
+        test_file = self.root / "sample_attachment.py"
+        test_file.write_text("def calculate_metrics():\n    return {'cyclomatic': 4, 'loc': 18}\n", encoding="utf-8")
+
+        att_res = db.attach_context_item(
+            ctx,
+            scope_id="chat",
+            item_type="file",
+            item_ref=str(test_file),
+            depth_tier="medium",
+        )
+        self.assertTrue(att_res["attachment_id"])
+        self.assertEqual(att_res["item_type"], "file")
+        self.assertIn("/attached/chat/sample_attachment.py", att_res["wiki_paths"])
+
+        # Context items appear in list
+        active_atts = db.list_context_attachments(ctx, scope_id="chat")
+        self.assertEqual(len(active_atts), 1)
+        self.assertEqual(active_atts[0]["attachment_id"], att_res["attachment_id"])
+
+        # Detach removes the item and transient wiki node
+        det_res = db.detach_context_item(ctx, att_res["attachment_id"])
+        self.assertTrue(det_res["detached"])
+        self.assertEqual(len(db.list_context_attachments(ctx, scope_id="chat")), 0)
+
+        # 3. Concept Configuration and Core Protection
+        # Update orchestrator loops
+        cfg_res = db.update_concept_config(
+            ctx,
+            "concept:orchestratore-multi-agente",
+            {"max_agent_loops": 14, "implementer_model": "qwen2.5:3b"},
+        )
+        self.assertEqual(cfg_res["config"]["max_agent_loops"], 14)
+        self.assertEqual(cfg_res["config"]["implementer_model"], "qwen2.5:3b")
+
+        # Deleting a framework core concept is strictly blocked
+        with self.assertRaises(PermissionError):
+            db.delete_concept_node(ctx, "concept:orchestratore-multi-agente")
+
+        # User-developed concept deletion succeeds
+        db.upsert_merkle_node(
+            ctx,
+            path="/attached/user/custom_module.py",
+            parent_path="/",
+            node_type="file",
+            content_hash="h1",
+            subtree_hash="s1",
+            summary_light="Light summary of custom module",
+            summary_medium="Medium summary of custom module",
+            summary_high="High summary",
+            raw_content="# Custom Module\n**Algoritmo Predittivo**\nCodice personalizzato...",
+        )
+        graph = db.get_knowledge_graph(ctx)
+        user_cids = [n["id"] for n in graph["nodes"] if not n.get("is_framework_core")]
+        self.assertTrue(any("algoritmo-predittivo" in cid for cid in user_cids))
+
+        target_cid = next(cid for cid in user_cids if "algoritmo-predittivo" in cid)
+        del_user = db.delete_concept_node(ctx, target_cid)
+        self.assertTrue(del_user["deleted"])
+
+        # 4. Verify 3 new Reviewer, PR Contract, and Agent Alignment skills are present
+        skills_dir = self.root / ".pi" / "skills"
+        hub = CorticalSkillHub(db, skills_dir)
+        skill_ids = {s.skill_id for s in hub.list_skills()}
+        self.assertIn("ai-reviewer-mandate-and-complexity", skill_ids)
+        self.assertIn("pr-contract-and-diff-constrainer", skill_ids)
+        self.assertIn("agent-instructions-alignment", skill_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,10 +11,13 @@ Solves the 5 Knowledge Base Pillars:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -135,7 +138,201 @@ CREATE TABLE IF NOT EXISTS citations (
     checked_at REAL NOT NULL,
     PRIMARY KEY (tenant_id, workspace_id, citation_id)
 );
+
+CREATE TABLE IF NOT EXISTS framework_concept_configs (
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    concept_id TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (tenant_id, workspace_id, concept_id)
+);
+
+CREATE TABLE IF NOT EXISTS deleted_concepts (
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    concept_id TEXT NOT NULL,
+    deleted_at REAL NOT NULL,
+    PRIMARY KEY (tenant_id, workspace_id, concept_id)
+);
+
+CREATE TABLE IF NOT EXISTS scoped_context_attachments (
+    attachment_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL DEFAULT 'chat',
+    item_type TEXT NOT NULL CHECK(item_type IN ('file', 'folder', 'skill', 'plugin')),
+    item_ref TEXT NOT NULL,
+    label TEXT NOT NULL,
+    depth_tier TEXT NOT NULL DEFAULT 'medium',
+    summary_preview TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    UNIQUE(tenant_id, workspace_id, scope_id, item_type, item_ref)
+);
 """
+
+
+DEFAULT_FRAMEWORK_CONCEPTS: dict[str, dict[str, Any]] = {
+    "concept:cortical-second-brain": {
+        "key": "cortical-second-brain",
+        "label": "Cortical Second Brain",
+        "kind": "hub",
+        "category": "memoria",
+        "summary": "Nucleo semantico 3+1 livelli (Light, Medium, High, Max) con Contesto Allegato, Grafo dei Concetti, Voce Dual-Path e Orchestratore Multi-Agente.",
+        "summary_medium": "Architettura cognitiva locale che separa la memoria strutturata a 3+1 livelli dalle capacità procedurali (Skill) e carica nel contesto solo file, cartelle, skill e plugin esplicitamente allegati.",
+        "default_config": {
+            "default_wiki_depth": "medium",
+            "auto_attach_chat_context": True,
+            "strict_source_isolation": True,
+        },
+        "config_schema": [
+            {"key": "default_wiki_depth", "label": "Livello Sintesi Default (3+1)", "type": "select", "options": ["light", "medium", "high", "max"]},
+            {"key": "auto_attach_chat_context", "label": "Inietta Contesto Allegato nel Prompt", "type": "boolean"},
+            {"key": "strict_source_isolation", "label": "Isola Sorgenti Non Allegate", "type": "boolean"},
+        ],
+    },
+    "concept:orchestratore-multi-agente": {
+        "key": "orchestratore-multi-agente",
+        "label": "Orchestratore Multi-Agente",
+        "kind": "concept",
+        "category": "agenti",
+        "summary": "Coordinamento su richiesta tra Analyst, Implementer e Reviewer con numero massimo di loop, modelli dedicati per ruolo e isolamento di task.",
+        "summary_medium": "Gestisce il ciclo multi-agente su richiesta esplicita: permette di configurare quanti loop massimi gli agenti eseguono e quali modelli LLM usare per Analyst, Implementer e Reviewer.",
+        "default_config": {
+            "max_agent_loops": 6,
+            "analyst_model": "qwen2.5:1.5b",
+            "implementer_model": "qwen2.5:1.5b",
+            "reviewer_model": "qwen2.5:1.5b",
+            "llm_base_url": "http://127.0.0.1:11434/v1",
+            "auto_compile_skills_on_close": True,
+        },
+        "config_schema": [
+            {"key": "max_agent_loops", "label": "Loop Massimi Agenti (Max Iterations)", "type": "number", "min": 1, "max": 30},
+            {"key": "analyst_model", "label": "Modello Ruolo Analyst (Ricerca & Piano)", "type": "text"},
+            {"key": "implementer_model", "label": "Modello Ruolo Implementer (Codice & Azione)", "type": "text"},
+            {"key": "reviewer_model", "label": "Modello Ruolo Reviewer (Verifica & Test)", "type": "text"},
+            {"key": "llm_base_url", "label": "Endpoint OpenAI/Ollama Locale", "type": "text"},
+            {"key": "auto_compile_skills_on_close", "label": "Compila Skill Automatica a Chiusura Task", "type": "boolean"},
+        ],
+    },
+    "concept:memoria-3plus1-merkle": {
+        "key": "memoria-3plus1-merkle",
+        "label": "Memoria 3+1 Livelli",
+        "kind": "concept",
+        "category": "memoria",
+        "summary": "Sintesi gerarchica deterministica: L1 Light (~50 tok), L2 Medium (~250 tok), L3 High (~1000 tok), +1 Max integrale con filtro chiacchierate.",
+        "summary_medium": "Comprime file e cartelle allegate in 3 livelli di sintesi più il testo integrale (+1 Max) e mantiene il buffer conversazionale entro una finestra FIFO controllata.",
+        "default_config": {
+            "default_wiki_depth": "medium",
+            "max_chat_buffer_turns": 20,
+            "filter_ephemeral_chitchat": True,
+            "ask_closing_questions": True,
+        },
+        "config_schema": [
+            {"key": "default_wiki_depth", "label": "Profondità Default Sintesi 3+1", "type": "select", "options": ["light", "medium", "high", "max"]},
+            {"key": "max_chat_buffer_turns", "label": "Max Turni Buffer Chiacchierate (FIFO)", "type": "number", "min": 5, "max": 100},
+            {"key": "filter_ephemeral_chitchat", "label": "Filtra Domande Effimere (Ora/Meteo/Saluti)", "type": "boolean"},
+            {"key": "ask_closing_questions", "label": "Domande di Consolidamento a Chiusura Task", "type": "boolean"},
+        ],
+    },
+    "concept:voce-neurale-anti-eco": {
+        "key": "voce-neurale-anti-eco",
+        "label": "Voce Neurale & Scudo Anti-Eco",
+        "kind": "concept",
+        "category": "voce",
+        "summary": "Sintesi vocale espressiva italiana con isolamento half-duplex dell'eco degli altoparlanti, audio ducking e barge-in con wake-word.",
+        "summary_medium": "Impedisce all'assistente di ascoltare la propria voce dagli altoparlanti, modula la prosodia italiana e permette l'interruzione vocale controllata.",
+        "default_config": {
+            "default_voice": "IsabellaNeural",
+            "speech_rate": "+4%",
+            "echo_shield_cooldown_sec": 2.2,
+            "require_wake_word_during_speech": True,
+        },
+        "config_schema": [
+            {"key": "default_voice", "label": "Voce Neurale Predefinita", "type": "select", "options": ["IsabellaNeural", "GiuseppeNeural", "ElsaNeural", "DiegoNeural", "Federica"]},
+            {"key": "speech_rate", "label": "Velocità Prosodia (es. +4%)", "type": "text"},
+            {"key": "echo_shield_cooldown_sec", "label": "Finestra Scudo Anti-Eco (secondi)", "type": "number", "min": 0.5, "max": 10.0},
+            {"key": "require_wake_word_during_speech", "label": "Richiedi 'Hey Cortical' durante Risposta", "type": "boolean"},
+        ],
+    },
+    "concept:adaptive-permission-gate": {
+        "key": "adaptive-permission-gate",
+        "label": "Adaptive Permission Gate",
+        "kind": "concept",
+        "category": "sicurezza",
+        "summary": "Guardrail deterministici contro comandi distruttivi, prevenzione furto focus finestra e apprendimento progressivo dei pattern approvati.",
+        "summary_medium": "Valuta ogni comando di sistema prima dell'esecuzione, blocca pattern distruttivi e promuove ad auto-approvati i comandi sicuri confermati dall'utente.",
+        "default_config": {
+            "security_mode": "adaptive",
+            "auto_approve_threshold": 2,
+            "block_focus_stealing": True,
+        },
+        "config_schema": [
+            {"key": "security_mode", "label": "Modalità Gate Sicurezza", "type": "select", "options": ["adaptive", "strict"]},
+            {"key": "auto_approve_threshold", "label": "Soglia Conferme per Auto-Approvazione", "type": "number", "min": 1, "max": 10},
+            {"key": "block_focus_stealing", "label": "Prevenzione Furto Focus Finestre GUI", "type": "boolean"},
+        ],
+    },
+    "concept:ai-reviewer-mandate-complexity": {
+        "key": "ai-reviewer-mandate-complexity",
+        "label": "Mandato Reviewer & Metriche",
+        "kind": "concept",
+        "category": "agenti",
+        "summary": "Mandato di revisione per codice AI e metriche oggettive: Cyclomatic < 10, Cognitive < 15, LOC < 50. Previene debito tecnico e over-generation.",
+        "summary_medium": "Sposta il mandato da 'cattura bug ovvi' a 'verifica correttezza per la codebase, a questa scala e per il business'. Impedisce di saltare la review perché il codice sembra pulito.",
+        "default_config": {
+            "max_cyclomatic_complexity": 10,
+            "max_cognitive_complexity": 15,
+            "max_function_loc": 50,
+            "enforce_strict_metrics": True,
+        },
+        "config_schema": [
+            {"key": "max_cyclomatic_complexity", "label": "Soglia Massima Complessità Ciclica", "type": "number", "min": 5, "max": 25},
+            {"key": "max_cognitive_complexity", "label": "Soglia Massima Complessità Cognitiva", "type": "number", "min": 5, "max": 30},
+            {"key": "max_function_loc", "label": "Righe di Codice Massime per Funzione (LOC)", "type": "number", "min": 20, "max": 100},
+            {"key": "enforce_strict_metrics", "label": "Blocca Funzioni Fuori Soglia", "type": "boolean"},
+        ],
+    },
+    "concept:pr-contract-diff-constrainer": {
+        "key": "pr-contract-diff-constrainer",
+        "label": "Contratti PR & Diff Cap",
+        "kind": "concept",
+        "category": "architettura",
+        "summary": "Vincoli di dimensione review per codice AI (diff max 250 righe, 3-5 file) e Golden Rule: la contribuzione deve valere più del tempo di review.",
+        "summary_medium": "Forza una conversazione quando la PR supera la soglia ('questo potrebbe essere 3 PR'), impone verbi imperativi nei titoli, validazione del ticket collegato e pair programming.",
+        "default_config": {
+            "max_diff_lines": 250,
+            "max_files_touched": 5,
+            "require_linked_issue_assessment": True,
+            "encourage_pair_programming": True,
+        },
+        "config_schema": [
+            {"key": "max_diff_lines", "label": "Limite Righe Diff per PR (Diff Cap)", "type": "number", "min": 50, "max": 600},
+            {"key": "max_files_touched", "label": "Massimo File Modificati per PR", "type": "number", "min": 1, "max": 15},
+            {"key": "require_linked_issue_assessment", "label": "Verifica Obbligatoria Ticket Collegato", "type": "boolean"},
+            {"key": "encourage_pair_programming", "label": "Suggerisci Pair Programming su PR Complesse", "type": "boolean"},
+        ],
+    },
+    "concept:agent-instructions-alignment": {
+        "key": "agent-instructions-alignment",
+        "label": "Allineamento Zero-Drift (AGENTS.md)",
+        "kind": "concept",
+        "category": "architettura",
+        "summary": "Single Artifact: il file di istruzioni per l'agente (AGENTS.md) è lo stesso standard di review. Zero drift ed eliminazione dei prompt ripetitivi.",
+        "summary_medium": "Mantiene file esterni condivisi per standardizzare cosa sa l'AI sulle norme del team tra diverse sessioni di chat, prevenendo output inconsistenti tra sviluppatori.",
+        "default_config": {
+            "rules_file": "AGENTS.md",
+            "zero_drift_review_standard": True,
+            "standardize_team_norms": True,
+        },
+        "config_schema": [
+            {"key": "rules_file", "label": "File Regole Condivise (es. AGENTS.md)", "type": "text"},
+            {"key": "zero_drift_review_standard", "label": "Zero-Drift: Istruzioni Agente = Standard Review", "type": "boolean"},
+            {"key": "standardize_team_norms", "label": "Standardizza Norme Team tra Sessioni", "type": "boolean"},
+        ],
+    },
+}
 
 
 @dataclass
@@ -504,12 +701,407 @@ class CorticalWikiDB:
             "edges": [dict(ed) for ed in edges],
         }
 
+    def get_concept_config(
+        self,
+        ctx: AccessContext,
+        concept_id: str,
+    ) -> dict[str, Any]:
+        """Returns the merged configuration dictionary for a framework or custom concept."""
+        defaults = dict(
+            DEFAULT_FRAMEWORK_CONCEPTS.get(concept_id, {}).get("default_config", {})
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT config_json FROM framework_concept_configs
+                   WHERE tenant_id = ? AND workspace_id = ? AND concept_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, concept_id),
+            ).fetchone()
+        if row and row["config_json"]:
+            try:
+                overrides = json.loads(row["config_json"])
+                if isinstance(overrides, dict):
+                    defaults.update(overrides)
+            except Exception:
+                pass
+        return defaults
+
+    def update_concept_config(
+        self,
+        ctx: AccessContext,
+        concept_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Updates and persists configuration parameters for a concept."""
+        current = self.get_concept_config(ctx, concept_id)
+        for k, v in updates.items():
+            current[k] = v
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO framework_concept_configs(
+                       tenant_id, workspace_id, concept_id, config_json, updated_at
+                   ) VALUES (?, ?, ?, ?, ?)""",
+                (ctx.tenant_id, ctx.workspace_id, concept_id, json.dumps(current), now),
+            )
+        return {
+            "concept_id": concept_id,
+            "is_framework_core": concept_id in DEFAULT_FRAMEWORK_CONCEPTS,
+            "config": current,
+            "updated_at": now,
+        }
+
+    def delete_concept_node(
+        self,
+        ctx: AccessContext,
+        node_id: str,
+    ) -> dict[str, Any]:
+        """Deletes a user-developed concept/insight/skill/episode; blocks deletion of core framework concepts."""
+        if node_id in DEFAULT_FRAMEWORK_CONCEPTS:
+            raise PermissionError(
+                f"Il concetto '{node_id}' è un pilastro fondamentale del framework Cortical e non può essere eliminato (puoi però configurarne i parametri)."
+            )
+
+        now = time.time()
+        deleted_items = 0
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO deleted_concepts(
+                       tenant_id, workspace_id, concept_id, deleted_at
+                   ) VALUES (?, ?, ?, ?)""",
+                (ctx.tenant_id, ctx.workspace_id, node_id, now),
+            )
+            deleted_items += 1
+
+            if node_id.startswith("episode:"):
+                ep_id = node_id.split(":", 1)[1]
+                conn.execute(
+                    "DELETE FROM task_episodes WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                    (ctx.tenant_id, ctx.workspace_id, ep_id),
+                )
+                conn.execute(
+                    """DELETE FROM macro_edges
+                       WHERE tenant_id = ? AND workspace_id = ?
+                         AND (source_id = ? OR target_id = ?)""",
+                    (ctx.tenant_id, ctx.workspace_id, ep_id, ep_id),
+                )
+            elif node_id.startswith("insight:"):
+                ins_id = node_id.split(":", 1)[1]
+                has_ins = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_insights'"
+                ).fetchone()
+                if has_ins:
+                    conn.execute(
+                        "DELETE FROM memory_insights WHERE tenant_id = ? AND workspace_id = ? AND insight_id = ?",
+                        (ctx.tenant_id, ctx.workspace_id, ins_id),
+                    )
+            elif node_id.startswith("skill:"):
+                sk_id = node_id.split(":", 1)[1]
+                has_sk = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='learned_skills_registry'"
+                ).fetchone()
+                if has_sk:
+                    conn.execute(
+                        "DELETE FROM learned_skills_registry WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?",
+                        (ctx.tenant_id, ctx.workspace_id, sk_id),
+                    )
+            elif node_id.startswith("concept:"):
+                slug = node_id.split(":", 1)[1]
+                m_rows = conn.execute(
+                    """SELECT path, summary_light, summary_medium, raw_content
+                       FROM merkle_nodes
+                       WHERE tenant_id = ? AND workspace_id = ? AND node_type = 'file'""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+                for r in m_rows:
+                    p = str(r["path"])
+                    stem_slug = re.sub(r"[^a-z0-9àèéìòù]+", "-", Path(p).stem.lower()).strip("-")
+                    raw_low = str(r["raw_content"] or r["summary_light"] or "").lower()
+                    if stem_slug == slug or slug.replace("-", " ") in raw_low:
+                        conn.execute(
+                            "DELETE FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                            (ctx.tenant_id, ctx.workspace_id, p),
+                        )
+                        conn.execute(
+                            "DELETE FROM merkle_fts WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                            (ctx.tenant_id, ctx.workspace_id, p),
+                        )
+
+        return {"deleted": True, "node_id": node_id, "deleted_count": deleted_items}
+
+    def clear_unattached_self_repo_nodes(
+        self,
+        ctx: AccessContext,
+        self_repo_root: Optional[str | Path] = None,
+    ) -> int:
+        """Removes any merkle_nodes that were auto-crawled from Cortical's own repository unless explicitly attached."""
+        attached_wiki_paths: set[str] = set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT metadata_json FROM scoped_context_attachments
+                   WHERE tenant_id = ? AND workspace_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            for r in rows:
+                try:
+                    meta = json.loads(r["metadata_json"] or "{}")
+                    for wp in meta.get("wiki_paths", []):
+                        attached_wiki_paths.add(str(wp))
+                except Exception:
+                    pass
+
+            # Identify self-repo internal paths (e.g. /src/cortical/*, /tests/test_cortical_all.py, /pyproject.toml)
+            self_prefixes = (
+                "/src/cortical",
+                "/tests/test_cortical",
+                "/scripts/setup.sh",
+                "/scripts/start_live.sh",
+                "/.pi/extensions/cortical-harness.ts",
+                "/pyproject.toml",
+                "/package.json",
+                "/NOTICE",
+                "/LICENSE",
+            )
+            m_rows = conn.execute(
+                "SELECT path FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ?",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            removed = 0
+            for mr in m_rows:
+                p = str(mr["path"])
+                if p in attached_wiki_paths:
+                    continue
+                if any(p == pref or p.startswith(pref + "/") for pref in self_prefixes):
+                    conn.execute(
+                        "DELETE FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                        (ctx.tenant_id, ctx.workspace_id, p),
+                    )
+                    conn.execute(
+                        "DELETE FROM merkle_fts WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                        (ctx.tenant_id, ctx.workspace_id, p),
+                    )
+                    removed += 1
+        return removed
+
+    def attach_context_item(
+        self,
+        ctx: AccessContext,
+        *,
+        scope_id: str = "chat",
+        item_type: str,
+        item_ref: str,
+        depth_tier: str = "medium",
+        label: Optional[str] = None,
+        inline_content: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Attaches a file, folder, skill, or plugin to a specific chat or task context (like ChatGPT / Claude Code)."""
+        from .crawler import DEFAULT_IGNORE_DIRS, TEXT_EXTENSIONS, deterministic_extractive_summarizer
+
+        item_type = item_type.lower().strip()
+        if item_type not in {"file", "folder", "skill", "plugin"}:
+            raise ValueError(f"Unsupported context item_type: {item_type}")
+
+        scope_id = (scope_id or "chat").strip() or "chat"
+        depth_tier = depth_tier if depth_tier in {"light", "medium", "high", "max"} else "medium"
+        item_ref = item_ref.strip()
+        if not item_ref:
+            raise ValueError("item_ref cannot be empty")
+
+        self.ensure_workspace(ctx, root_path="/", can_write=True)
+
+        wiki_paths: list[str] = []
+        summary_preview = ""
+        resolved_label = label or Path(item_ref).name or item_ref
+
+        if item_type == "file":
+            p = Path(item_ref).expanduser()
+            if p.exists() and p.is_file():
+                raw_text = p.read_text(encoding="utf-8", errors="replace")[:48000]
+                resolved_label = label or p.name
+            else:
+                raw_text = inline_content or f"# {resolved_label}\nAllegato contestuale: {item_ref}"
+            wiki_path = f"/attached/{scope_id}/{resolved_label}"
+            sums = deterministic_extractive_summarizer(wiki_path, raw_text, "file")
+            chash = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+            self.upsert_merkle_node(
+                ctx,
+                path=wiki_path,
+                parent_path="/",
+                node_type="file",
+                content_hash=chash,
+                subtree_hash=chash,
+                summary_light=sums["light"],
+                summary_medium=sums["medium"],
+                summary_high=sums["high"],
+                raw_content=raw_text,
+            )
+            wiki_paths.append(wiki_path)
+            summary_preview = sums.get(depth_tier if depth_tier != "max" else "high", sums["medium"])[:320]
+
+        elif item_type == "folder":
+            p = Path(item_ref).expanduser()
+            resolved_label = label or p.name or item_ref
+            folder_prefix = f"/attached/{scope_id}/{resolved_label}"
+            collected_lights: list[str] = []
+            if p.exists() and p.is_dir():
+                count = 0
+                for cur_root, dirs, files in os.walk(p):
+                    dirs[:] = sorted(
+                        d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")
+                    )
+                    for fname in sorted(files):
+                        if count >= 35:
+                            break
+                        fpath = Path(cur_root) / fname
+                        if fpath.suffix.lower() not in TEXT_EXTENSIONS:
+                            continue
+                        try:
+                            raw_text = fpath.read_text(encoding="utf-8", errors="replace")[:32000]
+                        except Exception:
+                            continue
+                        rel = fpath.relative_to(p).as_posix()
+                        wpath = f"{folder_prefix}/{rel}"
+                        sums = deterministic_extractive_summarizer(wpath, raw_text, "file")
+                        chash = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+                        self.upsert_merkle_node(
+                            ctx,
+                            path=wpath,
+                            parent_path=folder_prefix,
+                            node_type="file",
+                            content_hash=chash,
+                            subtree_hash=chash,
+                            summary_light=sums["light"],
+                            summary_medium=sums["medium"],
+                            summary_high=sums["high"],
+                            raw_content=raw_text,
+                        )
+                        wiki_paths.append(wpath)
+                        collected_lights.append(sums["light"])
+                        count += 1
+            summary_preview = (
+                f"Cartella '{resolved_label}' ({len(wiki_paths)} file indicizzati 3+1): "
+                + " | ".join(collected_lights[:3])
+            )[:320]
+
+        elif item_type == "skill":
+            resolved_label = label or item_ref
+            summary_preview = f"Skill procedurale attiva nel contesto '{scope_id}': {resolved_label}"
+
+        elif item_type == "plugin":
+            resolved_label = label or item_ref
+            summary_preview = f"Plugin / MCP attivo nel contesto '{scope_id}': {resolved_label}"
+
+        now = time.time()
+        att_id = f"att_{hashlib.sha1(f'{scope_id}:{item_type}:{item_ref}'.encode('utf-8')).hexdigest()[:10]}"
+        meta = {"wiki_paths": wiki_paths, "full_ref": item_ref}
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO scoped_context_attachments(
+                       attachment_id, tenant_id, workspace_id, scope_id,
+                       item_type, item_ref, label, depth_tier, summary_preview,
+                       metadata_json, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    att_id,
+                    ctx.tenant_id,
+                    ctx.workspace_id,
+                    scope_id,
+                    item_type,
+                    item_ref,
+                    resolved_label,
+                    depth_tier,
+                    summary_preview,
+                    json.dumps(meta),
+                    now,
+                ),
+            )
+            # Clear from deleted_concepts if re-attached
+            slug = re.sub(r"[^a-z0-9àèéìòù]+", "-", Path(resolved_label).stem.lower()).strip("-")
+            if slug:
+                conn.execute(
+                    "DELETE FROM deleted_concepts WHERE tenant_id = ? AND workspace_id = ? AND concept_id = ?",
+                    (ctx.tenant_id, ctx.workspace_id, f"concept:{slug}"),
+                )
+
+        return {
+            "attachment_id": att_id,
+            "scope_id": scope_id,
+            "item_type": item_type,
+            "item_ref": item_ref,
+            "label": resolved_label,
+            "depth_tier": depth_tier,
+            "summary_preview": summary_preview,
+            "wiki_paths": wiki_paths,
+            "created_at": now,
+        }
+
+    def detach_context_item(
+        self,
+        ctx: AccessContext,
+        attachment_id: str,
+    ) -> dict[str, Any]:
+        """Detaches an item from the chat/task context and removes its transient wiki nodes."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM scoped_context_attachments
+                   WHERE tenant_id = ? AND workspace_id = ? AND attachment_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, attachment_id),
+            ).fetchone()
+            if not row:
+                return {"detached": False, "attachment_id": attachment_id}
+            meta = json.loads(row["metadata_json"] or "{}")
+            for wp in meta.get("wiki_paths", []):
+                conn.execute(
+                    "DELETE FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                    (ctx.tenant_id, ctx.workspace_id, wp),
+                )
+                conn.execute(
+                    "DELETE FROM merkle_fts WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                    (ctx.tenant_id, ctx.workspace_id, wp),
+                )
+            conn.execute(
+                """DELETE FROM scoped_context_attachments
+                   WHERE tenant_id = ? AND workspace_id = ? AND attachment_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, attachment_id),
+            )
+        return {"detached": True, "attachment_id": attachment_id}
+
+    def list_context_attachments(
+        self,
+        ctx: AccessContext,
+        scope_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Lists active context attachments for a chat or task scope."""
+        with self._connect() as conn:
+            if scope_id:
+                rows = conn.execute(
+                    """SELECT * FROM scoped_context_attachments
+                       WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?
+                       ORDER BY created_at DESC""",
+                    (ctx.tenant_id, ctx.workspace_id, scope_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM scoped_context_attachments
+                       WHERE tenant_id = ? AND workspace_id = ?
+                       ORDER BY created_at DESC""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata_json") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            out.append(d)
+        return out
+
     def get_knowledge_graph(
         self,
         ctx: AccessContext,
         max_nodes: int = 60,
     ) -> dict[str, Any]:
-        """Builds a Semantic Concept Knowledge Graph (Concepts, Insights, Skills & Tasks — NOT raw file listings)."""
+        """Builds a Semantic Concept Knowledge Graph with protected configurable Framework Concepts and deletable User Concepts."""
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -532,24 +1124,46 @@ class CorticalWikiDB:
                 return "agenti"
             return "architettura"
 
-        # 0. Root Semantic Hub
+        with self._connect() as conn:
+            deleted_rows = conn.execute(
+                "SELECT concept_id FROM deleted_concepts WHERE tenant_id = ? AND workspace_id = ?",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            deleted_set = {str(r["concept_id"]) for r in deleted_rows}
+
+        # 0. Core Protected Framework Concepts (always present, non-deletable, live-configurable)
         hub_id = "concept:cortical-second-brain"
-        seen_ids.add(hub_id)
-        nodes.append(
-            {
-                "id": hub_id,
-                "key": "cortical-second-brain",
-                "label": "Cortical Second Brain",
-                "kind": "hub",
-                "category": "memoria",
-                "summary": "Nucleo semantico 3+1 livelli (Light, Medium, High, Max) con Grafo dei Concetti, Voce Dual-Path e Orchestratore Multi-Agente.",
-                "summary_medium": "Architettura cognitiva locale che separa la memoria strutturata a 3+1 livelli dalle capacità procedurali (Skill) e collega i concetti chiave estratti dai compiti svolti.",
-                "sources": ["/"],
+        for cid, meta in DEFAULT_FRAMEWORK_CONCEPTS.items():
+            seen_ids.add(cid)
+            cfg = self.get_concept_config(ctx, cid)
+            c_node = {
+                "id": cid,
+                "key": meta["key"],
+                "label": meta["label"],
+                "kind": meta["kind"],
+                "category": meta["category"],
+                "is_framework_core": True,
+                "deletable": False,
+                "config": cfg,
+                "config_schema": meta["config_schema"],
+                "summary": meta["summary"],
+                "summary_medium": meta["summary_medium"],
+                "sources": ["framework:core"],
             }
-        )
+            concept_by_slug[cid] = c_node
+            nodes.append(c_node)
+            if cid != hub_id:
+                edges.append(
+                    {
+                        "source": hub_id,
+                        "target": cid,
+                        "relation": "pilastro",
+                        "kind": "concept_link",
+                    }
+                )
 
         with self._connect() as conn:
-            # 1. Extract Semantic Concepts from accessible Wiki knowledge (excluding raw directory listings)
+            # 1. Extract User-Developed Concepts from accessible Wiki knowledge (deletable!)
             m_rows = conn.execute(
                 """SELECT path, summary_light, summary_medium, summary_high, raw_content
                    FROM merkle_nodes
@@ -587,6 +1201,8 @@ class CorticalWikiDB:
                 primary_title = extracted_titles[0]
                 primary_slug = _slugify(primary_title)
                 primary_id = f"concept:{primary_slug}"
+                if primary_id in deleted_set:
+                    continue
                 path_to_primary_concept[doc_path] = primary_id
 
                 if primary_id not in concept_by_slug:
@@ -597,6 +1213,13 @@ class CorticalWikiDB:
                         "label": primary_title[:32],
                         "kind": "concept",
                         "category": cat,
+                        "is_framework_core": False,
+                        "deletable": True,
+                        "config": self.get_concept_config(ctx, primary_id),
+                        "config_schema": [
+                            {"key": "preferred_depth", "label": "Profondità Sintesi Concetto", "type": "select", "options": ["light", "medium", "high", "max"]},
+                            {"key": "priority_weight", "label": "Peso Priorità nel Contesto", "type": "number", "min": 1, "max": 10},
+                        ],
                         "summary": str(r["summary_light"] or primary_title)[:220],
                         "summary_medium": str(r["summary_medium"] or r["summary_light"] or "")[:500],
                         "summary_high": str(r["summary_high"] or "")[:1000],
@@ -609,7 +1232,7 @@ class CorticalWikiDB:
                         {
                             "source": hub_id,
                             "target": primary_id,
-                            "relation": "pilastro",
+                            "relation": "concetto_utente",
                             "kind": "concept_link",
                         }
                     )
@@ -617,11 +1240,11 @@ class CorticalWikiDB:
                     if doc_path not in concept_by_slug[primary_id]["sources"]:
                         concept_by_slug[primary_id]["sources"].append(doc_path)
 
-                # Extract up to 3 sub-concepts per document and link them to the primary concept
-                for sub_title in extracted_titles[1:4]:
+                # Extract up to 2 sub-concepts per document and link them to the primary concept
+                for sub_title in extracted_titles[1:3]:
                     sub_slug = _slugify(sub_title)
                     sub_id = f"concept:{sub_slug}"
-                    if sub_id == primary_id or len(nodes) >= max_nodes:
+                    if sub_id == primary_id or sub_id in deleted_set or len(nodes) >= max_nodes:
                         continue
                     if sub_id not in concept_by_slug:
                         cat = _infer_category(sub_title, raw)
@@ -631,6 +1254,12 @@ class CorticalWikiDB:
                             "label": sub_title[:32],
                             "kind": "concept",
                             "category": cat,
+                            "is_framework_core": False,
+                            "deletable": True,
+                            "config": self.get_concept_config(ctx, sub_id),
+                            "config_schema": [
+                                {"key": "preferred_depth", "label": "Profondità Sintesi Concetto", "type": "select", "options": ["light", "medium", "high", "max"]},
+                            ],
                             "summary": f"Concetto correlato a '{primary_title}': {str(r['summary_light'])[:160]}",
                             "summary_medium": str(r["summary_medium"] or r["summary_light"] or "")[:450],
                             "sources": [doc_path],
@@ -647,59 +1276,7 @@ class CorticalWikiDB:
                         }
                     )
 
-            # 2. If the Wiki has very few documents yet, seed core architectural concepts so the graph is immediately rich
-            default_core_concepts = [
-                (
-                    "memoria-3plus1-merkle",
-                    "Memoria 3+1 Livelli",
-                    "memoria",
-                    "Sintesi gerarchica deterministica: L1 Light (~50 tok), L2 Medium (~250 tok), L3 High (~1000 tok), +1 Max integrale.",
-                ),
-                (
-                    "orchestratore-multi-agente",
-                    "Orchestratore Multi-Agente",
-                    "agenti",
-                    "Coordinamento su richiesta tra Analyst, Implementer e Reviewer con isolamento della memoria di task.",
-                ),
-                (
-                    "voce-neurale-anti-eco",
-                    "Voce Neurale & Scudo Anti-Eco",
-                    "voce",
-                    "Sintesi vocale espressiva italiana con isolamento dell'eco degli altoparlanti e barge-in tramite wake-word.",
-                ),
-                (
-                    "adaptive-permission-gate",
-                    "Adaptive Permission Gate",
-                    "sicurezza",
-                    "Guardrail deterministici contro comandi distruttivi e apprendimento progressivo dei pattern approvati.",
-                ),
-            ]
-            for slug, label, cat, desc in default_core_concepts:
-                cid = f"concept:{slug}"
-                if cid not in seen_ids and len(nodes) < max_nodes:
-                    seen_ids.add(cid)
-                    c_node = {
-                        "id": cid,
-                        "key": slug,
-                        "label": label,
-                        "kind": "concept",
-                        "category": cat,
-                        "summary": desc,
-                        "summary_medium": desc,
-                        "sources": ["/"],
-                    }
-                    concept_by_slug[cid] = c_node
-                    nodes.append(c_node)
-                    edges.append(
-                        {
-                            "source": hub_id,
-                            "target": cid,
-                            "relation": "pilastro",
-                            "kind": "concept_link",
-                        }
-                    )
-
-            # 3. Task Episodes (active & archived traces connected to concepts)
+            # 2. Task Episodes (active & archived traces connected to concepts — deletable)
             ep_rows = conn.execute(
                 """SELECT * FROM task_episodes
                    WHERE tenant_id = ? AND workspace_id = ?
@@ -709,6 +1286,8 @@ class CorticalWikiDB:
             for ep in ep_rows:
                 ep_dict = dict(ep)
                 nid = f"episode:{ep_dict['episode_id']}"
+                if nid in deleted_set:
+                    continue
                 seen_ids.add(nid)
                 state = ep_dict.get("lifecycle_state", ep_dict.get("outcome_status", "active"))
                 trace = ep_dict.get("archived_trace") or ep_dict.get("learned_summary", "")
@@ -721,14 +1300,15 @@ class CorticalWikiDB:
                         "kind": "task_archived" if state == "archived" else "task_active",
                         "category": cat,
                         "state": state,
+                        "is_framework_core": False,
+                        "deletable": True,
                         "summary": trace[:220] or ep_dict.get("goal", ""),
                         "sources": [f"task:{ep_dict['episode_id']}"],
                     }
                 )
-                # Connect task episode to matching category concept or hub
                 linked = False
                 for cid, cnode in concept_by_slug.items():
-                    if cnode.get("category") == cat:
+                    if cnode.get("category") == cat and cid != hub_id:
                         edges.append(
                             {
                                 "source": nid,
@@ -749,7 +1329,7 @@ class CorticalWikiDB:
                         }
                     )
 
-            # 4. Curated Memory Insights (connected to concepts)
+            # 3. Curated Memory Insights (connected to concepts — deletable)
             has_insights = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_insights'"
             ).fetchone()
@@ -762,6 +1342,8 @@ class CorticalWikiDB:
                 ).fetchall()
                 for ins in ins_rows:
                     nid = f"insight:{ins['insight_id']}"
+                    if nid in deleted_set:
+                        continue
                     seen_ids.add(nid)
                     cat = _infer_category(ins["category"], ins["insight_text"])
                     nodes.append(
@@ -771,12 +1353,14 @@ class CorticalWikiDB:
                             "label": f"💡 {ins['category'][:24]}",
                             "kind": "insight",
                             "category": cat,
+                            "is_framework_core": False,
+                            "deletable": True,
                             "summary": ins["insight_text"],
                             "sources": ["conversazione"],
                         }
                     )
                     target_cid = next(
-                        (cid for cid, cn in concept_by_slug.items() if cn.get("category") == cat),
+                        (cid for cid, cn in concept_by_slug.items() if cn.get("category") == cat and cid != hub_id),
                         hub_id,
                     )
                     edges.append(
@@ -788,7 +1372,7 @@ class CorticalWikiDB:
                         }
                     )
 
-            # 5. Learned Skills (connected to concepts)
+            # 4. Learned Skills (connected to concepts — deletable)
             has_learned = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='learned_skills_registry'"
             ).fetchone()
@@ -801,6 +1385,8 @@ class CorticalWikiDB:
                 ).fetchall()
                 for sk in sk_rows:
                     nid = f"skill:{sk['skill_id']}"
+                    if nid in deleted_set:
+                        continue
                     seen_ids.add(nid)
                     cat = _infer_category(sk["name"], sk["description"])
                     nodes.append(
@@ -810,6 +1396,8 @@ class CorticalWikiDB:
                             "label": f"⚡ {sk['name'][:26]}",
                             "kind": "skill",
                             "category": cat,
+                            "is_framework_core": False,
+                            "deletable": True,
                             "summary": sk["description"],
                             "sources": [sk["skill_path"]],
                         }
@@ -824,7 +1412,7 @@ class CorticalWikiDB:
                         }
                     )
 
-            # 6. High-level Macro-Graph edges (mapped from file subtrees to their primary concept)
+            # 5. High-level Macro-Graph edges (mapped from file subtrees to their primary concept)
             e_rows = conn.execute(
                 """SELECT * FROM macro_edges
                    WHERE tenant_id = ? AND workspace_id = ?
@@ -858,5 +1446,7 @@ class CorticalWikiDB:
                 "node_count": len(nodes),
                 "edge_count": len(edges),
                 "concept_count": sum(1 for n in nodes if n.get("kind") in {"hub", "concept"}),
+                "framework_core_count": sum(1 for n in nodes if n.get("is_framework_core")),
+                "user_concept_count": sum(1 for n in nodes if not n.get("is_framework_core")),
             },
         }

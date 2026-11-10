@@ -17,6 +17,7 @@ import datetime
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import threading
@@ -57,10 +58,26 @@ NEURAL_ITALIAN_VOICES = {
 
 
 def shape_expressive_italian_text(text: str) -> str:
-    """Naturalizes technical symbols, numbers, and punctuation for expressive Italian speech."""
+    """Naturalizes technical symbols, numbers, and punctuation for expressive Italian speech, resolving any escaped unicode codes."""
     import re as _re
 
     out = text.strip()
+
+    # 0. Decode any literal unicode or ascii escape representations (\u00e0 -> à, \u00e8 -> è, etc.)
+    # This prevents TTS from literally spelling out "barra inversa 00 e zero..."
+    def _repl_u(m: _re.Match[str]) -> str:
+        try:
+            return chr(int(m.group(1), 16))
+        except Exception:
+            return m.group(0)
+
+    out = _re.sub(r"\\u([0-9a-fA-F]{4})", _repl_u, out)
+    out = _re.sub(r"\\x([0-9a-fA-F]{2})", _repl_u, out)
+    # Common accent octal/hex fallbacks
+    out = out.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"')
+    out = _re.sub(r"\\[0-9]{2,3}", " ", out)  # remove stray octal escapes
+
+    # Strip markdown syntax
     out = _re.sub(r"[`*_#]+", "", out)
     out = _re.sub(r"\(\s*", ", ", out)
     out = _re.sub(r"\s*\)", ", ", out)
@@ -164,12 +181,13 @@ def speak_native_tts(
         if neural_voice and Path(edge_bin).exists():
             # Unique atomic MP3 path per utterance prevents file overwrite/stutter
             mp3_path = f"/tmp/cortical_tts_{os.getpid()}_{int(time.time() * 1000)}.mp3"
+            quoted_text = shlex.quote(spoken_natural)
             if sys_name == "Darwin" and shutil.which("afplay"):
                 cmd = (
                     f'"{edge_bin}" --voice "{neural_voice}" '
-                    f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
+                    f'--text {quoted_text} --write-media "{mp3_path}" >/dev/null 2>&1 '
                     f'&& (afplay -v {vol_clamp:.2f} "{mp3_path}" >/dev/null 2>&1; rm -f "{mp3_path}") '
-                    f'|| (rm -f "{mp3_path}"; say -v Alice -r {rate} {json.dumps(spoken_natural)})'
+                    f'|| (rm -f "{mp3_path}"; say -v Alice -r {rate} {quoted_text})'
                 )
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
@@ -182,7 +200,7 @@ def speak_native_tts(
                 player = "mpv --no-terminal" if shutil.which("mpv") else "ffplay -nodisp -autoexit -loglevel quiet"
                 cmd = (
                     f'"{edge_bin}" --voice "{neural_voice}" '
-                    f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
+                    f'--text {quoted_text} --write-media "{mp3_path}" >/dev/null 2>&1 '
                     f'&& ({player} "{mp3_path}" >/dev/null 2>&1; rm -f "{mp3_path}")'
                 )
                 with _ACTIVE_TTS_LOCK:
@@ -212,7 +230,7 @@ def speak_native_tts(
             paola_model = Path.home() / ".local/share/local-ai/models/piper/it_IT-paola-medium.onnx"
             if Path(piper_bin).exists() and paola_model.exists() and shutil.which("aplay"):
                 cmd = (
-                    f'printf %s {json.dumps(spoken_natural)} | "{piper_bin}" --model "{paola_model}" '
+                    f'printf %s {shlex.quote(spoken_natural)} | "{piper_bin}" --model "{paola_model}" '
                     f"--length_scale 0.94 --noise_w 0.85 --output-raw "
                     f"| aplay -r 22050 -f S16_LE -t raw - >/dev/null 2>&1"
                 )
@@ -479,25 +497,49 @@ class PiAgentManager:
     ) -> None:
         ctx = AccessContext()
         try:
+            orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+            max_loops = int(orch_cfg.get("max_agent_loops", 6))
+            analyst_model = str(orch_cfg.get("analyst_model", "qwen2.5:1.5b"))
+            impl_model = str(orch_cfg.get("implementer_model", "qwen2.5:1.5b"))
+            rev_model = str(orch_cfg.get("reviewer_model", "qwen2.5:1.5b"))
+            attachments = self.wiki_db.list_context_attachments(ctx, scope_id="chat")
+            att_summary = (
+                ", ".join(f"{a['item_type']}:{a['label']}" for a in attachments)
+                if attachments
+                else "Nessun file/cartella allegata (contesto isolato)"
+            )
+
             self._append_step(
                 session_id,
                 "thinking",
-                f"Inizializzazione Task Esplicito `pi` (Wiki Depth: {wiki_depth.upper()}, Memoria Isolata per Task)",
-                f"Obiettivo: {goal}",
+                f"Inizializzazione Task Esplicito `pi` (Wiki: {wiki_depth.upper()}, Max Loop: {max_loops})",
+                f"Obiettivo: {goal}\nModelli Configurati: Analyst={analyst_model}, Implementer={impl_model}, Reviewer={rev_model}\nContesto Allegato: {att_summary}",
             )
-            self.memory_curator.add_task_working_note(session_id, f"Avvio task: {goal}")
+            self.memory_curator.add_task_working_note(session_id, f"Avvio task: {goal} | Allegati: {att_summary}")
             time.sleep(0.1)
 
-            root_nav = self.wiki_db.navigate(ctx, path="/", depth=DepthTier(wiki_depth))
-            children_summary = "\n".join(
-                f"  • {c['path']} ({c['node_type']}): {c['summary'][:120]}"
-                for c in root_nav.get("children", [])[:10]
-            )
+            try:
+                root_nav = self.wiki_db.navigate(ctx, path="/", depth=DepthTier(wiki_depth))
+                children_summary = "\n".join(
+                    f"  • {c['path']} ({c['node_type']}): {c['summary'][:120]}"
+                    for c in root_nav.get("children", [])[:10]
+                ) or "  • (Radice pronta, nessun sotto-nodo)"
+                sub_hash = root_nav["subtree_hash"][:16]
+            except KeyError:
+                children_summary = (
+                    "\n".join(
+                        f"  • [{a['item_type'].upper()}] {a['label']}: {a.get('summary_preview', '')[:120]}"
+                        for a in attachments
+                    )
+                    or "  • Nessun file sorgente pre-caricato automaticamente (usa '+ Allega al Contesto' per aggiungere file o cartelle)."
+                )
+                sub_hash = "isolated-context"
+
             self._append_step(
                 session_id,
                 "tool_call",
                 f"mcp__cortical-wiki__wiki_navigate(path='/', depth='{wiki_depth}')",
-                f"Subtree Hash: {root_nav['subtree_hash'][:16]}…\nNodi trovati:\n{children_summary}",
+                f"Subtree Hash: {sub_hash}…\nContesto Attivo:\n{children_summary}",
                 {"tool": "wiki_navigate", "depth": wiki_depth},
             )
 
@@ -845,9 +887,148 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: #cbd5e1;
     }
     .tree-node:hover { background: var(--panel-hover); color: var(--accent); }
+
+    /* INTERACTIVE HELP ICONS (?) WITH HOVER TOOLTIP & CLICK-TO-DOCS DRAWER */
+    .help-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: rgba(56, 189, 248, 0.14); color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      font-size: 0.7rem; font-weight: 800; font-family: var(--mono);
+      cursor: pointer; margin-left: 6px; transition: all 0.15s;
+      vertical-align: middle; user-select: none;
+    }
+    .help-btn:hover {
+      background: var(--accent); color: #070b14;
+      box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+      transform: scale(1.08);
+    }
+    .floating-tooltip {
+      position: fixed; z-index: 9999; pointer-events: none;
+      max-width: 310px; background: #0b1324; color: #f1f5f9;
+      border: 1px solid var(--accent); border-radius: 10px;
+      padding: 10px 12px; font-size: 0.77rem; line-height: 1.45;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.65);
+      display: none;
+    }
+    .floating-tooltip .tt-hint {
+      display: block; margin-top: 5px; font-size: 0.68rem;
+      color: var(--accent); font-family: var(--mono);
+    }
+
+    /* SCOPED CONTEXT ATTACHMENT BAR (ChatGPT / Claude Code Style) */
+    .context-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap; padding: 6px 10px;
+      background: #080e1c; border: 1px solid var(--border); border-radius: 9px;
+    }
+    .context-chips {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1;
+    }
+    .ctx-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px; border-radius: 999px; font-size: 0.74rem;
+      background: rgba(56, 189, 248, 0.13); color: #e2e8f0;
+      border: 1px solid rgba(56, 189, 248, 0.35); font-family: var(--mono);
+    }
+    .ctx-chip .chip-rm {
+      cursor: pointer; color: var(--rose); font-weight: 800; margin-left: 2px;
+    }
+    .ctx-add-btns {
+      display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    }
+    .btn-xs {
+      padding: 4px 8px; font-size: 0.72rem; border-radius: 7px;
+      background: #131e36; color: #e2e8f0; border: 1px solid var(--border);
+      cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .btn-xs:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* STUDIO 3-COLUMN GRID FOR TAB 3 */
+    .studio-grid {
+      flex: 1; display: grid; grid-template-columns: 1.15fr 1fr 0.95fr; gap: 14px;
+      padding: 14px; overflow-y: auto; min-height: 0;
+    }
+    .cfg-row {
+      display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px;
+    }
+    .cfg-row label {
+      font-size: 0.73rem; color: #cbd5e1; font-weight: 600;
+    }
+
+    /* INTERACTIVE DOCUMENTATION DRAWER */
+    .help-drawer-backdrop {
+      position: fixed; inset: 0; background: rgba(3, 6, 14, 0.68);
+      z-index: 9000; display: none; justify-content: flex-end;
+    }
+    .help-drawer {
+      width: 500px; max-width: 92vw; height: 100vh;
+      background: var(--bg-sidebar); border-left: 1px solid var(--accent);
+      display: flex; flex-direction: column; box-shadow: -12px 0 34px rgba(0,0,0,0.7);
+    }
+    .doc-section {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 13px 15px; margin-bottom: 12px;
+      transition: border-color 0.25s, box-shadow 0.25s;
+    }
+    .doc-section.highlight {
+      border-color: var(--accent);
+      box-shadow: 0 0 18px rgba(56, 189, 248, 0.28);
+    }
+    .doc-section h4 {
+      margin: 0 0 6px 0; color: var(--accent); font-size: 0.9rem;
+    }
+    .doc-section p {
+      margin: 0; font-size: 0.8rem; color: #cbd5e1; line-height: 1.5;
+    }
   </style>
 </head>
 <body>
+  <!-- GLOBAL FLOATING TOOLTIP FOR (?) HELP ICONS -->
+  <div id="global-tooltip" class="floating-tooltip"></div>
+  <input type="file" id="hidden-file-picker" style="display:none;" onchange="handleBrowserFileSelected(event)" />
+
+  <!-- INTERACTIVE DOCUMENTATION DRAWER (OPENS ON CLICKING ANY '?' ICON) -->
+  <div id="help-drawer-backdrop" class="help-drawer-backdrop" onclick="closeHelpDrawer(event)">
+    <div class="help-drawer" onclick="event.stopPropagation()">
+      <div class="pane-header" style="border-bottom-color: rgba(56,189,248,0.3);">
+        <span style="color:var(--accent); font-size:0.84rem;">📖 Guida Interattiva di Cortical v0.4</span>
+        <button class="btn btn-ghost" style="padding:3px 9px;" onclick="closeHelpDrawer()">✕ Chiudi</button>
+      </div>
+      <div class="pane-body" id="help-drawer-body">
+        <div class="doc-section" id="doc-stream">
+          <h4>⚡ Stream Operativo & Voce Neurale Anti-Eco</h4>
+          <p>Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti (pensiero, tool MCP invocati, output). Lo <b>Scudo Acustico Half-Duplex</b> blocca l'ascolto del microfono mentre Cortical parla più 2.2s di coda acustica, evitando auto-interruzioni. Per interromperlo volontariamente (barge-in), pronuncia <code>"Ehi Cortical..."</code> o clicca <b>🛑 Stop</b>.</p>
+        </div>
+        <div class="doc-section" id="doc-attachments">
+          <h4>📎 Contesto Allegato per Chat e Task (File, Cartelle, Skill, Plugin)</h4>
+          <p>Cortical <b>non</b> pre-carica automaticamente la propria cartella sorgente. Come in ChatGPT o Claude Code, per ogni discussione o task puoi allegare esplicitamente <b>📄 File</b>, <b>📁 Cartelle</b>, <b>⚡ Skill</b> e <b>🔌 Plugin/MCP</b>. Gli elementi allegati vengono sintetizzati nei 3+1 livelli (Light, Medium, High, Max) e passati automaticamente al Cortical Harness.</p>
+        </div>
+        <div class="doc-section" id="doc-graph">
+          <h4>🧠 Grafo Semantico dei Concetti (MCP)</h4>
+          <p>Rappresenta la memoria concettuale (non l'elenco grezzo dei file): mostra i <b>5 Pilastri Fondamentali del Framework</b> (anello doppio 🔒) insieme ai concetti estratti dai tuoi allegati, agli insight appresi dalle conversazioni, alle skill generate e ai task.</p>
+        </div>
+        <div class="doc-section" id="doc-concept-config">
+          <h4>⚙️ Configurazione ed Eliminazione dei Concetti</h4>
+          <p>Cliccando un nodo nel Grafo dei Concetti:<br/>
+          • <b>Concetti Fondamentali del Framework (🔒 Core):</b> sono protetti da eliminazione, ma puoi <b>configurarli dal vivo</b> (es. in <i>Orchestratore Multi-Agente</i> imposti quanti loop massimi fanno gli agenti e quali modelli usare per Analyst, Implementer e Reviewer).<br/>
+          • <b>Concetti Sviluppati / Utente (✨ Utente):</b> puoi sia configurarli sia eliminarli definitivamente dalla memoria cliccando <b>🗑️ Elimina Concetto dalla Memoria</b>.</p>
+        </div>
+        <div class="doc-section" id="doc-studio">
+          <h4>🧭 Studio Contesto 3+1, Skill Router & Sicurezza</h4>
+          <p>La terza tab centrale sostituisce i vecchi dump JSON con uno studio operativo in 3 colonne:<br/>
+          1. <b>Ispezione Sintesi 3+1 degli Allegati:</b> vedi come Cortical comprime i tuoi file e cartelle in L1 (~50 token), L2 (~250 token), L3 (~1000 token) e +1 Max.<br/>
+          2. <b>Simulatore Prompt & Skill:</b> verifica quali skill e quali modelli vengono iniettati per qualsiasi richiesta.<br/>
+          3. <b>Adaptive Permission Gate:</b> gestisci i comandi auto-approvati e testa i blocchi deterministici.</p>
+        </div>
+        <div class="doc-section" id="doc-tasks">
+          <h4>🤖 Task Espliciti Multi-Agente & Archiviazione 3+1</h4>
+          <p>Le chiacchierate quotidiane (ora, meteo, domande veloci) non aprono task. Un task si apre solo quando clicchi <b>+ Nuovo Task</b>, selezioni la modalità Task nel composer o usi <code>/task</code> in <code>pi</code>. Quando clicchi <b>📦 Archivia</b>, Cortical sintetizza la discussione nei 3+1 livelli e valuta se compilare una nuova Skill procedurale.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- TOP MISSION CONTROL BAR WITH PRIMARY CENTRAL NAVIGATION -->
   <div class="topbar">
     <div class="brand">
@@ -861,13 +1042,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- DEDICATED CENTRAL WORKSPACE TABS -->
     <div class="main-nav">
       <div class="nav-tab active" id="main-tab-stream" onclick="switchMainStage('stream')">
-        ⚡ Stream Operativo & Voce
+        ⚡ Stream & Voce
+        <span class="help-btn" data-tip="Flusso live di conversazione, voce neurale con scudo anti-eco e passi degli agenti." onclick="openHelpSection('doc-stream', event)">?</span>
       </div>
       <div class="nav-tab" id="main-tab-graph" onclick="switchMainStage('graph')">
         🧠 Grafo dei Concetti <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.72rem; opacity:0.85;">(MCP)</span>
+        <span class="help-btn" data-tip="Mappa interattiva dei concetti: configura i parametri del framework (loop, modelli) o elimina i concetti utente." onclick="openHelpSection('doc-graph', event)">?</span>
       </div>
       <div class="nav-tab" id="main-tab-brain" onclick="switchMainStage('brain')">
-        🧭 Second Brain 3+1, Skill & Permessi
+        📎 Contesto 3+1, Skill & Sicurezza
+        <span class="help-btn" data-tip="Gestisci i file/cartelle/skill/plugin allegati, ispeziona le sintesi a 3+1 livelli e configura i permessi." onclick="openHelpSection('doc-studio', event)">?</span>
       </div>
     </div>
 
@@ -881,10 +1065,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <option value="GiuseppeNeural">🇮🇹 Giuseppe Neurale</option>
         <option value="ElsaNeural">🇮🇹 Elsa Neurale</option>
         <option value="DiegoNeural">🇮🇹 Diego Neurale</option>
-        <option value="Alice">🇮🇹 Alice (Offline)</option>
+        <option value="Federica">🇮🇹 Federica (Offline)</option>
       </select>
       <button class="btn btn-danger" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti">🛑 Stop</button>
       <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale">🖥️ `pi`</button>
+      <button class="btn btn-ghost" onclick="openHelpSection('doc-stream', event)" title="Apri la Guida Interattiva di Cortical">📖 Guida</button>
     </div>
   </div>
 
@@ -893,7 +1078,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- LEFT SIDEBAR: EXPLICIT MULTI-AGENT TASKS & QUICK CONCEPT SUMMARY -->
     <div class="sidebar">
       <div class="pane-header">
-        <span>Task Espliciti `pi`</span>
+        <span>
+          Task Espliciti `pi`
+          <span class="help-btn" data-tip="Elenco dei task multi-agente aperti su richiesta. Puoi archiviarli nei 3+1 livelli o cancellarli." onclick="openHelpSection('doc-tasks', event)">?</span>
+        </span>
         <div style="display:flex; gap:5px;">
           <button class="btn btn-ghost" style="padding:3px 7px; font-size:0.68rem;" onclick="clearArchivedTasks()" title="Rimuove tutti i task già archiviati">🧹 Pulisci</button>
           <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
@@ -908,14 +1096,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <!-- QUICK CONCEPT GRAPH LAUNCHER CARD -->
       <div style="padding: 12px 14px; border-top: 1px solid var(--border); background: #090f1d;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <span style="font-size:0.74rem; font-weight:700; color:var(--accent); text-transform:uppercase;">🧠 Mappa Concettuale</span>
+          <span style="font-size:0.74rem; font-weight:700; color:var(--accent); text-transform:uppercase;">
+            🧠 Mappa Concettuale
+            <span class="help-btn" data-tip="Apre il Grafo dei Concetti per configurare loop/modelli degli agenti o rimuovere concetti appresi." onclick="openHelpSection('doc-concept-config', event)">?</span>
+          </span>
           <span id="sidebar-graph-stats" style="font-size:0.71rem; font-family:var(--mono); color:var(--muted);">-- concetti</span>
         </div>
         <div style="font-size:0.76rem; color:var(--muted); margin-bottom:9px;">
-          Esplora i concetti semantici, gli insight appresi, le skill e le relazioni tra i task al centro dello schermo.
+          Configura i pilastri del framework (loop agenti, modelli LLM) o elimina concetti utente dal grafo.
         </div>
         <button class="btn" style="width:100%; justify-content:center;" onclick="switchMainStage('graph')">
-          🧠 Apri Grafo dei Concetti al Centro
+          🧠 Apri Grafo & Configura Concetti
         </button>
       </div>
     </div>
@@ -925,16 +1116,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <!-- STAGE 1: LIVE CONVERSATION & MULTI-AGENT EXECUTION STREAM -->
       <div class="stage-view" id="stage-stream">
         <div class="pane-header">
-          <span>Stream Conversazionale & Multi-Agente (Scudo Anti-Eco · Voce Neurale · Grounding Live)</span>
+          <span>
+            Stream Conversazionale & Multi-Agente (Isolamento Sorgenti · Contesto Allegato · Voce Anti-Eco)
+            <span class="help-btn" data-tip="Cronologia live delle risposte vocali/testuali e delle azioni eseguite dagli agenti nel contesto corrente." onclick="openHelpSection('doc-stream', event)">?</span>
+          </span>
           <span style="font-family:var(--mono); font-size:0.73rem; color:var(--accent);" id="active-session-badge">CHAT & VOICE</span>
         </div>
         <div class="pane-body" id="agent-stream">
           <div class="step-card output">
-            <div class="step-meta"><span>CORTICAL v0.3 READY</span><span>Voce Isabella Neurale · Grafo dei Concetti · Memoria 3+1</span></div>
-            <div class="step-title">Pannello di Controllo Cortical Rinnovato</div>
-            <pre class="step-detail">• 🧠 Grafo dei Concetti al Centro: clicca sulla tab centrale "🧠 Grafo dei Concetti" in alto per navigare i concetti architetturali, gli insight appresi, le skill e i task (con zoom, trascinamento nodi, filtri per categoria e scheda 3+1).
-• 🔇 Scudo Acustico Anti-Eco: mentre Cortical parla, il microfono ignora l'audio degli altoparlanti senza mai auto-interrompersi. Per interromperlo a voce, pronuncia "Ehi Cortical..." oppure "Stop / Basta".
-• ⚡ Memoria 3+1 & Skill in Parallelo: quando chiudi un task ("📦 Archivia" o `/task-close` in `pi`), Cortical sintetizza la discussione nei 3+1 livelli della Wiki e valuta se compilare una nuova Skill riutilizzabile.</pre>
+            <div class="step-meta"><span>CORTICAL v0.4 READY</span><span>Contesto Allegato · Concetti Configurabili · Guida Interattiva</span></div>
+            <div class="step-title">Benvenuto in Cortical v0.4 — Controllo Totale su Contesto e Concetti</div>
+            <pre class="step-detail">• 📎 Contesto Isolato (Stile ChatGPT / Claude Code): Cortical NON pre-carica più la propria cartella sorgente. Usa la barra "📎 Contesto Attivo" qui sotto per allegare 📄 File, 📁 Cartelle, ⚡ Skill o 🔌 Plugin specifici alla tua chat o al tuo task.
+• 🧠 Grafo dei Concetti Configurabile: nella tab "🧠 Grafo dei Concetti", clicca sui concetti fondamentali (🔒) per configurare quanti loop massimi eseguono gli agenti e quali modelli usare per ogni ruolo, oppure elimina (🗑️) i concetti sviluppati dall'utente.
+• ❓ Aiuto Contestuale Ovunque: passa il mouse sulle icone "?" per una spiegazione immediata, oppure cliccale per aprire il capitolo dedicato della Guida Interattiva.</pre>
           </div>
         </div>
       </div>
@@ -948,7 +1142,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <span class="pill active" onclick="setGraphFilter('all', this)">Tutti i Nodi</span>
                 <span class="pill" onclick="setGraphFilter('concept', this)">🧠 Concetti</span>
                 <span class="pill" onclick="setGraphFilter('memoria', this)">📚 Memoria 3+1</span>
-                <span class="pill" onclick="setGraphFilter('agenti', this)">🤖 Agenti & MCP</span>
+                <span class="pill" onclick="setGraphFilter('agenti', this)">🤖 Agenti & Loop</span>
                 <span class="pill" onclick="setGraphFilter('voce', this)">🎙️ Voce</span>
                 <span class="pill" onclick="setGraphFilter('sicurezza', this)">🛡️ Sicurezza</span>
                 <span class="pill" onclick="setGraphFilter('insight', this)">💡 Insight</span>
@@ -956,18 +1150,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <span class="pill" onclick="setGraphFilter('task', this)">🎯 Task</span>
               </div>
               <div style="display:flex; gap:6px; align-items:center;">
-                <input id="graph-search-input" placeholder="Filtra concetto..." style="width:170px; padding:5px 9px;" oninput="renderKnowledgeGraphSvg()" />
-                <button class="btn btn-ghost" style="padding:5px 10px;" onclick="loadMcpKnowledgeGraph()">🔄 Sincronizza MCP</button>
+                <input id="graph-search-input" placeholder="Filtra concetto..." style="width:165px; padding:5px 9px;" oninput="renderKnowledgeGraphSvg()" />
+                <button class="btn btn-ghost" style="padding:5px 10px;" onclick="loadMcpKnowledgeGraph()">🔄 Sincronizza</button>
+                <span class="help-btn" data-tip="Trascina i nodi con il mouse. I nodi con doppio anello (🔒) sono pilastri configurabili del framework; gli altri sono concetti utente eliminabili." onclick="openHelpSection('doc-graph', event)">?</span>
               </div>
             </div>
 
             <div class="graph-canvas-wrap" id="graph-canvas-container">
               <div class="graph-legend">
-                <span><i class="legend-dot" style="background:#38bdf8;"></i>Nucleo / Memoria</span>
-                <span><i class="legend-dot" style="background:#c084fc;"></i>Concetto Dominio</span>
-                <span><i class="legend-dot" style="background:#34d399;"></i>Insight Appreso</span>
-                <span><i class="legend-dot" style="background:#fbbf24;"></i>Skill / Task Attivo</span>
-                <span><i class="legend-dot" style="background:#818cf8;"></i>Task Archiviato</span>
+                <span><i class="legend-dot" style="background:#38bdf8; border:2px solid #fff;"></i>🔒 Pilastro Framework (Configurabile)</span>
+                <span><i class="legend-dot" style="background:#c084fc;"></i>✨ Concetto Utente (Eliminabile)</span>
+                <span><i class="legend-dot" style="background:#34d399;"></i>💡 Insight</span>
+                <span><i class="legend-dot" style="background:#fbbf24;"></i>⚡ Skill / Task</span>
               </div>
               <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 920 560"></svg>
               <div class="graph-zoom-controls">
@@ -978,107 +1172,195 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- RIGHT CONCEPT INSPECTOR DRAWER INSIDE GRAPH STAGE -->
+          <!-- RIGHT CONCEPT INSPECTOR, CONFIGURATOR & DELETION DRAWER -->
           <div class="concept-drawer">
-            <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:10px;">
-              Scheda Concetto & Sintesi 3+1
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+              <span style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">
+                Scheda & Configurazione Concetto
+              </span>
+              <span class="help-btn" data-tip="Configura i parametri operativi del concetto (es. loop massimi agenti, modelli LLM) o elimina i concetti sviluppati dall'utente." onclick="openHelpSection('doc-concept-config', event)">?</span>
             </div>
             <div id="concept-detail-panel">
-              <div class="concept-badge" id="cd-badge">CONCETTO CORE</div>
-              <h3 id="cd-title" style="margin: 0 0 8px 0; font-size: 1.1rem; color: var(--text);">Cortical Second Brain</h3>
+              <div class="concept-badge" id="cd-badge">🔒 PILASTRO FRAMEWORK</div>
+              <h3 id="cd-title" style="margin: 0 0 8px 0; font-size: 1.08rem; color: var(--text);">Orchestratore Multi-Agente</h3>
+
+              <!-- DYNAMIC CONFIGURATION FORM FOR SELECTED CONCEPT -->
+              <div class="tier-box" id="cd-config-box" style="border-color: rgba(56,189,248,0.4);">
+                <div class="tier-label">⚙️ Configurazione Parametri del Concetto</div>
+                <div id="cd-config-form" style="margin-top:6px; font-size:0.78rem; color:var(--muted);">
+                  Clicca su un nodo del grafo (es. "Orchestratore Multi-Agente") per configurarne loop massimi, modelli e comportamento.
+                </div>
+              </div>
+
+              <!-- DELETE ACTION FOR USER-DEVELOPED CONCEPTS -->
+              <div id="cd-delete-box" style="margin-bottom:10px;"></div>
+
               <div class="tier-box">
                 <div class="tier-label">Livello 1 — Sintesi Light (~50 token)</div>
-                <div id="cd-summary-l1" style="font-size:0.83rem; color:#e2e8f0; line-height:1.45;">
-                  Clicca su qualsiasi nodo concettuale nel grafo a sinistra per esplorarne la definizione, le sintesi a 3+1 livelli e le relazioni semantiche.
+                <div id="cd-summary-l1" style="font-size:0.82rem; color:#e2e8f0; line-height:1.45;">
+                  Seleziona un nodo nel grafo per visualizzarne la sintesi e i parametri.
                 </div>
               </div>
               <div class="tier-box">
                 <div class="tier-label">Livello 2 — Struttura & Relazioni (~250 token)</div>
-                <div id="cd-summary-l2" style="font-size:0.8rem; color:var(--muted); line-height:1.45;">
-                  Il grafo mostra esclusivamente concetti di dominio, insight appresi, skill procedurali e task (non la lista piatta dei file).
+                <div id="cd-summary-l2" style="font-size:0.79rem; color:var(--muted); line-height:1.45;">
+                  I pilastri fondamentali del framework possono essere configurati in tempo reale; i concetti utente possono anche essere eliminati.
                 </div>
               </div>
               <div class="tier-box">
-                <div class="tier-label">Connessioni Semantiche</div>
-                <div id="cd-connections" style="font-size:0.78rem; font-family:var(--mono); color:#cbd5e1;">--</div>
-              </div>
-              <div class="tier-box">
-                <div class="tier-label">Fonti Indicizzate (Merkle Reference)</div>
-                <div id="cd-sources" style="font-size:0.76rem; font-family:var(--mono); color:var(--accent);">/</div>
+                <div class="tier-label">Connessioni Semantiche & Fonti</div>
+                <div id="cd-connections" style="font-size:0.76rem; font-family:var(--mono); color:#cbd5e1; margin-bottom:4px;">--</div>
+                <div id="cd-sources" style="font-size:0.73rem; font-family:var(--mono); color:var(--accent);">framework:core</div>
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- STAGE 3: SECOND BRAIN 3+1, ADAPTIVE SKILLS & PERMISSIONS -->
+      <!-- STAGE 3: CLEAR, NON-DUPLICATE CONTEXT, 3+1 SYNTHESIS & SECURITY STUDIO -->
       <div class="stage-view" id="stage-brain" style="display:none;">
-        <div class="second-brain-grid">
-          <!-- CARD A: PARALLEL 3+1 MEMORY SKILLS + PROCEDURAL SKILLS & PROMPT ROUTER -->
+        <div class="studio-grid">
+          <!-- COLUMN 1: SCOPED CONTEXT MANAGER (FILES, FOLDERS, SKILLS, PLUGINS) & 3+1 PREVIEW -->
           <div class="card-panel">
             <div class="pane-header">
-              <span>⚡ Skill Attive (3+1 Memoria & Procedurali) + Prompt Router</span>
-              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSkillsHub()">🔄 Aggiorna</button>
+              <span>
+                📎 1. Contesto Allegato & Sintesi 3+1
+                <span class="help-btn" data-tip="Allega file, cartelle, skill o plugin alla chat/task corrente e visualizza come vengono sintetizzati nei 3+1 livelli." onclick="openHelpSection('doc-attachments', event)">?</span>
+              </span>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadScopedContext()">🔄 Aggiorna</button>
             </div>
             <div class="pane-body">
-              <div style="display:flex; gap:6px; margin-bottom:10px;">
-                <input id="skill-test-input" placeholder="Testa arricchimento prompt (es: 'rifattorizza permessi RBAC e verifica wiki')" style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
-                <button class="btn" onclick="testPromptEnhancer()">Analizza Prompt</button>
+              <div style="font-size:0.77rem; color:var(--muted); margin-bottom:10px; line-height:1.4;">
+                Aggiungi solo i file, le cartelle, le skill e i plugin che vuoi passare all'harness per questa conversazione o task:
               </div>
-              <pre class="step-detail" id="skill-enhance-view" style="max-height:150px; margin-bottom:12px;">Inserisci una richiesta tecnica sopra per vedere quale livello 3+1 della Wiki, quali Skill e quali Agenti vengono attivati in parallelo.</pre>
-              <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
-                Catalogo Skill (Corsia A: Memoria 3+1 · Corsia B: Procedurali & Apprese)
+              <div style="display:grid; grid-template-columns: 110px 1fr 95px; gap:6px; margin-bottom:8px;">
+                <select id="ctx-item-type">
+                  <option value="file">📄 File</option>
+                  <option value="folder">📁 Cartella</option>
+                  <option value="skill">⚡ Skill</option>
+                  <option value="plugin">🔌 Plugin/MCP</option>
+                </select>
+                <input id="ctx-item-ref" placeholder="Percorso file/cartella o nome skill/plugin..." onkeydown="if(event.key==='Enter') attachFromStudio()" />
+                <select id="ctx-item-tier" title="Livello sintesi 3+1">
+                  <option value="light">L1 Light</option>
+                  <option value="medium" selected>L2 Medium</option>
+                  <option value="high">L3 High</option>
+                  <option value="max">+1 Max</option>
+                </select>
+              </div>
+              <div style="display:flex; gap:6px; margin-bottom:12px;">
+                <button class="btn" style="flex:1; justify-content:center;" onclick="attachFromStudio()">+ Allega al Contesto Attivo</button>
+                <button class="btn btn-ghost" onclick="document.getElementById('hidden-file-picker').click()">📂 Sfoglia File Locale…</button>
+              </div>
+
+              <div style="font-size:0.72rem; font-weight:700; color:var(--accent); text-transform:uppercase; margin-bottom:6px;">
+                Elementi Attualmente Allegati al Contesto
+              </div>
+              <div id="studio-context-list" style="margin-bottom:12px;"></div>
+
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <span style="font-size:0.72rem; font-weight:700; color:var(--muted); text-transform:uppercase;">
+                  Ispezione Sintesi 3+1 del Nodo Selezionato
+                </span>
+                <select id="wiki-depth" onchange="navigateWiki(currentWikiPath)" style="padding:2px 6px; font-size:0.71rem;">
+                  <option value="light">L1 LIGHT (~50t)</option>
+                  <option value="medium" selected>L2 MEDIUM (~250t)</option>
+                  <option value="high">L3 HIGH (~1000t)</option>
+                  <option value="max">+1 MAX (Integrale)</option>
+                </select>
+              </div>
+              <pre class="step-detail" id="wiki-node-view" style="max-height:170px;">Nessun file pre-caricato. Allega un file o una cartella qui sopra per ispezionare in tempo reale le sue 4 sintesi gerarchiche (Light, Medium, High, Max).</pre>
+            </div>
+          </div>
+
+          <!-- COLUMN 2: PARALLEL SKILL ROUTER & PROMPT ENHANCEMENT SIMULATOR -->
+          <div class="card-panel">
+            <div class="pane-header">
+              <span>
+                ⚡ 2. Skill in Parallelo & Simulatore Harness
+                <span class="help-btn" data-tip="Mostra le Skill disponibili (3+1 Memoria + Procedurali) e simula come il tuo prompt viene arricchito prima di arrivare al modello." onclick="openHelpSection('doc-studio', event)">?</span>
+              </span>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSkillsHub()">🔄 Skill</button>
+            </div>
+            <div class="pane-body">
+              <div style="font-size:0.77rem; color:var(--muted); margin-bottom:8px;">
+                Verifica come l'harness combina il tuo <b>Contesto Allegato</b>, la <b>Skill di Memoria 3+1</b> e i <b>Modelli Configurati</b>:
+              </div>
+              <div style="display:flex; gap:6px; margin-bottom:10px;">
+                <input id="skill-test-input" placeholder="Simula un prompt (es: 'analizza gli allegati e crea i test')..." style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
+                <button class="btn" onclick="testPromptEnhancer()">Simula</button>
+              </div>
+              <pre class="step-detail" id="skill-enhance-view" style="max-height:185px; margin-bottom:12px;">Premi "Simula" per vedere il payload esatto (allegati + livello 3+1 + skill + modelli/loop) che viene iniettato nel contesto dell'agente.</pre>
+              <div style="font-size:0.72rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
+                Catalogo Skill (Clicca "+ Allega" per forzarne l'attivazione nella chat)
               </div>
               <div id="skills-list-view"></div>
             </div>
           </div>
 
-          <!-- CARD B: 3+1 WIKI EXPLORER, SMART MEMORY & PERMISSION GATE -->
+          <!-- COLUMN 3: ADAPTIVE PERMISSION GATE & CURATED CONVERSATION MEMORY -->
           <div class="card-panel">
             <div class="pane-header">
-              <span>🧭 Esploratore Wiki 3+1, Memoria & Adaptive Gate</span>
-              <select id="wiki-depth" onchange="navigateWiki(currentWikiPath)" style="padding:2px 6px; font-size:0.72rem;">
-                <option value="light">LIGHT (~50t)</option>
-                <option value="medium" selected>MEDIUM (~250t)</option>
-                <option value="high">HIGH (~1000t)</option>
-                <option value="max">MAX (Raw)</option>
-              </select>
+              <span>
+                🛡️ 3. Sicurezza Adattiva & Memoria Curata
+                <span class="help-btn" data-tip="Valuta la sicurezza dei comandi prima dell'esecuzione e mostra gli insight salvati (filtrando le chiacchierate effimere)." onclick="openHelpSection('doc-studio', event)">?</span>
+              </span>
+              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSmartMemory()">🧠 Memoria</button>
             </div>
             <div class="pane-body">
-              <div style="display:flex; gap:6px; margin-bottom:8px;">
-                <input id="wiki-search-input" placeholder="Cerca nei 3+1 livelli della Wiki (FTS5)..." style="flex:1;" onkeydown="if(event.key==='Enter') searchWiki()" />
-                <button class="btn btn-ghost" onclick="searchWiki()">Cerca Wiki</button>
-                <button class="btn btn-ghost" onclick="loadSmartMemory()">🧠 Stato Memoria</button>
+              <div style="font-size:0.72rem; font-weight:700; color:var(--accent); text-transform:uppercase; margin-bottom:6px;">
+                🛡️ Verifica Comandi (Adaptive Permission Gate)
               </div>
-              <div id="wiki-tree" style="margin-bottom:8px; max-height:110px; overflow-y:auto; border:1px solid var(--border); border-radius:7px; padding:4px;"></div>
-              <pre class="step-detail" id="wiki-node-view" style="max-height:150px; margin-bottom:12px;">Seleziona o cerca un documento per ispezionare le sintesi L1 Light, L2 Medium, L3 High e +1 Max.</pre>
-
-              <div style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
-                🛡️ Adaptive Permission Gate
+              <div style="font-size:0.76rem; color:var(--muted); margin-bottom:8px;">
+                Blocca comandi distruttivi (<code>rm -rf /</code>) e impara i comandi sicuri che approvi:
               </div>
-              <div style="display:flex; gap:6px; margin-bottom:8px;">
+              <div style="display:flex; gap:5px; margin-bottom:8px; flex-wrap:wrap;">
                 <select id="perm-tool">
                   <option value="bash">bash</option>
                   <option value="write_file">write_file</option>
                   <option value="chrome">chrome</option>
                 </select>
-                <input id="perm-cmd" value="pytest tests/" style="flex:1;" />
-                <button class="btn" onclick="evalPerm()">Valuta</button>
-                <button class="btn btn-ghost" onclick="feedbackPerm(true)">👍 Impara</button>
-                <button class="btn btn-danger" onclick="testHardBlock()">Test Block</button>
+                <input id="perm-cmd" value="pytest tests/" style="flex:1; min-width:120px;" />
               </div>
-              <pre class="step-detail" id="perm-view" style="max-height:100px;">Adaptive Permission Gate pronto.</pre>
+              <div style="display:flex; gap:6px; margin-bottom:10px;">
+                <button class="btn" onclick="evalPerm()">Valuta Comando</button>
+                <button class="btn btn-ghost" onclick="feedbackPerm(true)">👍 Approva & Impara</button>
+                <button class="btn btn-danger" onclick="testHardBlock()">Test Blocco</button>
+              </div>
+              <pre class="step-detail" id="perm-view" style="max-height:125px; margin-bottom:14px;">Adaptive Permission Gate pronto.</pre>
+
+              <div style="font-size:0.72rem; font-weight:700; color:var(--emerald); text-transform:uppercase; margin-bottom:6px;">
+                💡 Memoria Conversazionale Curata (Max 20 Turni FIFO)
+              </div>
+              <pre class="step-detail" id="memory-state-view" style="max-height:175px;">Clicca "🧠 Memoria" per ispezionare il buffer leggero delle chiacchierate e gli insight estratti.</pre>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- PERSISTENT PROMPT & VOICE COMPOSER (ACTIVE ACROSS ALL STAGES) -->
+      <!-- PERSISTENT PROMPT, CONTEXT ATTACHMENT BAR & VOICE COMPOSER -->
       <div class="composer">
+        <!-- CHATGPT / CLAUDE CODE STYLE SCOPED CONTEXT ATTACHMENT BAR -->
+        <div class="context-bar">
+          <div class="context-chips" id="composer-context-chips">
+            <span style="font-size:0.74rem; color:var(--muted); font-family:var(--mono);">
+              📎 Contesto Attivo: <i style="color:#64748b;">Nessun file/cartella pre-caricata (contesto pulito)</i>
+            </span>
+          </div>
+          <div class="ctx-add-btns">
+            <button class="btn-xs" onclick="document.getElementById('hidden-file-picker').click()" title="Sfoglia e allega un file dal tuo computer">+ 📄 Sfoglia File</button>
+            <button class="btn-xs" onclick="quickAttachPrompt('file')" title="Allega un file tramite percorso">+ 📄 Percorso File</button>
+            <button class="btn-xs" onclick="quickAttachPrompt('folder')" title="Allega una cartella specifica al contesto">+ 📁 Cartella</button>
+            <button class="btn-xs" onclick="quickAttachPrompt('skill')" title="Attiva una Skill specifica nella chat">+ ⚡ Skill</button>
+            <button class="btn-xs" onclick="quickAttachPrompt('plugin')" title="Attiva un Plugin o Server MCP nella chat">+ 🔌 Plugin</button>
+            <span class="help-btn" data-tip="Come in ChatGPT o Claude Code, allega file, cartelle, skill o plugin specifici per questa conversazione o task. Cortical non carica file non richiesti." onclick="openHelpSection('doc-attachments', event)">?</span>
+          </div>
+        </div>
+
         <div class="composer-row">
           <select id="dispatch-mode">
             <option value="auto">💬 Conversazione & Voce (Crea task solo se richiesto esplicitamente)</option>
-            <option value="agent">🤖 Apri Nuovo Task Multi-Agente `pi` (Con Sintesi 3+1)</option>
+            <option value="agent">🤖 Apri Nuovo Task Multi-Agente `pi` (Con Sintesi 3+1 & Contesto Allegato)</option>
           </select>
           <select id="agent-depth">
             <option value="light">Memoria 3+1: L1 LIGHT</option>
@@ -1091,7 +1373,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </label>
         </div>
         <div class="composer-row">
-          <input id="prompt-input" placeholder="Chiedi a Cortical (es: 'procedi cerca il meteo a roma per domani' o 'crea un task per...')" onkeydown="if(event.key==='Enter') submitComposer()" />
+          <input id="prompt-input" placeholder="Chiedi a Cortical (con i file/skill allegati qui sopra) o di' 'Ehi Cortical...'" onkeydown="if(event.key==='Enter') submitComposer()" />
           <button class="btn" onclick="submitComposer()">Invia ↵</button>
         </div>
       </div>
@@ -1101,12 +1383,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <script>
     let currentWikiPath = '/';
     let selectedSessionId = null;
+    let selectedConceptNode = null;
     let alwaysOnActive = false;
     let recognition = null;
     let lastSpokenResponseText = '';
     let lastSpokenAtMs = 0;
     let localTtsShieldUntilMs = 0;
     let activeAbortController = null;
+    let cachedAttachments = [];
 
     // Interactive Concept Graph State
     let cachedGraphData = { nodes: [], edges: [], stats: {} };
@@ -1832,6 +2116,9 @@ class CorticalLiveService:
         self.started_at = time.time()
         self.repo_root = Path(repo_root or os.getcwd()).resolve()
         self.wiki_db = CorticalWikiDB(wiki_db_path)
+        self.wiki_db.ensure_workspace(AccessContext(), root_path="/", can_write=True)
+        # Do NOT auto-load Cortical's own source directory unless explicitly attached by user
+        self.wiki_db.clear_unattached_self_repo_nodes(AccessContext(), self.repo_root)
         self.verifier = CitationVerifier(self.wiki_db)
         self.perm_gate = AdaptivePermissionGate(perm_db_path)
         self.profiler = profiler or HardwareProfiler()
@@ -1894,7 +2181,7 @@ class CorticalLiveService:
                 {
                     "status": "ok",
                     "service": "cortical-live",
-                    "version": "0.3.0",
+                    "version": "0.4.0",
                     "uptime_sec": round(time.time() - self.started_at, 2),
                     "os_name": self.hw_profile.os_name,
                     "arch": self.hw_profile.arch,
@@ -1910,6 +2197,65 @@ class CorticalLiveService:
         if method == "POST" and path == "/api/mcp":
             resp = self.mcp_server.handle_request(body)
             return (HTTPStatus.OK, resp or {})
+
+        # Scoped Context Attachments (Files, Folders, Skills, Plugins — ChatGPT / Claude Code style)
+        if method == "GET" and path == "/api/context":
+            scope_id = (query.get("scope_id") or [None])[0]
+            return (
+                HTTPStatus.OK,
+                {
+                    "attachments": self.wiki_db.list_context_attachments(ctx, scope_id=scope_id),
+                    "available_skills": [s.name for s in self.skill_hub.discover_skills()],
+                    "available_plugins": [
+                        "mcp:cortical-wiki",
+                        "mcp:chrome-devtools",
+                        "plugin:weather-grounding",
+                        "plugin:adaptive-permission-gate",
+                    ],
+                },
+            )
+
+        if method == "POST" and path == "/api/context/attach":
+            try:
+                att = self.wiki_db.attach_context_item(
+                    ctx,
+                    scope_id=str(body.get("scope_id", "chat")),
+                    item_type=str(body.get("item_type", "file")),
+                    item_ref=str(body.get("item_ref", "")),
+                    depth_tier=str(body.get("depth_tier", "medium")),
+                    label=str(body["label"]) if body.get("label") else None,
+                    inline_content=str(body["inline_content"]) if body.get("inline_content") else None,
+                )
+                return (HTTPStatus.OK, att)
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+        if method == "POST" and path == "/api/context/detach":
+            att_id = str(body.get("attachment_id", ""))
+            return (HTTPStatus.OK, self.wiki_db.detach_context_item(ctx, attachment_id=att_id))
+
+        # Concept Graph Configuration & User Concept Deletion Endpoints
+        if method == "GET" and path == "/api/graph/concept/config":
+            cid = (query.get("concept_id") or ["concept:orchestratore-multi-agente"])[0]
+            return (
+                HTTPStatus.OK,
+                {
+                    "concept_id": cid,
+                    "config": self.wiki_db.get_concept_config(ctx, cid),
+                },
+            )
+
+        if method == "POST" and path == "/api/graph/concept/config":
+            cid = str(body.get("concept_id", "concept:orchestratore-multi-agente"))
+            updates = dict(body.get("config") or {})
+            return (HTTPStatus.OK, self.wiki_db.update_concept_config(ctx, cid, updates))
+
+        if method == "POST" and path == "/api/graph/concept/delete":
+            nid = str(body.get("node_id", ""))
+            try:
+                return (HTTPStatus.OK, self.wiki_db.delete_concept_node(ctx, nid))
+            except PermissionError as exc:
+                return (HTTPStatus.FORBIDDEN, {"error": str(exc), "is_framework_core": True})
 
         # Smart Memory & Task Lifecycle Endpoints
         if method == "GET" and path == "/api/memory/state":
@@ -1971,11 +2317,13 @@ class CorticalLiveService:
         if method == "POST" and path == "/api/skills/enhance":
             prompt_text = str(body.get("prompt", "")).strip()
             active_ep = body.get("active_episode_id")
+            scope_id = str(body.get("scope_id", "chat"))
             return (
                 HTTPStatus.OK,
                 self.skill_hub.enhance_prompt(
                     prompt_text,
                     active_episode_id=str(active_ep) if active_ep else None,
+                    scope_id=scope_id,
                 ).to_dict(),
             )
 
@@ -2013,6 +2361,29 @@ class CorticalLiveService:
             try:
                 return (HTTPStatus.OK, self.wiki_db.navigate(ctx, path=target, depth=DepthTier(depth)))
             except KeyError as exc:
+                if target == "/":
+                    atts = self.wiki_db.list_context_attachments(ctx)
+                    return (
+                        HTTPStatus.OK,
+                        {
+                            "path": "/",
+                            "parent_path": None,
+                            "node_type": "dir",
+                            "depth_tier": depth,
+                            "content": "Contesto pulito (nessuna cartella sorgente pre-caricata automaticamente). Allega file, cartelle, skill o plugin tramite '+ Allega al Contesto'.",
+                            "children": [
+                                {
+                                    "path": wp,
+                                    "node_type": "file",
+                                    "subtree_hash": a["attachment_id"],
+                                    "summary": a.get("summary_preview", a["label"]),
+                                }
+                                for a in atts
+                                for wp in a.get("metadata", {}).get("wiki_paths", [])
+                            ],
+                            "macro_relations": [],
+                        },
+                    )
                 return (HTTPStatus.NOT_FOUND, {"error": str(exc)})
 
         if method == "GET" and path == "/api/wiki/search":

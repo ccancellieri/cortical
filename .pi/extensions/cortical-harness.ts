@@ -215,6 +215,61 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand?.("attach", {
+    description: "Allega file, cartella, skill o plugin al contesto della chat/task (/attach <file|folder|skill|plugin> <percorso_o_nome>)",
+    handler: async (args, ctx) => {
+      const parts = args.trim().split(/\s+/);
+      if (parts.length < 2) {
+        ctx.ui?.notify?.("Uso: /attach <file|folder|skill|plugin> <percorso_o_nome>", "warning");
+        return;
+      }
+      const itemType = parts[0].toLowerCase();
+      const itemRef = parts.slice(1).join(" ");
+      const scopeId = activeTask?.episodeId || "chat";
+      const res = invokeCorticalCLI([
+        "context-attach",
+        "--scope-id",
+        scopeId,
+        "--item-type",
+        itemType,
+        "--item-ref",
+        itemRef,
+      ]);
+      ctx.ui?.notify?.(
+        `📎 Allegato [${itemType}] '${res.label}' aggiunto al contesto '${scopeId}' (ID: ${res.attachment_id})`,
+        "info"
+      );
+    },
+  });
+
+  pi.registerCommand?.("detach", {
+    description: "Rimuove un allegato dal contesto della chat/task (/detach <attachment_id>)",
+    handler: async (args, ctx) => {
+      const attId = args.trim();
+      if (!attId) {
+        ctx.ui?.notify?.("Uso: /detach <attachment_id>", "warning");
+        return;
+      }
+      invokeCorticalCLI(["context-detach", "--attachment-id", attId]);
+      ctx.ui?.notify?.(`🧹 Allegato ${attId} rimosso dal contesto.`, "info");
+    },
+  });
+
+  pi.registerCommand?.("context", {
+    description: "Mostra file, cartelle, skill e plugin allegati alla chat o al task corrente",
+    handler: async (_args, ctx) => {
+      const scopeId = activeTask?.episodeId || "chat";
+      const res = invokeCorticalCLI(["context-list", "--scope-id", scopeId]);
+      const list = (res.attachments || []) as Array<Record<string, unknown>>;
+      if (list.length === 0) {
+        ctx.ui?.notify?.(`📎 Nessun elemento allegato al contesto '${scopeId}'. Usa /attach <file|folder|skill|plugin> <ref>`, "info");
+        return;
+      }
+      const summary = list.map((a) => `${a.attachment_id}:${a.item_type}(${a.label})`).join(", ");
+      ctx.ui?.notify?.(`📎 Contesto '${scopeId}' (${list.length}): ${summary}`, "info");
+    },
+  });
+
   // 1. Pre-Flight Grounding + Parallel 3+1 Memory & Skill Enhancement Hook
   pi.on("before_agent_start", (event, ctx) => {
     pendingGroundedAnswer = null;

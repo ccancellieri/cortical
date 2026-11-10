@@ -35,7 +35,7 @@ chmod +x .venv/bin/cortical .venv/bin/cortical-wiki-mcp
 echo "==> [2/4] Running Cortical Hardware Auto-Profiler & Endpoint Discovery..."
 .venv/bin/python -m cortical.cli doctor --out-dir "$ROOT_DIR/.pi" --repo-root "$ROOT_DIR"
 
-echo "==> [3/4] Indexing workspace into 4-Tier Merkle Second Brain..."
-.venv/bin/python -m cortical.cli --db "$ROOT_DIR/.cortical_data/wiki.db" crawl "$ROOT_DIR"
+echo "==> [3/4] Initializing empty Second Brain DB (no auto-crawl of framework source)..."
+.venv/bin/python -c "from cortical.wiki.db import CorticalWikiDB, AccessContext; db = CorticalWikiDB('$ROOT_DIR/.cortical_data/wiki.db'); db.ensure_workspace(AccessContext()); db.clear_unattached_self_repo_nodes(AccessContext())"
 
 echo "==> [4/4] Setup complete! Generated .pi/mcp.json and .pi/hardware_profile.json."

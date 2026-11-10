@@ -112,7 +112,31 @@ def main(argv: list[str] | None = None) -> int:
     # 13. skills-list (List Core, 3+1 Memory Tier, and Learned Skills)
     sub.add_parser("skills-list", help="List all active Cortical skills")
 
-    # 14. serve (Live HTTP + Voice + Second Brain Daemon)
+    # 14. context-attach (Attach File, Folder, Skill, or Plugin to Chat/Task Context)
+    p_catt = sub.add_parser("context-attach", help="Attach a file, folder, skill, or plugin to a chat/task context")
+    p_catt.add_argument("--scope-id", default="chat")
+    p_catt.add_argument("--item-type", required=True, choices=["file", "folder", "skill", "plugin"])
+    p_catt.add_argument("--item-ref", required=True)
+    p_catt.add_argument("--depth", default="medium", choices=["light", "medium", "high", "max"])
+
+    # 15. context-detach (Remove an attachment from Chat/Task Context)
+    p_cdet = sub.add_parser("context-detach", help="Detach an item from a chat/task context")
+    p_cdet.add_argument("--attachment-id", required=True)
+
+    # 16. context-list (List active context attachments)
+    p_clist = sub.add_parser("context-list", help="List active context attachments")
+    p_clist.add_argument("--scope-id", default="")
+
+    # 17. concept-config (Configure a framework or user concept)
+    p_ccfg = sub.add_parser("concept-config", help="Update configuration parameters for a concept")
+    p_ccfg.add_argument("--concept-id", required=True)
+    p_ccfg.add_argument("--config-json", default="{}")
+
+    # 18. concept-delete (Delete a user-developed concept)
+    p_cdel = sub.add_parser("concept-delete", help="Delete a user-developed concept from memory")
+    p_cdel.add_argument("--node-id", required=True)
+
+    # 19. serve (Live HTTP + Voice + Second Brain Daemon)
     p_serve = sub.add_parser("serve", help="Run the live Cortical HTTP, Voice & Second Brain service")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
@@ -274,6 +298,43 @@ def main(argv: list[str] | None = None) -> int:
         hub = CorticalSkillHub(db, args.skills_dir)
         skills = [dataclasses.asdict(s) for s in hub.list_skills()]
         print(json.dumps({"skills": skills}, indent=2))
+        return 0
+
+    if args.cmd == "context-attach":
+        db = CorticalWikiDB(args.db)
+        res = db.attach_context_item(
+            AccessContext(),
+            scope_id=args.scope_id,
+            item_type=args.item_type,
+            item_ref=args.item_ref,
+            depth_tier=args.depth,
+        )
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "context-detach":
+        db = CorticalWikiDB(args.db)
+        res = db.detach_context_item(AccessContext(), attachment_id=args.attachment_id)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "context-list":
+        db = CorticalWikiDB(args.db)
+        res = db.list_context_attachments(AccessContext(), scope_id=args.scope_id or None)
+        print(json.dumps({"attachments": res}, indent=2))
+        return 0
+
+    if args.cmd == "concept-config":
+        db = CorticalWikiDB(args.db)
+        updates = json.loads(args.config_json)
+        res = db.update_concept_config(AccessContext(), args.concept_id, updates)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "concept-delete":
+        db = CorticalWikiDB(args.db)
+        res = db.delete_concept_node(AccessContext(), args.node_id)
+        print(json.dumps(res, indent=2))
         return 0
 
     if args.cmd == "serve":

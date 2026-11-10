@@ -163,6 +163,8 @@ class PromptEnhancementResult:
     mode: str = "enhanced"
     memory_tier_skill: str = "cortical-memory-l2-medium"
     selected_procedural_skills: list[str] = field(default_factory=list)
+    attached_context: list[dict[str, Any]] = field(default_factory=list)
+    orchestrator_config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -302,6 +304,45 @@ class CorticalSkillHub:
                 "   - **Fase 2 (`code_implementer`):** Legge i file target a livello `high`/`max` ed esegue modifiche chirurgiche.\n"
                 "   - **Fase 3 (`reviewer`):** Esegue i test in single-shot, salva la sintesi a 3+1 livelli della discussione e valuta se creare una nuova Skill per il futuro.\n"
             ),
+            "ai-reviewer-mandate-and-complexity": (
+                "---\n"
+                "name: ai-reviewer-mandate-and-complexity\n"
+                "description: Mandato del revisore di codice AI e metriche di complessità oggettive (Cicli < 10, Complessità Cognitiva < 15, LOC 20-50). Previene debito tecnico, over-generation e falsa sicurezza da codice superficialmente pulito.\n"
+                "---\n\n"
+                "# Mandato del Revisore di Codice AI & Metriche di Complessità\n\n"
+                "## 1. Il Nuovo Mandato del Revisore (Reviewer Mandate Shift)\n"
+                "Il ruolo del revisore non è catturare bug ovvi di sintassi, ma verificare che il codice sia corretto per questa specifica codebase, a questa scala e per il business.\n\n"
+                "## 2. Metriche Standard di Complessità delle Funzioni\n"
+                "- **Cyclomatic Complexity:** < 10 per funzione (percorsi lineari esecuzione).\n"
+                "- **Cognitive Complexity:** < 15 per funzione (difficoltà di lettura per la mente umana).\n"
+                "- **Lines of Code (LOC):** < 20-50 righe (Single Responsibility Principle).\n"
+            ),
+            "pr-contract-and-diff-constrainer": (
+                "---\n"
+                "name: pr-contract-and-diff-constrainer\n"
+                "description: Vincoli di dimensione delle PR, contratti di review e Golden Rule della contribuzione. Impone diff microscopici per codice AI, convenzioni di titolo/descrizione e scomposizione (questo potrebbe essere 3 PR).\n"
+                "---\n\n"
+                "# Contratti di Pull Request & Vincoli della Dimensione di Review\n\n"
+                "## 1. La Regola Aurea del Progetto (Golden Rule)\n"
+                "Una contribuzione deve valere più del tempo che serve per revisionarla.\n\n"
+                "## 2. Costringere l'Unità di Revisione (Constrain the Unit of Review)\n"
+                "- Cap diff size: max 150-250 righe di diff effettivo.\n"
+                "- Files touched: max 3-5 file per PR.\n"
+                "- Zero modifiche non correlate: un solo intento per PR.\n"
+                "- Forzare la conversazione: se supera la dimensione, valutare se sdoppiare in 3 PR.\n"
+                "- Pair programming: prima linea di difesa.\n"
+            ),
+            "agent-instructions-alignment": (
+                "---\n"
+                "name: agent-instructions-alignment\n"
+                "description: Allineamento Zero-Drift tra istruzioni per agenti AI e standard di review. Mantiene file esterni condivisi (AGENTS.md) per standardizzare le norme del team, eliminando prompt ripetitivi e allineando generazione e verifica.\n"
+                "---\n\n"
+                "# Allineamento Istruzioni Agenti & Standard di Review (Single Artifact Zero-Drift)\n\n"
+                "## 1. Il Principio del Singolo Artefatto (One Artifact, No Drift)\n"
+                "Le istruzioni date all'agente sono il tuo standard di review. Il file che dice come scrivere codice è lo stesso che definisce come viene revisionato.\n\n"
+                "## 2. File Esterni Condivisi (AGENTS.md)\n"
+                "Standardizza ciò che l'AI sa sulle norme del team tra diverse sessioni di chat, prevenendo prompt ripetitivi.\n"
+            ),
         }
         for slug, content in builtin_skills.items():
             sdir = self.skills_root / slug
@@ -356,6 +397,9 @@ class CorticalSkillHub:
                 "cortical-memory-l2-medium": ["wiki_navigate", "wiki_search"],
                 "cortical-memory-l3-high": ["wiki_navigate", "wiki_verify_citation", "wiki_record_episode"],
                 "cortical-multiagent-orchestrator": ["delegate_subagent", "submit_report", "wiki_navigate"],
+                "ai-reviewer-mandate-and-complexity": ["wiki_search", "wiki_verify_citation", "bash"],
+                "pr-contract-and-diff-constrainer": ["wiki_search", "bash", "delegate_subagent"],
+                "agent-instructions-alignment": ["wiki_navigate", "wiki_search", "submit_report"],
                 "modern-web-guidance": ["meteo_forecast", "chrome-devtools"],
                 "browser-use-playwright": ["meteo_forecast", "chrome-devtools", "bash"],
             }
@@ -490,11 +534,26 @@ class CorticalSkillHub:
         prompt: str,
         ctx: Optional[AccessContext] = None,
         active_episode_id: Optional[str] = None,
+        scope_id: str = "chat",
     ) -> PromptEnhancementResult:
-        """Enhances a user prompt with right-sized 3+1 Wiki Memory + matched Procedural Skills + Tools."""
+        """Enhances a user prompt with Scoped Attached Context (Files/Folders/Skills/Plugins) + 3+1 Wiki Memory + matched Skills & Orchestrator Config."""
         access_ctx = ctx or AccessContext()
+        effective_scope = active_episode_id or scope_id or "chat"
         depth = self.choose_wiki_depth(prompt)
         matched = self.rank_skills_for_prompt(prompt, limit=3)
+
+        # Load live framework concept configurations
+        orch_cfg = self.wiki_db.get_concept_config(access_ctx, "concept:orchestratore-multi-agente")
+        brain_cfg = self.wiki_db.get_concept_config(access_ctx, "concept:cortical-second-brain")
+
+        # Load scoped attachments for the current chat/task scope
+        attachments = self.wiki_db.list_context_attachments(access_ctx, scope_id=effective_scope)
+        if effective_scope != "chat":
+            chat_atts = self.wiki_db.list_context_attachments(access_ctx, scope_id="chat")
+            seen_att_ids = {a["attachment_id"] for a in attachments}
+            for ca in chat_atts:
+                if ca["attachment_id"] not in seen_att_ids:
+                    attachments.append(ca)
 
         # Always include the matching 3+1 Memory Tier skill in parallel with domain skills
         tier_skill_map = {
@@ -504,9 +563,21 @@ class CorticalSkillHub:
             DepthTier.MAX: "cortical-memory-l3-high",
         }
         target_tier_skill = tier_skill_map[depth]
+        all_available_skills = self.list_skills()
         selected_skills = [sk for sk, _ in matched]
+
+        # Force-activate any skill explicitly attached by the user to this chat/task
+        for att in attachments:
+            if att.get("item_type") == "skill":
+                ref_low = str(att.get("item_ref", "")).lower()
+                lbl_low = str(att.get("label", "")).lower()
+                for sk in all_available_skills:
+                    if sk.skill_id.lower() in {ref_low, lbl_low} or sk.name.lower() in {ref_low, lbl_low}:
+                        if not any(s.skill_id == sk.skill_id for s in selected_skills):
+                            selected_skills.insert(0, sk)
+
         if not any(s.skill_id == target_tier_skill for s in selected_skills):
-            for s in self.list_skills():
+            for s in all_available_skills:
                 if s.skill_id == target_tier_skill:
                     selected_skills.append(s)
                     break
@@ -517,39 +588,83 @@ class CorticalSkillHub:
                 if t not in tools:
                     tools.append(t)
 
+        # Include any explicitly attached plugin/MCP tool in recommended_tools
+        for att in attachments:
+            if att.get("item_type") == "plugin":
+                plug_ref = str(att.get("item_ref") or att.get("label"))
+                if plug_ref and plug_ref not in tools:
+                    tools.append(plug_ref)
+
+        # Build Attached Context Block (Files, Folders, Skills, Plugins explicitly added by the user)
+        attached_blocks: list[str] = []
+        if brain_cfg.get("auto_attach_chat_context", True) and attachments:
+            for att in attachments:
+                itype = att.get("item_type", "file")
+                ilabel = att.get("label", att.get("item_ref", ""))
+                itier = att.get("depth_tier", depth.value)
+                wpaths = att.get("metadata", {}).get("wiki_paths", [])
+                if itype in {"file", "folder"} and wpaths:
+                    for wp in wpaths[:6]:
+                        try:
+                            nav = self.wiki_db.navigate(access_ctx, path=wp, depth=itier, include_children=False)
+                            attached_blocks.append(
+                                f"### [ALLEGATO {itype.upper()} ({itier.upper()})] {ilabel} (`{wp}`)\n{nav.get('content', att.get('summary_preview', ''))}"
+                            )
+                        except Exception:
+                            attached_blocks.append(
+                                f"### [ALLEGATO {itype.upper()}] {ilabel}\n{att.get('summary_preview', '')}"
+                            )
+                else:
+                    attached_blocks.append(
+                        f"### [ALLEGATO {itype.upper()}] {ilabel} (`{att.get('item_ref', '')}`)\n{att.get('summary_preview', '')}"
+                    )
+
         # Fetch non-lossy 3+1 Wiki context at the chosen tier
         hits = self.wiki_db.search(access_ctx, query=prompt, depth=depth, limit=3)
+        wiki_sections: list[str] = []
+        if attached_blocks:
+            wiki_sections.extend(attached_blocks)
         if hits:
-            wiki_block = "\n\n".join(
+            wiki_sections.extend(
                 f"### [Wiki {h['depth_tier'].upper()}] {h['path']}\n{h['content']}"
                 for h in hits
             )
+        if not wiki_sections:
+            wiki_block = "Nessun file o cartella allegata a questa conversazione (usa '+ Aggiungi al Contesto' per allegare file, cartelle, skill o plugin)."
         else:
-            try:
-                root_nav = self.wiki_db.navigate(access_ctx, path="/", depth=DepthTier.LIGHT)
-                wiki_block = f"### [Wiki LIGHT Root Index]\n{root_nav.get('content', '')}"
-            except Exception:  # noqa: BLE001
-                wiki_block = "Nessun nodo Wiki ancora indicizzato."
+            wiki_block = "\n\n".join(wiki_sections)
 
         team_roster = self.resolve_team_roster(prompt)
+        role_model_map = {
+            "arch_analyst": orch_cfg.get("analyst_model", "qwen2.5:1.5b"),
+            "web_researcher": orch_cfg.get("analyst_model", "qwen2.5:1.5b"),
+            "code_implementer": orch_cfg.get("implementer_model", "qwen2.5:1.5b"),
+            "reviewer": orch_cfg.get("reviewer_model", "qwen2.5:1.5b"),
+        }
+        max_loops = int(orch_cfg.get("max_agent_loops", 6))
+        for r in team_roster:
+            r["model"] = role_model_map.get(r["id"], orch_cfg.get("implementer_model", "qwen2.5:1.5b"))
+            r["max_loops"] = max_loops
+
         skills_playbook = "\n\n".join(
             f"#### Skill Attiva: `{s.name}` ({s.kind})\n{s.full_body[:900]}"
-            for s in selected_skills[:3]
+            for s in selected_skills[:4]
         )
         roster_text = "\n".join(
-            f"- **{r['name']}** (Wiki `{r['wiki_depth']}`, Tools: `{', '.join(r['tools'])}`): {r['mission']}"
+            f"- **{r['name']}** [Modello: `{r['model']}`, Max Loop: `{r['max_loops']}`, Wiki: `{r['wiki_depth']}`, Tools: `{', '.join(r['tools'])}`]: {r['mission']}"
             for r in team_roster
         )
 
         enhanced_instructions = (
             f"=== CORTICAL HARNESS — Orchestratore Multi-Agent & 3+1 Second Brain ===\n"
-            f"Rispondi sempre in italiano chiaro e tecnicamente rigoroso.\n\n"
-            f"=== 1. CONTESTO MEMORIA WIKI (Livello 3+1 selezionato: {depth.value.upper()}) ===\n"
+            f"Rispondi sempre in italiano chiaro e tecnicamente rigoroso.\n"
+            f"Configurazione Orchestratore: Max Loop Agenti = {max_loops} | Modelli = Analyst({role_model_map['arch_analyst']}), Implementer({role_model_map['code_implementer']}), Reviewer({role_model_map['reviewer']}).\n\n"
+            f"=== 1. CONTESTO SPECIFICO ALLEGATO & WIKI (Livello 3+1: {depth.value.upper()}) ===\n"
             f"{wiki_block}\n\n"
             f"=== 2. SKILL PROCEDURALI ATTIVATE IN PARALLELO ===\n"
             f"{skills_playbook}\n\n"
-            f"=== 3. TOOL CONSIGLIATI & RUOLI MULTI-AGENTE ===\n"
-            f"Tool prioritari: {', '.join(tools)}\n"
+            f"=== 3. TOOL & RUOLI MULTI-AGENTE CONFIGURATI ===\n"
+            f"Tool/Plugin attivi: {', '.join(tools)}\n"
             f"{roster_text}\n"
         )
 
@@ -574,6 +689,8 @@ class CorticalSkillHub:
             mode="enhanced",
             memory_tier_skill=target_tier_skill,
             selected_procedural_skills=proc_names,
+            attached_context=attachments,
+            orchestrator_config=orch_cfg,
         )
 
     def _load_episode_and_steps(
