@@ -1404,6 +1404,274 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let draggedNodeId = null;
     let nodePositions = {};
 
+    // =========================================================================
+    // INTERACTIVE HELP (?) HOVER TOOLTIPS & CLICK-TO-DOCS DRAWER
+    // =========================================================================
+    function initHelpTooltips() {
+      const tooltip = document.getElementById('global-tooltip');
+      if (!tooltip) return;
+
+      document.body.addEventListener('mouseover', (e) => {
+        const target = e.target.closest('[data-tip]');
+        if (!target) return;
+        const tip = target.getAttribute('data-tip');
+        if (!tip) return;
+        tooltip.innerHTML = `${tip}<span class="tt-hint">💡 Clicca per aprire la guida interattiva</span>`;
+        tooltip.style.display = 'block';
+        positionTooltip(e, tooltip);
+      });
+
+      document.body.addEventListener('mousemove', (e) => {
+        if (tooltip.style.display === 'block') {
+          positionTooltip(e, tooltip);
+        }
+      });
+
+      document.body.addEventListener('mouseout', (e) => {
+        const target = e.target.closest('[data-tip]');
+        if (target) {
+          tooltip.style.display = 'none';
+        }
+      });
+
+      document.body.addEventListener('click', (e) => {
+        if (e.target.closest('.help-btn')) {
+          tooltip.style.display = 'none';
+        }
+      });
+    }
+
+    function positionTooltip(e, tooltip) {
+      const pad = 12;
+      let x = e.clientX + pad;
+      let y = e.clientY + pad;
+      if (x + 320 > window.innerWidth) {
+        x = Math.max(10, window.innerWidth - 330);
+      }
+      if (y + 120 > window.innerHeight) {
+        y = Math.max(10, e.clientY - 90);
+      }
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+    }
+
+    function openHelpSection(sectionId, event) {
+      if (event) event.stopPropagation();
+      const tooltip = document.getElementById('global-tooltip');
+      if (tooltip) tooltip.style.display = 'none';
+
+      const backdrop = document.getElementById('help-drawer-backdrop');
+      if (backdrop) backdrop.style.display = 'flex';
+
+      document.querySelectorAll('.doc-section').forEach(sec => sec.classList.remove('highlight'));
+      if (sectionId) {
+        const target = document.getElementById(sectionId);
+        if (target) {
+          target.classList.add('highlight');
+          setTimeout(() => {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 60);
+        }
+      }
+    }
+
+    function closeHelpDrawer(event) {
+      if (event) event.stopPropagation();
+      const backdrop = document.getElementById('help-drawer-backdrop');
+      if (backdrop) backdrop.style.display = 'none';
+    }
+
+    // =========================================================================
+    // SCOPED CONTEXT ATTACHMENTS (FILES, FOLDERS, SKILLS, PLUGINS)
+    // =========================================================================
+    async function loadScopedContext() {
+      try {
+        const r = await fetch('/api/context');
+        const data = await r.json();
+        cachedAttachments = data.attachments || [];
+        renderContextChips();
+      } catch (err) {
+        console.error("Errore caricamento contesto:", err);
+      }
+    }
+
+    function renderContextChips() {
+      const chipsContainer = document.getElementById('composer-context-chips');
+      const studioList = document.getElementById('studio-context-list');
+
+      const iconMap = {
+        file: '📄',
+        folder: '📁',
+        skill: '⚡',
+        plugin: '🔌'
+      };
+
+      if (!cachedAttachments.length) {
+        if (chipsContainer) {
+          chipsContainer.innerHTML = `
+            <span style="font-size:0.74rem; color:var(--muted); font-family:var(--mono);">
+              📎 Contesto Attivo: <i style="color:#64748b;">Nessun file/cartella pre-caricata (contesto pulito)</i>
+            </span>
+          `;
+        }
+        if (studioList) {
+          studioList.innerHTML = `<div style="font-size:0.76rem; color:var(--muted); font-style:italic;">Nessun elemento allegato. Usa i pulsanti sopra per aggiungere file, cartelle, skill o plugin.</div>`;
+        }
+        return;
+      }
+
+      if (chipsContainer) {
+        chipsContainer.innerHTML = cachedAttachments.map(att => {
+          const icon = iconMap[att.item_type] || '📎';
+          const name = att.item_ref.split('/').pop() || att.item_ref;
+          const tierBadge = att.depth_tier ? ` · ${att.depth_tier.toUpperCase()}` : '';
+          return `
+            <span class="ctx-chip" title="${att.item_ref} (~${att.tokens_estimate || 0} tok)">
+              <span>${icon} ${name}${tierBadge}</span>
+              <span class="chip-rm" onclick="detachContextItem('${att.id}', event)" title="Rimuovi dal contesto">✕</span>
+            </span>
+          `;
+        }).join('');
+      }
+
+      if (studioList) {
+        studioList.innerHTML = cachedAttachments.map(att => {
+          const icon = iconMap[att.item_type] || '📎';
+          return `
+            <div style="background:rgba(15,23,42,0.85); border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin-bottom:6px; font-size:0.75rem; display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div><b>${icon} ${att.item_type.toUpperCase()}:</b> <code style="color:var(--accent);">${att.item_ref}</code></div>
+                <div style="font-size:0.69rem; color:var(--muted); font-family:var(--mono);">Tier: ${att.depth_tier.toUpperCase()} · ~${att.tokens_estimate || 0} tokens · Scope: ${att.scope_id}</div>
+              </div>
+              <div style="display:flex; gap:5px;">
+                <button class="btn btn-ghost" style="padding:2px 7px; font-size:0.67rem;" onclick="inspectAttachment3Plus1('${att.id}')" title="Ispeziona sintesi 3+1">🔍 Sintesi</button>
+                <button class="btn btn-danger" style="padding:2px 7px; font-size:0.67rem;" onclick="detachContextItem('${att.id}', event)" title="Rimuovi">✕</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    async function attachContextItemApi(itemType, itemRef, depthTier = 'medium', label = null) {
+      if (!itemRef) return;
+      try {
+        const r = await fetch('/api/context/attach', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            scope_id: 'chat',
+            item_type: itemType,
+            item_ref: itemRef,
+            depth_tier: depthTier,
+            label: label
+          })
+        });
+        const d = await r.json();
+        if (d.error) {
+          alert(`Impossibile allegare: ${d.error}`);
+          return;
+        }
+        await loadScopedContext();
+        await loadMcpKnowledgeGraph();
+        appendStreamCard(
+          'system',
+          `CONTEXT ATTACHED → ${itemType.toUpperCase()}`,
+          `~${d.tokens_estimate || 0} tok`,
+          `📎 Allegato: ${d.item_ref}`,
+          `Tipo: ${d.item_type} | Livello 3+1: ${d.depth_tier.toUpperCase()} | Hash: ${d.merkle_hash || 'inline'}`
+        );
+      } catch (err) {
+        alert("Errore durante l'allegato: " + err.message);
+      }
+    }
+
+    async function detachContextItem(attachmentId, event) {
+      if (event) event.stopPropagation();
+      try {
+        const r = await fetch('/api/context/detach', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ attachment_id: attachmentId })
+        });
+        const d = await r.json();
+        await loadScopedContext();
+        await loadMcpKnowledgeGraph();
+        appendStreamCard(
+          'system',
+          'CONTEXT DETACHED',
+          'OK',
+          `Rimosso allegato ${attachmentId}`,
+          ''
+        );
+      } catch (err) {
+        console.error("Errore rimozione allegato:", err);
+      }
+    }
+
+    function quickAttachPrompt(type) {
+      let promptMsg = "Inserisci il percorso assoluto o relativo del File da allegare:";
+      let defaultVal = "src/cortical/server.py";
+      if (type === 'folder') {
+        promptMsg = "Inserisci il percorso della Cartella da allegare:";
+        defaultVal = "src/cortical";
+      } else if (type === 'skill') {
+        promptMsg = "Inserisci il nome della Skill da attivare:";
+        defaultVal = "ai-reviewer-mandate-and-complexity";
+      } else if (type === 'plugin') {
+        promptMsg = "Inserisci il nome del Plugin/MCP da attivare:";
+        defaultVal = "mcp:cortical-wiki";
+      }
+
+      const val = prompt(promptMsg, defaultVal);
+      if (val && val.trim()) {
+        const tier = document.getElementById('agent-depth')?.value || 'medium';
+        attachContextItemApi(type, val.trim(), tier);
+      }
+    }
+
+    function attachFromStudio() {
+      const typeEl = document.getElementById('ctx-item-type');
+      const refEl = document.getElementById('ctx-item-ref');
+      const tierEl = document.getElementById('ctx-item-tier');
+      if (!refEl || !refEl.value.trim()) {
+        alert("Inserisci un percorso o nome valido nel campo.");
+        return;
+      }
+      const itemType = typeEl.value;
+      const itemRef = refEl.value.trim();
+      const depthTier = tierEl.value;
+      attachContextItemApi(itemType, itemRef, depthTier);
+      refEl.value = '';
+    }
+
+    function handleBrowserFileSelected(event) {
+      const input = event.target;
+      if (!input.files || !input.files[0]) return;
+      const file = input.files[0];
+      const suggested = file.name;
+      const fullPath = prompt(
+        `File selezionato: "${suggested}".\\nInserisci il percorso relativo o assoluto del file sul tuo sistema:`,
+        suggested
+      );
+      if (fullPath && fullPath.trim()) {
+        attachContextItemApi('file', fullPath.trim(), 'medium');
+      }
+      input.value = '';
+    }
+
+    function inspectAttachment3Plus1(attachmentId) {
+      const att = cachedAttachments.find(a => a.id === attachmentId);
+      if (!att) return;
+      const view = document.getElementById('wiki-node-view');
+      if (view) {
+        view.textContent = JSON.stringify(att, null, 2);
+      }
+    }
+
+    // =========================================================================
+    // NAVIGATION & VOICE UTILS
+    // =========================================================================
     function switchMainStage(stage) {
       ['stream', 'graph', 'brain'].forEach(s => {
         const view = document.getElementById(`stage-${s}`);
@@ -1415,6 +1683,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         loadMcpKnowledgeGraph();
       } else if (stage === 'brain') {
         loadSkillsHub();
+        loadScopedContext();
+        loadSmartMemory();
         navigateWiki(currentWikiPath);
       }
     }
@@ -1458,14 +1728,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function loadHealth() {
-      const r = await fetch('/health');
-      const d = await r.json();
-      document.getElementById('hw-banner').textContent =
-        `${d.os_name} (${d.arch}) · ${d.tier} · ${d.tts_engine} · LLM: ${d.active_base_url}`;
+      try {
+        const r = await fetch('/health');
+        const d = await r.json();
+        document.getElementById('hw-banner').textContent =
+          `${d.os_name} (${d.arch}) · ${d.tier} · ${d.tts_engine} · LLM: ${d.active_base_url}`;
+      } catch (err) {
+        console.error("Errore loadHealth:", err);
+      }
     }
 
     function appendStreamCard(type, metaLeft, metaRight, title, detail) {
       const stream = document.getElementById('agent-stream');
+      if (!stream) return;
       const div = document.createElement('div');
       div.className = `step-card ${type}`;
       div.innerHTML = `
@@ -1642,49 +1917,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function refreshAgents() {
-      const r = await fetch('/api/agents');
-      const data = await r.json();
-      const sessions = data.sessions || [];
-      const roster = document.getElementById('agent-roster');
-      if (!sessions.length) {
-        roster.innerHTML = `<div style="color:var(--muted); font-size:0.78rem;">Nessun task attivo. Le chiacchierate non creano task. Usa "+ Nuovo Task" o "/task" in pi per aprirne uno.</div>`;
-        return;
-      }
-
-      roster.innerHTML = sessions.map(s => `
-        <div class="agent-item ${s.session_id === selectedSessionId ? 'active' : ''}" onclick="selectSession('${s.session_id}')">
-          <div class="agent-item-top">
-            <span>🤖 ${s.session_id}</span>
-            <span class="status-pill status-${s.status}">${s.status}</span>
-          </div>
-          <div style="font-size:0.78rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-            ${s.goal}
-          </div>
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; gap:4px;">
-            <span style="font-size:0.68rem; color:var(--muted); font-family:var(--mono);">
-              3+1: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
-            </span>
-            <div style="display:flex; gap:4px;">
-              ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 6px; font-size:0.67rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')" title="Archivia nei 3+1 livelli e valuta nuova Skill">📦 Archivia</button>` : ''}
-              <button class="btn btn-danger" style="padding:2px 6px; font-size:0.67rem;" onclick="deleteTask(event, '${s.session_id}')" title="Cancella definitivamente il task">🗑️ Cancella</button>
-            </div>
-          </div>
-        </div>
-      `).join('');
-
-      if (selectedSessionId) {
-        const active = sessions.find(s => s.session_id === selectedSessionId);
-        if (active) {
-          document.getElementById('active-session-badge').textContent = `${active.session_id} (${active.status.toUpperCase()})`;
-          const stream = document.getElementById('agent-stream');
-          stream.innerHTML = active.steps.map(st => `
-            <div class="step-card ${st.type}">
-              <div class="step-meta"><span>STEP #${st.index} · ${st.type.toUpperCase()}</span><span>${st.timestamp}</span></div>
-              <div class="step-title">${st.title}</div>
-              ${st.detail ? `<pre class="step-detail">${st.detail}</pre>` : ''}
-            </div>
-          `).join('');
+      try {
+        const r = await fetch('/api/agents');
+        const data = await r.json();
+        const sessions = data.sessions || [];
+        const roster = document.getElementById('agent-roster');
+        if (!sessions.length) {
+          roster.innerHTML = `<div style="color:var(--muted); font-size:0.78rem;">Nessun task attivo. Le chiacchierate non creano task. Usa "+ Nuovo Task" o "/task" in pi per aprirne uno.</div>`;
+          return;
         }
+
+        roster.innerHTML = sessions.map(s => `
+          <div class="agent-item ${s.session_id === selectedSessionId ? 'active' : ''}" onclick="selectSession('${s.session_id}')">
+            <div class="agent-item-top">
+              <span>🤖 ${s.session_id}</span>
+              <span class="status-pill status-${s.status}">${s.status}</span>
+            </div>
+            <div style="font-size:0.78rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+              ${s.goal}
+            </div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; gap:4px;">
+              <span style="font-size:0.68rem; color:var(--muted); font-family:var(--mono);">
+                3+1: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
+              </span>
+              <div style="display:flex; gap:4px;">
+                ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 6px; font-size:0.67rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')" title="Archivia nei 3+1 livelli e valuta nuova Skill">📦 Archivia</button>` : ''}
+                <button class="btn btn-danger" style="padding:2px 6px; font-size:0.67rem;" onclick="deleteTask(event, '${s.session_id}')" title="Cancella definitivamente il task">🗑️ Cancella</button>
+              </div>
+            </div>
+          </div>
+        `).join('');
+
+        if (selectedSessionId) {
+          const active = sessions.find(s => s.session_id === selectedSessionId);
+          if (active) {
+            document.getElementById('active-session-badge').textContent = `${active.session_id} (${active.status.toUpperCase()})`;
+            const stream = document.getElementById('agent-stream');
+            stream.innerHTML = active.steps.map(st => `
+              <div class="step-card ${st.type}">
+                <div class="step-meta"><span>STEP #${st.index} · ${st.type.toUpperCase()}</span><span>${st.timestamp}</span></div>
+                <div class="step-title">${st.title}</div>
+                ${st.detail ? `<pre class="step-detail">${st.detail}</pre>` : ''}
+              </div>
+            `).join('');
+          }
+        }
+      } catch (err) {
+        console.error("Errore refreshAgents:", err);
       }
     }
 
@@ -1776,29 +2055,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // INTERACTIVE CONCEPT KNOWLEDGE GRAPH (MCP `wiki_get_knowledge_graph`)
     // =========================================================================
     async function loadMcpKnowledgeGraph() {
-      const mcpReq = {
-        jsonrpc: '2.0',
-        id: Date.now(),
-        method: 'tools/call',
-        params: {
-          name: 'wiki_get_knowledge_graph',
-          arguments: { max_nodes: 60 }
-        }
-      };
-      const r = await fetch('/api/mcp', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(mcpReq)
-      });
-      const mcpRes = await r.json();
-      const rawText = mcpRes?.result?.content?.[0]?.text || '{}';
-      cachedGraphData = JSON.parse(rawText);
-      const stats = cachedGraphData.stats || {};
-      const label = `${stats.concept_count || stats.node_count || 0} concetti · ${stats.edge_count || 0} relazioni`;
-      document.getElementById('sidebar-graph-stats').textContent = label;
-      document.getElementById('nav-graph-count').textContent = `(${stats.node_count || 0})`;
-      computeConceptLayout(cachedGraphData);
-      renderKnowledgeGraphSvg();
+      try {
+        const mcpReq = {
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: {
+            name: 'wiki_get_knowledge_graph',
+            arguments: { max_nodes: 60 }
+          }
+        };
+        const r = await fetch('/api/mcp', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(mcpReq)
+        });
+        const mcpRes = await r.json();
+        const rawText = mcpRes?.result?.content?.[0]?.text || '{}';
+        cachedGraphData = JSON.parse(rawText);
+        const stats = cachedGraphData.stats || {};
+        const label = `${stats.concept_count || stats.node_count || 0} concetti · ${stats.edge_count || 0} relazioni`;
+        const sidebarStats = document.getElementById('sidebar-graph-stats');
+        if (sidebarStats) sidebarStats.textContent = label;
+        const navCount = document.getElementById('nav-graph-count');
+        if (navCount) navCount.textContent = `(${stats.node_count || 0})`;
+        computeConceptLayout(cachedGraphData);
+        renderKnowledgeGraphSvg();
+      } catch (err) {
+        console.error("Errore loadMcpKnowledgeGraph:", err);
+      }
     }
 
     function setGraphFilter(filter, el) {
@@ -1861,6 +2146,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (currentGraphFilter === 'all') return true;
       if (n.kind === 'hub') return true;
       if (currentGraphFilter === 'concept') return n.kind === 'concept';
+      if (currentGraphFilter === 'memoria') return n.category === 'memoria';
+      if (currentGraphFilter === 'agenti') return n.category === 'agenti';
+      if (currentGraphFilter === 'voce') return n.category === 'voce';
+      if (currentGraphFilter === 'sicurezza') return n.category === 'sicurezza';
       if (currentGraphFilter === 'insight') return n.kind === 'insight';
       if (currentGraphFilter === 'skill') return n.kind === 'skill';
       if (currentGraphFilter === 'task') return (n.kind || '').startsWith('task_');
@@ -1919,15 +2208,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       nodes.forEach(n => {
         const p = nodePositions[n.id];
         if (!p) return;
+        const isCore = !!n.is_framework_core;
         const col = n.kind === 'concept' ? (catColor[n.category] || '#c084fc') : (colorByKind[n.kind] || '#38bdf8');
         const r = n.kind === 'hub' ? 18 : (n.kind === 'concept' ? 13 : 10);
-        const safeId = n.id.replace(/'/g, "\\\\'");
+        const safeId = n.id.replace(/'/g, "\\'");
         const label = n.label || n.key;
+        const coreBorder = isCore ? 'stroke="#38bdf8" stroke-width="3"' : 'stroke="#070b14" stroke-width="2"';
         html += `
           <g style="cursor:pointer;" onmousedown="startDragNode(event, '${safeId}')" onclick="inspectConceptById('${safeId}')">
-            <circle cx="${p.x}" cy="${p.y}" r="${r + 5}" fill="${col}" opacity="0.14" />
-            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" stroke="#070b14" stroke-width="2.5" />
-            <rect x="${p.x - Math.min(115, label.length * 3.8 + 10)}" y="${p.y + r + 5}" width="${Math.min(230, label.length * 7.6 + 20)}" height="19" rx="5" fill="rgba(7,11,20,0.88)" stroke="rgba(56,189,248,0.25)" />
+            <circle cx="${p.x}" cy="${p.y}" r="${r + 5}" fill="${col}" opacity="${isCore ? '0.28' : '0.14'}" />
+            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" ${coreBorder} />
+            ${isCore ? `<circle cx="${p.x}" cy="${p.y}" r="${r + 2.5}" fill="none" stroke="#fff" stroke-width="1" opacity="0.8" />` : ''}
+            <rect x="${p.x - Math.min(115, label.length * 3.8 + 10)}" y="${p.y + r + 5}" width="${Math.min(230, label.length * 7.6 + 20)}" height="19" rx="5" fill="rgba(7,11,20,0.88)" stroke="${isCore ? 'rgba(56,189,248,0.5)' : 'rgba(192,132,252,0.3)'}" />
             <text x="${p.x}" y="${p.y + r + 18}" fill="#f1f5f9" font-size="11" font-weight="600" text-anchor="middle">${label}</text>
           </g>
         `;
@@ -1977,14 +2269,71 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
     })();
 
+    // =========================================================================
+    // CONCEPT INSPECTOR, DYNAMIC CONFIG FORM & USER CONCEPT DELETION
+    // =========================================================================
     function inspectConceptById(nodeId) {
-      const node = (cachedGraphData.nodes || []).find(n => n.id === nodeId);
-      if (!node) return;
-      document.getElementById('cd-badge').textContent = `${(node.kind || 'concept').toUpperCase()} · ${(node.category || 'dominio').toUpperCase()}`;
+      selectedConceptNode = (cachedGraphData.nodes || []).find(n => n.id === nodeId);
+      if (!selectedConceptNode) return;
+      const node = selectedConceptNode;
+
+      const isCore = !!node.is_framework_core;
+      const badgeEl = document.getElementById('cd-badge');
+      badgeEl.textContent = isCore ? `🔒 PILASTRO FRAMEWORK (${(node.category || 'core').toUpperCase()})` : `✨ CONCETTO UTENTE (${(node.category || 'utente').toUpperCase()})`;
+      badgeEl.style.background = isCore ? 'rgba(56,189,248,0.2)' : 'rgba(192,132,252,0.2)';
+      badgeEl.style.borderColor = isCore ? 'var(--accent)' : 'var(--purple)';
+
       document.getElementById('cd-title').textContent = node.label || node.key;
       document.getElementById('cd-summary-l1').textContent = node.summary || 'Nessuna sintesi L1 disponibile.';
       document.getElementById('cd-summary-l2').textContent = node.summary_medium || node.summary || 'Nessun dettaglio L2 aggiuntivo.';
 
+      // Dynamic Config Form
+      const cfgForm = document.getElementById('cd-config-form');
+      const cfg = node.config || {};
+      const cfgKeys = Object.keys(cfg);
+
+      if (cfgKeys.length > 0) {
+        let formHtml = `<div style="margin-bottom:8px; font-weight:600; color:#e2e8f0;">Modifica parametri del concetto:</div>`;
+        cfgKeys.forEach(k => {
+          const val = cfg[k];
+          const isNum = typeof val === 'number';
+          formHtml += `
+            <div class="cfg-row">
+              <label>${k.replace(/_/g, ' ').toUpperCase()}:</label>
+              <input id="cfg-input-${k}" type="${isNum ? 'number' : 'text'}" value="${val}" style="padding:4px 8px; font-size:0.77rem; width:100%;" />
+            </div>
+          `;
+        });
+        formHtml += `
+          <button class="btn" style="width:100%; justify-content:center; margin-top:6px;" onclick="saveSelectedConceptConfig('${node.id}')">
+            💾 Salva Configurazione Concetto
+          </button>
+        `;
+        cfgForm.innerHTML = formHtml;
+      } else {
+        cfgForm.innerHTML = `
+          <div style="color:var(--muted); font-size:0.75rem; margin-bottom:6px;">Questo concetto non ha parametri personalizzati definiti.</div>
+          <button class="btn btn-ghost" style="font-size:0.72rem;" onclick="addCustomConfigField('${node.id}')">+ Aggiungi Parametro</button>
+        `;
+      }
+
+      // Deletion Box
+      const delBox = document.getElementById('cd-delete-box');
+      if (isCore) {
+        delBox.innerHTML = `
+          <div style="font-size:0.72rem; color:var(--muted); background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:7px; padding:6px 9px;">
+            🔒 <b>Pilastro del Framework:</b> Questo concetto è fondamentale per l'architettura di Cortical e non può essere eliminato. Puoi tuttavia configurarne i parametri operativi qui sopra.
+          </div>
+        `;
+      } else {
+        delBox.innerHTML = `
+          <button class="btn btn-danger" style="width:100%; justify-content:center;" onclick="deleteSelectedConcept('${node.id}')">
+            🗑️ Elimina Concetto dalla Memoria
+          </button>
+        `;
+      }
+
+      // Connected Edges
       const connected = (cachedGraphData.edges || [])
         .filter(e => e.source === node.id || e.target === node.id)
         .map(e => {
@@ -1996,33 +2345,125 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('cd-sources').textContent = (node.sources || ['/']).join(', ');
     }
 
+    async function saveSelectedConceptConfig(conceptId) {
+      if (!selectedConceptNode) return;
+      const cfg = selectedConceptNode.config || {};
+      const updates = {};
+      Object.keys(cfg).forEach(k => {
+        const input = document.getElementById(`cfg-input-${k}`);
+        if (input) {
+          const origType = typeof cfg[k];
+          if (origType === 'number') {
+            updates[k] = parseFloat(input.value) || 0;
+          } else {
+            updates[k] = input.value;
+          }
+        }
+      });
+
+      try {
+        const r = await fetch('/api/graph/concept/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ concept_id: conceptId, config: updates })
+        });
+        const d = await r.json();
+        appendStreamCard(
+          'system',
+          'CONCEPT CONFIG UPDATED',
+          conceptId,
+          `Configurazione aggiornata per ${selectedConceptNode.label || conceptId}`,
+          JSON.stringify(d, null, 2)
+        );
+        await loadMcpKnowledgeGraph();
+        inspectConceptById(conceptId);
+      } catch (err) {
+        alert("Errore salvataggio configurazione: " + err.message);
+      }
+    }
+
+    async function deleteSelectedConcept(nodeId) {
+      if (!confirm(`Sei sicuro di voler eliminare definitivamente il concetto "${nodeId}" dal grafo della memoria?`)) return;
+      try {
+        const r = await fetch('/api/graph/concept/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ node_id: nodeId })
+        });
+        const d = await r.json();
+        if (d.error) {
+          alert(`Eliminazione non consentita: ${d.error}`);
+          return;
+        }
+        appendStreamCard(
+          'permission',
+          'CONCEPT DELETED FROM MEMORY',
+          nodeId,
+          `🗑️ Concetto "${nodeId}" eliminato con successo dal grafo della conoscenza.`,
+          ''
+        );
+        selectedConceptNode = null;
+        document.getElementById('cd-title').textContent = "Seleziona un concetto";
+        document.getElementById('cd-config-form').innerHTML = "Clicca su un nodo del grafo per configurarne i parametri.";
+        document.getElementById('cd-delete-box').innerHTML = "";
+        await loadMcpKnowledgeGraph();
+      } catch (err) {
+        alert("Errore cancellazione concetto: " + err.message);
+      }
+    }
+
+    function addCustomConfigField(conceptId) {
+      const key = prompt("Nome del nuovo parametro (es: timeout_sec, model_override):");
+      if (!key) return;
+      const val = prompt(`Valore per ${key}:`, "default");
+      if (val === null) return;
+      if (!selectedConceptNode.config) selectedConceptNode.config = {};
+      selectedConceptNode.config[key] = val;
+      saveSelectedConceptConfig(conceptId);
+    }
+
+    // =========================================================================
+    // SMART MEMORY, 3+1 WIKI & PERMISSION GATE
+    // =========================================================================
     async function loadSmartMemory() {
-      const r = await fetch('/api/memory/state');
-      const d = await r.json();
-      document.getElementById('wiki-node-view').textContent = JSON.stringify(d, null, 2);
+      try {
+        const r = await fetch('/api/memory/state');
+        const d = await r.json();
+        const memView = document.getElementById('memory-state-view');
+        if (memView) memView.textContent = JSON.stringify(d, null, 2);
+      } catch (err) {
+        console.error("Errore loadSmartMemory:", err);
+      }
     }
 
     async function navigateWiki(path = '/') {
       currentWikiPath = path;
       const depth = document.getElementById('wiki-depth').value;
-      const r = await fetch(`/api/wiki/navigate?path=${encodeURIComponent(path)}&depth=${depth}`);
-      const d = await r.json();
-      document.getElementById('wiki-node-view').textContent = JSON.stringify(d, null, 2);
+      try {
+        const r = await fetch(`/api/wiki/navigate?path=${encodeURIComponent(path)}&depth=${depth}`);
+        const d = await r.json();
+        const wikiView = document.getElementById('wiki-node-view');
+        if (wikiView) wikiView.textContent = JSON.stringify(d, null, 2);
 
-      const children = d.children || [];
-      const tree = document.getElementById('wiki-tree');
-      let html = '';
-      if (path !== '/') {
-        const parent = d.parent_path || '/';
-        html += `<div class="tree-node" onclick="navigateWiki('${parent}')"><span>⬅️ .. (${parent})</span><span>DIR</span></div>`;
+        const children = d.children || [];
+        const tree = document.getElementById('wiki-tree');
+        if (tree) {
+          let html = '';
+          if (path !== '/') {
+            const parent = d.parent_path || '/';
+            html += `<div class="tree-node" onclick="navigateWiki('${parent}')"><span>⬅️ .. (${parent})</span><span>DIR</span></div>`;
+          }
+          html += children.map(c => `
+            <div class="tree-node" onclick="navigateWiki('${c.path}')">
+              <span>${c.node_type === 'dir' ? '📁' : '📄'} ${c.path.split('/').pop() || '/'}</span>
+              <span style="color:var(--muted); font-size:0.7rem;">${c.node_type}</span>
+            </div>
+          `).join('');
+          tree.innerHTML = html || `<div class="tree-node" onclick="navigateWiki('/')"><span>📁 / (Torna a root)</span></div>`;
+        }
+      } catch (err) {
+        console.error("Errore navigateWiki:", err);
       }
-      html += children.map(c => `
-        <div class="tree-node" onclick="navigateWiki('${c.path}')">
-          <span>${c.node_type === 'dir' ? '📁' : '📄'} ${c.path.split('/').pop() || '/'}</span>
-          <span style="color:var(--muted); font-size:0.7rem;">${c.node_type}</span>
-        </div>
-      `).join('');
-      tree.innerHTML = html || `<div class="tree-node" onclick="navigateWiki('/')"><span>📁 / (Torna a root)</span></div>`;
     }
 
     async function searchWiki() {
@@ -2033,19 +2474,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function loadSkillsHub() {
-      const r = await fetch('/api/skills/state');
-      const d = await r.json();
-      const box = document.getElementById('skills-list-view');
-      const skills = d.skills || [];
-      box.innerHTML = skills.map(s => `
-        <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:0.77rem;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--emerald)' : '#f8fafc'};">${s.name}</b>
-            <span class="status-pill" style="background:rgba(255,255,255,0.06); color:var(--muted);">${s.category}</span>
-          </div>
-          <div style="color:var(--muted); margin-top:3px;">${s.description}</div>
-        </div>
-      `).join('');
+      try {
+        const r = await fetch('/api/skills/state');
+        const d = await r.json();
+        const box = document.getElementById('skills-list-view');
+        const skills = d.skills || [];
+        if (box) {
+          box.innerHTML = skills.map(s => `
+            <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:0.77rem;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--emerald)' : '#f8fafc'};">${s.name}</b>
+                <span class="status-pill" style="background:rgba(255,255,255,0.06); color:var(--muted);">${s.category}</span>
+              </div>
+              <div style="color:var(--muted); margin-top:3px;">${s.description}</div>
+            </div>
+          `).join('');
+        }
+      } catch (err) {
+        console.error("Errore loadSkillsHub:", err);
+      }
     }
 
     async function testPromptEnhancer() {
@@ -2093,10 +2540,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       evalPerm();
     }
 
-    loadHealth();
-    navigateWiki('/');
-    loadMcpKnowledgeGraph();
-    setInterval(refreshAgents, 2000);
+    // =========================================================================
+    // BOOTSTRAP INITIALIZATION
+    // =========================================================================
+    window.addEventListener('DOMContentLoaded', () => {
+      initHelpTooltips();
+      loadHealth();
+      loadScopedContext();
+      navigateWiki('/');
+      loadMcpKnowledgeGraph();
+      loadSmartMemory();
+      loadSkillsHub();
+      setInterval(refreshAgents, 2000);
+    });
   </script>
 </body>
 </html>
