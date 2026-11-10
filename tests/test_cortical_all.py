@@ -8,10 +8,12 @@ import unittest
 from pathlib import Path
 
 from cortical.cli import main as cli_main
+from cortical.grounding import extract_weather_intent, fetch_weather_forecast
 from cortical.hardware.profiler import HardwareProfiler
+from cortical.memory import MemoryCurator, is_ephemeral_utterance, is_explicit_task_request
 from cortical.permissions.gate import AdaptivePermissionGate
 from cortical.server import CorticalLiveService
-from cortical.voice.engine import CorticalVoiceEngine, is_stop_command, strip_wake_word
+from cortical.voice.engine import CorticalVoiceEngine, is_self_echo, is_stop_command, strip_wake_word
 from cortical.wiki.crawler import DeterministicMerkleCrawler
 from cortical.wiki.db import AccessContext, CorticalWikiDB, DepthTier
 from cortical.wiki.fact_check import CitationVerifier
@@ -22,7 +24,7 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "api_fixtures.json"
 
 class TestCorticalSystem(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp_dir.name)
         self.wiki_db_path = self.root / "wiki.db"
         self.perm_db_path = self.root / "perm.db"
@@ -334,4 +336,115 @@ class TestCorticalSystem(unittest.TestCase):
         )
         self.assertEqual(st_voice, 200)
         self.assertEqual(v_res["route"], "system2_agentic")
+
+    def test_10_self_echo_isolation_and_explicit_only_tasks(self) -> None:
+        """Tests that Cortical ignores its own spoken response (anti-echo) and creates tasks ONLY when explicitly asked."""
+        voice = CorticalVoiceEngine(reflex_llm_fn=lambda q: f"Risposta sintetica per {q}")
+
+        # 1. Normal question -> System 1 (must NOT create a task automatically)
+        res1 = voice.handle_utterance("Hei Cortical, analizza brevemente come funziona il meteo")
+        self.assertEqual(res1.route, "system1_reflex")
+        self.assertIsNone(res1.dispatched_task_goal)
+        self.assertFalse(is_explicit_task_request("procedi cerca il meteo a roma per domani"))
+        self.assertFalse(is_explicit_task_request("apri chrome e controlla le notizie"))
+        self.assertTrue(is_explicit_task_request("crea un task per rifattorizzare il modulo wiki"))
+
+        # 2. If microphone hears Cortical's own response right after speaking, it must be isolated & ignored
+        echo_res = voice.handle_utterance(res1.spoken_response)
+        self.assertEqual(echo_res.route, "ignored_echo")
+        self.assertEqual(echo_res.spoken_response, "")
+        self.assertTrue(is_self_echo("Risposta sintetica per analizza", res1.spoken_response, 2.0))
+
+    def test_11_smart_memory_curator_and_task_archival(self) -> None:
+        """Tests bounded chat buffer (max 20), ephemeral filtering, LLM curation, closing questions, and compact task archival."""
+        db = CorticalWikiDB(self.wiki_db_path)
+        curator = MemoryCurator(
+            db,
+            llm_fn=lambda p: '{"save": true, "topic": "architettura", "insight": "L utente preferisce memoria isolata per task."}',
+        )
+
+        # 1. Ephemeral queries must be flagged as ephemeral and NEVER saved to durable memory_insights
+        self.assertTrue(is_ephemeral_utterance("che ore sono"))
+        self.assertTrue(is_ephemeral_utterance("procedi cerca il meteo a roma per domani"))
+        ephem_res = curator.record_chat_turn("procedi cerca il meteo a roma per domani", "Domani a Roma 18 gradi.")
+        self.assertTrue(ephem_res["is_ephemeral"])
+        self.assertFalse(ephem_res["curated_saved"])
+        self.assertEqual(len(curator.list_insights()), 0)
+
+        # 2. Durable technical preferences are curated and saved intelligently
+        dur_res = curator.record_chat_turn(
+            "Ricorda che per questo progetto preferisco sempre isolare la memoria per ogni singolo task.",
+            "Perfetto, memorizzo questa regola architetturale.",
+        )
+        self.assertFalse(dur_res["is_ephemeral"])
+        self.assertTrue(dur_res["curated_saved"])
+        self.assertEqual(len(curator.list_insights()), 1)
+
+        # 3. Chat buffer stays bounded to MAX_CHAT_BUFFER_TURNS (20)
+        for i in range(25):
+            curator.record_chat_turn(f"che ore sono turno {i}", f"Sono le 10:{i:02d}")
+        self.assertLessEqual(len(curator.get_recent_chat(limit=50)), 20)
+
+        # 4. Task lifecycle: Active with isolated working notes -> Closing Questions -> Compact Archived Trace
+        ctx = AccessContext()
+        db.record_episode(
+            ctx,
+            episode_id="task-101",
+            title="Task Test Isolamento",
+            goal="Ottimizzare la memoria del Second Brain",
+            outcome_status="active",
+            learned_summary="Log dettagliato temporaneo del task...",
+            skills_used=["cortical-second-brain"],
+            relations=[{"relation": "modifies", "target_type": "subtree", "target_id": "/architecture.md"}],
+        )
+        curator.add_task_working_note("task-101", "Nota di lavoro 1: test benchmark")
+        curator.add_task_working_note("task-101", "Nota di lavoro 2: verifica indice")
+        self.assertEqual(len(curator.get_task_working_notes("task-101")), 2)
+
+        preview = curator.prepare_task_closure("task-101")
+        self.assertEqual(preview["working_notes_count"], 2)
+        self.assertGreaterEqual(len(preview["closing_questions"]), 1)
+
+        archived = curator.archive_task("task-101", user_closing_notes="Confermato, tieni solo traccia sintetica.")
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(archived["purged_working_notes"], 2)
+        self.assertEqual(len(curator.get_task_working_notes("task-101")), 0)
+        self.assertTrue(archived["archived_trace"])
+
+    def test_12_mcp_knowledge_graph_and_weather_grounding(self) -> None:
+        """Tests standard MCP `wiki_get_knowledge_graph` visualizer payload and Rome weather intent extraction."""
+        intent = extract_weather_intent("procedi cerca il meteo a roma per domani")
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent["city"], "Roma")
+        self.assertEqual(intent["day_offset"], 1)
+        self.assertTrue(intent["open_browser"])
+
+        # Offline-safe weather forecast structure check (without opening browser)
+        forecast = fetch_weather_forecast("Roma", day_offset=1, open_browser=False)
+        self.assertEqual(forecast["city"], "Roma")
+        self.assertEqual(forecast["day_label"], "domani")
+        self.assertIn("Previsioni meteo per Roma", forecast["summary_it"])
+
+        # Standard MCP `wiki_get_knowledge_graph` call via CorticalLiveService `/api/mcp`
+        db = CorticalWikiDB(self.wiki_db_path)
+        DeterministicMerkleCrawler(db).crawl_directory(self.sample_docs)
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        st, mcp_resp = svc.handle_api(
+            "POST",
+            "/api/mcp",
+            {},
+            {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "wiki_get_knowledge_graph", "arguments": {"max_nodes": 30}},
+            },
+        )
+        self.assertEqual(st, 200)
+        graph_data = json.loads(mcp_resp["result"]["content"][0]["text"])
+        self.assertIn("nodes", graph_data)
+        self.assertIn("edges", graph_data)
+        self.assertGreaterEqual(graph_data["stats"]["node_count"], 2)
+
 

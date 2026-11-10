@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..memory import MemoryCurator
 from .crawler import DeterministicMerkleCrawler
 from .db import AccessContext, CorticalWikiDB, DepthTier
 from .fact_check import CitationVerifier
@@ -99,6 +100,30 @@ MCP_TOOLS = [
             "required": ["episode_id", "title", "goal", "outcome_status", "learned_summary"],
         },
     },
+    {
+        "name": "wiki_get_knowledge_graph",
+        "description": "Return the unified Knowledge Graph (Merkle subtree nodes, active/archived task traces, curated insights, and relational edges) via standard MCP.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_nodes": {"type": "integer", "default": 60},
+                "principal_id": {"type": "string", "default": "local_owner"},
+            },
+        },
+    },
+    {
+        "name": "wiki_archive_task",
+        "description": "Archive an active task episode, purging isolated working notes and keeping only a compact trace connected to the Knowledge Graph.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {"type": "string"},
+                "user_closing_answer": {"type": "string", "default": ""},
+                "target_subtree": {"type": "string", "default": "/"},
+            },
+            "required": ["episode_id"],
+        },
+    },
 ]
 
 
@@ -113,6 +138,7 @@ class CorticalWikiMCPServer:
         self.db = CorticalWikiDB(db_path or default_db)
         self.crawler = DeterministicMerkleCrawler(self.db)
         self.verifier = CitationVerifier(self.db)
+        self.curator = MemoryCurator(self.db)
 
     def handle_request(self, req: dict[str, Any]) -> dict[str, Any] | None:
         method = req.get("method")
@@ -210,6 +236,18 @@ class CorticalWikiMCPServer:
                 learned_summary=args["learned_summary"],
                 skills_used=args.get("skills_used"),
                 relations=args.get("relations"),
+            )
+        if name == "wiki_get_knowledge_graph":
+            return self.db.get_knowledge_graph(
+                ctx,
+                max_nodes=int(args.get("max_nodes", 60)),
+            )
+        if name == "wiki_archive_task":
+            return self.curator.archive_task(
+                ctx,
+                episode_id=args["episode_id"],
+                user_closing_answer=args.get("user_closing_answer", ""),
+                target_subtree=args.get("target_subtree", "/"),
             )
         raise ValueError(f"Unknown tool: {name}")
 

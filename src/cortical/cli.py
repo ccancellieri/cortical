@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from .grounding import extract_weather_intent, fetch_weather_forecast
 from .hardware.profiler import HardwareProfiler
 from .permissions.gate import AdaptivePermissionGate
 from .server import run_live_server
@@ -72,7 +73,14 @@ def main(argv: list[str] | None = None) -> int:
     p_voice = sub.add_parser("voice-eval", help="Evaluate a voice utterance through Cortical Dual-Path Voice Engine")
     p_voice.add_argument("utterance")
 
-    # 8. serve (Live HTTP + Voice + Second Brain Daemon)
+    # 8. weather (Real-Time Weather & Chrome Grounding)
+    p_weather = sub.add_parser("weather", help="Fetch real-time weather forecast and optionally open Chrome")
+    p_weather.add_argument("--city", default="Roma")
+    p_weather.add_argument("--day-offset", type=int, default=1)
+    p_weather.add_argument("--query", default="")
+    p_weather.add_argument("--open-chrome", action="store_true")
+
+    # 9. serve (Live HTTP + Voice + Second Brain Daemon)
     p_serve = sub.add_parser("serve", help="Run the live Cortical HTTP, Voice & Second Brain service")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
@@ -137,6 +145,22 @@ def main(argv: list[str] | None = None) -> int:
         voice = CorticalVoiceEngine(wiki_db=db, permission_gate=gate)
         res = voice.handle_utterance(args.utterance)
         print(json.dumps(dataclasses.asdict(res), indent=2))
+        return 0
+
+    if args.cmd == "weather":
+        city = args.city
+        day_offset = args.day_offset
+        if args.query:
+            intent = extract_weather_intent(args.query)
+            if intent:
+                city = intent["city"]
+                day_offset = intent["day_offset"]
+        res = fetch_weather_forecast(
+            city=city,
+            day_offset=day_offset,
+            open_chrome=bool(args.open_chrome),
+        )
+        print(json.dumps(res, indent=2))
         return 0
 
     if args.cmd == "serve":

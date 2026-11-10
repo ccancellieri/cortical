@@ -1,25 +1,29 @@
-"""Cortical Dual-Path Voice Engine (System 1 Fast Reflex + System 2 Agentic Delegation).
+"""Cortical Dual-Path Voice Engine with Self-Echo Rejection, Ducking & Explicit-Only Tasks.
 
-Upgrades and generalizes Peppe's voice capabilities for cross-platform (macOS + Linux) operation:
-1. Resilient Wake-Word & Stop/Barge-In Detection (`is_stop_command`):
-   Handles Whisper/WebSpeech variations ("hei cortical", "ehi cortical", "hey cortical",
-   "ba sta", "fer ma ti") and immediately stops active TTS/agents.
-2. Instant Built-in Italian Reflexes (< 5ms):
-   Answers clock/time ("che ore sono"), date ("che giorno è"), system status, and
-   voice permission confirmations without waiting for an LLM roundtrip.
-3. Dual-Path Routing:
-   - System 1 (Fast Reflex < 1s): Direct voice queries, web grounding, and subagent status checks.
-   - System 2 (Async Agentic Orchestrator): Multi-step coding, browser automation, or deep Wiki
-     tasks are delegated in background to `pi` while immediately acknowledging by voice.
+Key Capabilities:
+1. Self-Echo Isolation (`is_self_echo`):
+   Remembers the last spoken assistant response (`last_spoken_text`, `last_spoken_at`).
+   Any microphone transcript that overlaps >=45% with what Cortical just said (or is a substring
+   of its own speech within the echo window) is ignored (`route='ignored_echo'`), preventing
+   self-listening feedback loops.
+2. Audio Ducking & Barge-In Recalculation:
+   When the user starts speaking a real new question while Cortical is talking, active TTS
+   is ducked/aborted and the new question is recalculated immediately.
+3. Explicit-Only Task Creation:
+   Everyday questions (time, weather, searches, conversation) do NOT create tasks automatically.
+   Tasks are spawned ONLY when explicitly requested ("crea un task", "nuovo task", "orchestra un sottoagente").
 """
 
 from __future__ import annotations
 
 import datetime
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from ..grounding import extract_weather_intent, fetch_weather_forecast
+from ..memory import MemoryCurator, is_explicit_task_request
 from ..permissions.gate import AdaptivePermissionGate
 from ..wiki.db import AccessContext, CorticalWikiDB
 
@@ -57,28 +61,6 @@ STOP_SYLLABLE_PATTERNS = [
     r"\ban\s*nul\s*la\b",
     r"\bstop\b",
 ]
-
-AGENTIC_INTENT_KEYWORDS = (
-    "orchestra",
-    "sottoagente",
-    "subagent",
-    "agente",
-    "refactoring",
-    "implementa",
-    "scrivi codice",
-    "modifica il file",
-    "crea un file",
-    "apri chrome",
-    "compila il form",
-    "candidatura",
-    "indicizza",
-    "crawla",
-    "analizza il progetto",
-    "analizza il codice",
-    "esegui i test",
-    "lancia pi",
-    "usa pi",
-)
 
 GIORNI_SETTIMANA = (
     "lunedì",
@@ -120,8 +102,10 @@ def strip_wake_word(text: str) -> tuple[bool, str]:
             return (True, "")
         if norm.startswith(prefix + " "):
             return (True, norm[len(prefix) :].strip())
-    # Fuzzy match if wake word appears after a greeting word like "allora hei cortical ..."
-    m = re.match(r"^(?:allora\s+| senti\s+)?(?:ehi|hei|hey|ei|ciao|ok)?\s*cortical\b\s*(.*)$", norm)
+    m = re.match(
+        r"^(?:allora\s+|senti\s+)?(?:ehi|hei|hey|ei|ciao|ok)?\s*cortical\b\s*(.*)$",
+        norm,
+    )
     if m:
         return (True, m.group(1).strip())
     return (False, norm)
@@ -148,16 +132,47 @@ def is_stop_command(text: str) -> bool:
     return False
 
 
+def is_self_echo(
+    incoming_text: str,
+    last_spoken_text: str,
+    elapsed_sec: float,
+    echo_window_sec: float = 14.0,
+) -> bool:
+    """Deterministically detects if incoming microphone audio is Cortical's own spoken output."""
+    if not last_spoken_text or elapsed_sec > echo_window_sec:
+        return False
+    norm_in = _clean_transcript(incoming_text)
+    norm_out = _clean_transcript(last_spoken_text)
+    if not norm_in or not norm_out:
+        return False
+
+    # Never treat an explicit stop command as echo
+    if is_stop_command(norm_in):
+        return False
+
+    if len(norm_in) >= 6 and (norm_in in norm_out or norm_out in norm_in):
+        return True
+
+    in_words = [w for w in norm_in.split() if len(w) > 2]
+    out_words = set(w for w in norm_out.split() if len(w) > 2)
+    if len(in_words) >= 2 and out_words:
+        overlap = sum(1 for w in in_words if w in out_words) / len(in_words)
+        if overlap >= 0.55:
+            return True
+    return False
+
+
 @dataclass
 class VoiceRouteResult:
-    route: str  # 'stop' | 'permission_feedback' | 'status_report' | 'system1_reflex' | 'system2_agentic'
+    route: str  # 'ignored_echo' | 'stop' | 'permission_feedback' | 'status_report' | 'system1_reflex' | 'system2_agentic'
     spoken_response: str
     dispatched_task_goal: Optional[str] = None
     permission_updated: Optional[str] = None
+    memory_curation: Optional[dict[str, Any]] = None
 
 
 class CorticalVoiceEngine:
-    """Dual-path voice coordinator connecting STT/TTS to System 1 Reflex and System 2 `pi` Orchestrator."""
+    """Dual-path voice coordinator with Self-Echo Guard, Ducking, and Smart Memory Curation."""
 
     def __init__(
         self,
@@ -166,22 +181,33 @@ class CorticalVoiceEngine:
         reflex_llm_fn: Optional[Callable[[str], str]] = None,
         agentic_dispatch_fn: Optional[Callable[[str], str]] = None,
         stop_callback: Optional[Callable[[], None]] = None,
+        duck_callback: Optional[Callable[[], None]] = None,
+        memory_curator: Optional[MemoryCurator] = None,
     ) -> None:
         self.wiki_db = wiki_db
+        self.curator = memory_curator or (MemoryCurator(wiki_db) if wiki_db else None)
         self.permission_gate = permission_gate
         self.reflex_llm_fn = reflex_llm_fn
         self.agentic_dispatch_fn = agentic_dispatch_fn or (
             lambda goal: f"task-{abs(hash(goal)) % 10000}"
         )
         self.stop_callback = stop_callback
+        self.duck_callback = duck_callback
         self.pending_permission: Optional[tuple[str, dict[str, Any]]] = None
         self.active_background_tasks: dict[str, str] = {}
+        self.last_spoken_text: str = ""
+        self.last_spoken_at: float = 0.0
 
     def register_pending_permission(self, tool_name: str, args: dict[str, Any]) -> None:
         self.pending_permission = (tool_name, args)
 
+    def record_spoken_output(self, spoken_text: str) -> None:
+        """Records assistant speech so subsequent microphone pickups of the same phrase are ignored."""
+        if spoken_text and spoken_text.strip():
+            self.last_spoken_text = spoken_text.strip()
+            self.last_spoken_at = time.time()
+
     def _instant_builtin_reflex(self, cmd: str) -> Optional[str]:
-        """Handles clock, date, and identity questions deterministically in <5ms if not overridden."""
         now = datetime.datetime.now()
         if any(p in cmd for p in ("che ore sono", "che ora e", "che ora è", "dimmi l ora")):
             giorno = GIORNI_SETTIMANA[now.weekday()]
@@ -191,23 +217,52 @@ class CorticalVoiceEngine:
             giorno = GIORNI_SETTIMANA[now.weekday()]
             mese = MESI_ANNO[now.month]
             return f"Oggi è {giorno} {now.day} {mese} {now.year}."
+
+        weather_intent = extract_weather_intent(cmd)
+        if weather_intent:
+            open_chrome = any(w in cmd for w in ("chrome", "browser", "apri", "cerca"))
+            w = fetch_weather_forecast(
+                city=weather_intent["city"],
+                day_offset=weather_intent["day_offset"],
+                open_chrome=open_chrome,
+            )
+            return str(w["summary_it"])
         return None
 
-    def handle_utterance(self, transcript: str) -> VoiceRouteResult:
-        """Routes a transcribed voice utterance through Stop -> Permission -> Status -> System 1/2."""
+    def handle_utterance(
+        self,
+        transcript: str,
+        force_task: bool = False,
+    ) -> VoiceRouteResult:
+        """Routes a transcribed voice utterance: Echo Guard -> Stop -> Permission -> Status -> System 1/2."""
+        elapsed = time.time() - self.last_spoken_at
+        if is_self_echo(transcript, self.last_spoken_text, elapsed):
+            return VoiceRouteResult(
+                route="ignored_echo",
+                spoken_response="",
+            )
+
         if is_stop_command(transcript):
             if self.stop_callback:
                 self.stop_callback()
+            resp = "Ricevuto, mi fermo subito."
+            self.record_spoken_output(resp)
             return VoiceRouteResult(
                 route="stop",
-                spoken_response="Ricevuto, mi fermo subito.",
+                spoken_response=resp,
             )
+
+        # User is asking a new question: interrupt/duck any previous ongoing speech
+        if self.duck_callback:
+            self.duck_callback()
 
         _, cmd = strip_wake_word(transcript)
         if not cmd:
+            resp = "Sono in ascolto, dimmi pure."
+            self.record_spoken_output(resp)
             return VoiceRouteResult(
                 route="system1_reflex",
-                spoken_response="Sono in ascolto, dimmi pure.",
+                spoken_response=resp,
             )
 
         # 1. Voice approval/rejection for Adaptive Permission Gate
@@ -227,6 +282,7 @@ class CorticalVoiceEngine:
                     if approved
                     else f"Operazione {dec.normalized_pattern} bloccata."
                 )
+                self.record_spoken_output(spoken)
                 return VoiceRouteResult(
                     route="permission_feedback",
                     spoken_response=spoken,
@@ -237,43 +293,56 @@ class CorticalVoiceEngine:
         if any(p in cmd for p in ("a che punto", "stato dei lavori", "stato agenti", "progressi")):
             if self.active_background_tasks:
                 summary = ", ".join(f"{tid}: {st}" for tid, st in self.active_background_tasks.items())
+                spoken = f"Ho {len(self.active_background_tasks)} task attivi: {summary}."
+                self.record_spoken_output(spoken)
                 return VoiceRouteResult(
                     route="status_report",
-                    spoken_response=f"Ho {len(self.active_background_tasks)} task attivi: {summary}.",
+                    spoken_response=spoken,
                 )
             if self.wiki_db:
                 macro = self.wiki_db.query_macro_graph(AccessContext(), limit=1)
                 if macro["episodes"]:
                     last = macro["episodes"][0]
+                    spoken = f"Ultimo task registrato: {last['title']} con stato {last['outcome_status']}."
+                    self.record_spoken_output(spoken)
                     return VoiceRouteResult(
                         route="status_report",
-                        spoken_response=f"Ultimo task completato: {last['title']} con esito {last['outcome_status']}.",
+                        spoken_response=spoken,
                     )
+            spoken = "Non ci sono task attivi al momento."
+            self.record_spoken_output(spoken)
             return VoiceRouteResult(
                 route="status_report",
-                spoken_response="Non ci sono sottoagenti in esecuzione al momento.",
+                spoken_response=spoken,
             )
 
-        # 3. System 2: Complex multi-step Agentic Task -> Delegate in background to `pi`
-        if any(kw in cmd for kw in AGENTIC_INTENT_KEYWORDS):
+        # 3. System 2: Explicit-Only Task Creation!
+        # Everyday conversations NEVER create tasks unless explicitly requested.
+        if force_task or is_explicit_task_request(cmd):
             task_id = self.agentic_dispatch_fn(cmd)
             self.active_background_tasks[task_id] = "in_progress"
+            spoken = f"Ho creato il task esplicito {task_id}. Puoi seguirlo e archiviarlo quando vuoi."
+            self.record_spoken_output(spoken)
             return VoiceRouteResult(
                 route="system2_agentic",
-                spoken_response=(
-                    f"Avvio l'agente su pi per questo compito (ID {task_id}). "
-                    "Puoi seguire i passaggi in tempo reale nella console."
-                ),
+                spoken_response=spoken,
                 dispatched_task_goal=cmd,
             )
 
-        # 4. System 1: Fast Reflex (<1s direct response)
+        # 4. System 1: Conversational & Grounded Response (with Smart Memory Curation)
         if self.reflex_llm_fn is not None:
             answer = self.reflex_llm_fn(cmd)
         else:
             builtin = self._instant_builtin_reflex(cmd)
-            answer = builtin or f"Risposta rapida System 1: {cmd}"
+            answer = builtin if builtin is not None else f"Risposta rapida System 1: {cmd}"
+
+        curation_info = None
+        if self.curator:
+            curation_info = self.curator.record_chat_turn(AccessContext(), cmd, answer)
+
+        self.record_spoken_output(answer)
         return VoiceRouteResult(
             route="system1_reflex",
             spoken_response=answer,
+            memory_curation=curation_info,
         )

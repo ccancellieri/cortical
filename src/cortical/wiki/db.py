@@ -502,3 +502,129 @@ class CorticalWikiDB:
             "episodes": [dict(e) for e in episodes],
             "edges": [dict(ed) for ed in edges],
         }
+
+    def get_knowledge_graph(
+        self,
+        ctx: AccessContext,
+        max_nodes: int = 60,
+    ) -> dict[str, Any]:
+        """Builds the unified Knowledge Graph (Merkle roots/files + Tasks + Curated Insights + Edges)."""
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        with self._connect() as conn:
+            # 1. Merkle nodes (prioritize directories and top-level files)
+            m_rows = conn.execute(
+                """SELECT path, parent_path, node_type, summary_light, subtree_hash
+                   FROM merkle_nodes
+                   WHERE tenant_id = ? AND workspace_id = ?
+                   ORDER BY CASE WHEN node_type = 'dir' THEN 0 ELSE 1 END, LENGTH(path) ASC
+                   LIMIT ?""",
+                (ctx.tenant_id, ctx.workspace_id, max_nodes),
+            ).fetchall()
+            for r in m_rows:
+                if not self.check_access(ctx, r["path"], write=False):
+                    continue
+                nid = f"subtree:{r['path']}"
+                seen_ids.add(nid)
+                nodes.append(
+                    {
+                        "id": nid,
+                        "key": r["path"],
+                        "label": r["path"] if r["path"] == "/" else r["path"].split("/")[-1],
+                        "kind": "dir" if r["node_type"] == "dir" else "file",
+                        "summary": r["summary_light"],
+                        "hash": r["subtree_hash"][:10],
+                    }
+                )
+                if r["parent_path"]:
+                    parent_id = f"subtree:{r['parent_path']}"
+                    edges.append(
+                        {
+                            "source": parent_id,
+                            "target": nid,
+                            "relation": "contains",
+                            "kind": "merkle",
+                        }
+                    )
+
+            # 2. Task episodes (active & archived traces)
+            ep_rows = conn.execute(
+                """SELECT * FROM task_episodes
+                   WHERE tenant_id = ? AND workspace_id = ?
+                   ORDER BY created_at DESC LIMIT 25""",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            for ep in ep_rows:
+                ep_dict = dict(ep)
+                nid = f"episode:{ep_dict['episode_id']}"
+                seen_ids.add(nid)
+                state = ep_dict.get("lifecycle_state", ep_dict.get("outcome_status", "active"))
+                trace = ep_dict.get("archived_trace") or ep_dict.get("learned_summary", "")
+                nodes.append(
+                    {
+                        "id": nid,
+                        "key": ep_dict["episode_id"],
+                        "label": ep_dict["title"][:28],
+                        "kind": "task_archived" if state == "archived" else "task_active",
+                        "state": state,
+                        "summary": trace[:180],
+                    }
+                )
+
+            # 3. Curated Memory Insights (if table initialized)
+            has_insights = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_insights'"
+            ).fetchone()
+            if has_insights:
+                ins_rows = conn.execute(
+                    """SELECT * FROM memory_insights
+                       WHERE tenant_id = ? AND workspace_id = ?
+                       ORDER BY created_at DESC LIMIT 20""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+                for ins in ins_rows:
+                    nid = f"episode:{ins['insight_id']}"
+                    seen_ids.add(nid)
+                    nodes.append(
+                        {
+                            "id": nid,
+                            "key": ins["insight_id"],
+                            "label": f"💡 {ins['category']}",
+                            "kind": "insight",
+                            "summary": ins["insight_text"],
+                        }
+                    )
+
+            # 4. High-level Macro-Graph edges
+            e_rows = conn.execute(
+                """SELECT * FROM macro_edges
+                   WHERE tenant_id = ? AND workspace_id = ?
+                   ORDER BY created_at DESC LIMIT 60""",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            for ed in e_rows:
+                src = f"{ed['source_type']}:{ed['source_id']}"
+                dst = f"{ed['target_type']}:{ed['target_id']}"
+                if src in seen_ids and dst in seen_ids:
+                    edges.append(
+                        {
+                            "source": src,
+                            "target": dst,
+                            "relation": ed["relation"],
+                            "kind": "macro",
+                        }
+                    )
+
+        for n in nodes:
+            n.setdefault("type", n.get("kind", "file"))
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+            },
+        }

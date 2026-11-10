@@ -3,18 +3,20 @@
  * Copyright 2026 Carlo Cancellieri — Licensed under Apache-2.0
  *
  * Capabilities:
- * 1. Adaptive Permission Gate (`pi.on("tool_call")`): Evaluates risk score via Cortical's
+ * 1. Pre-Flight Grounding Hook (`pi.on("before_agent_start")` & `pi.on("before_provider_request")`):
+ *    Automatically executes real-time weather/Chrome grounding (e.g. "procedi cerca il meteo
+ *    a roma per domani"), opens Google Chrome on the weather page, and injects verified
+ *    Open-Meteo data with a focused Italian system prompt so local models answer accurately.
+ * 2. Adaptive Permission Gate (`pi.on("tool_call")`): Evaluates risk score via Cortical's
  *    SQLite learning gate, blocks hard guardrails / focus-stealing commands, and learns
  *    from interactive user approvals.
- * 2. Hierarchical Subagent Orchestration (`delegate_subagent` + `submit_report`):
- *    Spawns bounded subagent loops (`maxTurns`), injects targeted skills and 4-tier Wiki
- *    context (`light` -> `medium` -> `high` -> `max`), and lets the Orchestrator decide
- *    whether to deepen context or halt.
- * 3. Automatic Post-Task Memory Consolidation (`pi.on("agent_end")`):
- *    Logs completed task episodes and subtree relationships into the Second Brain Macro-Graph.
+ * 3. Eager Grounding & Second Brain Tools (`meteo_forecast`, `delegate_subagent`, `submit_report`).
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface PermissionVerdict {
@@ -25,24 +27,111 @@ interface PermissionVerdict {
   learned_approvals: number;
 }
 
+function resolveCorticalPaths(): { pythonBin: string; pythonPath: string } {
+  const candidates = [
+    process.env.CORTICAL_ROOT,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."),
+    "/Users/ccancellieri/work/code/cortical",
+    "/home/bianco/cortical",
+  ].filter(Boolean) as string[];
+
+  for (const root of candidates) {
+    const srcDir = path.join(root, "src");
+    const venvPy = path.join(root, ".venv", "bin", "python");
+    if (existsSync(srcDir)) {
+      return {
+        pythonBin: process.env.CORTICAL_PYTHON || (existsSync(venvPy) ? venvPy : "python3"),
+        pythonPath: process.env.CORTICAL_PYTHONPATH || srcDir,
+      };
+    }
+  }
+  return {
+    pythonBin: process.env.CORTICAL_PYTHON || "python3",
+    pythonPath: process.env.CORTICAL_PYTHONPATH || "./src",
+  };
+}
+
 function invokeCorticalCLI(args: string[]): Record<string, unknown> {
-  const pythonBin = process.env.CORTICAL_PYTHON || "python3";
+  const { pythonBin, pythonPath } = resolveCorticalPaths();
   const out = execFileSync(pythonBin, ["-m", "cortical.cli", ...args], {
     encoding: "utf-8",
     env: {
       ...process.env,
-      PYTHONPATH: process.env.CORTICAL_PYTHONPATH || "./src",
+      PYTHONPATH: pythonPath,
     },
-    timeout: 10000,
+    timeout: 12000,
   });
   return JSON.parse(out) as Record<string, unknown>;
 }
 
+function isWeatherQuery(text: string): boolean {
+  const norm = text.toLowerCase();
+  return (
+    norm.includes("meteo") ||
+    norm.includes("che tempo fa") ||
+    norm.includes("previsioni") ||
+    norm.includes("temperatura")
+  );
+}
+
 export default function corticalHarnessExtension(pi: ExtensionAPI) {
-  // 1. Adaptive Permission Gate on every tool call
+  let pendingGroundedAnswer: string | null = null;
+
+  // 1. Pre-Flight Real-Time Weather & Chrome Grounding Hook on `before_agent_start`
+  pi.on("before_agent_start", (event, ctx) => {
+    pendingGroundedAnswer = null;
+    try {
+      const userPrompt =
+        "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
+      if (!userPrompt) return undefined;
+
+      if (isWeatherQuery(userPrompt)) {
+        const res = invokeCorticalCLI([
+          "weather",
+          "--query",
+          userPrompt,
+          "--open-chrome",
+        ]);
+        const groundedSummary = String(res.summary_it || JSON.stringify(res));
+        pendingGroundedAnswer = groundedSummary;
+        ctx.ui?.notify?.(
+          `[Cortical Grounding] ${groundedSummary}`,
+          "info"
+        );
+        return {
+          systemPrompt:
+            `Sei Cortical, assistente AI italiano creato da Carlo Cancellieri.\n` +
+            `Rispondi SOLO riportando esattamente questa frase senza parafrasare e senza aggiungere altro:\n` +
+            `${groundedSummary}`,
+        };
+      }
+    } catch {
+      // Fallback to default behavior if CLI is unreachable
+    }
+    return undefined;
+  });
+
+  // Ensure zero spelling errors from small 1.5B local models on grounded responses
+  pi.on("message_end", (event) => {
+    if (pendingGroundedAnswer && event.message && event.message.role === "assistant") {
+      const answer = pendingGroundedAnswer;
+      pendingGroundedAnswer = null;
+      return {
+        message: {
+          ...event.message,
+          content: [{ type: "text", text: answer }],
+        },
+      };
+    }
+    return undefined;
+  });
+
+  // 2. Adaptive Permission Gate on every tool call
   pi.on("tool_call", async (event, ctx) => {
     const toolName = String(event.toolName || "");
-    const toolArgs = (event.args || {}) as Record<string, unknown>;
+    const toolArgs = ((event as unknown as Record<string, unknown>).input ||
+      (event as unknown as Record<string, unknown>).args ||
+      {}) as Record<string, unknown>;
 
     try {
       const decision = invokeCorticalCLI([
@@ -66,7 +155,8 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
 
       if (decision.verdict === "ask" && ctx.ui?.confirm) {
         const confirmed = await ctx.ui.confirm(
-          `[Cortical Adaptive Gate] Approve ${decision.normalized_pattern} (risk=${decision.risk_score}) and remember pattern?`
+          "[Cortical Adaptive Gate]",
+          `Approvare ${decision.normalized_pattern} (risk=${decision.risk_score}) e ricordare il pattern?`
         );
         invokeCorticalCLI([
           "check-permission",
@@ -90,9 +180,46 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     return undefined;
   });
 
-  // 2. Terminating structured report tool for subagents
+  // 3. Eager Weather & Chrome Grounding Tool for `pi`
+  pi.registerTool?.({
+    name: "meteo_forecast",
+    label: "Meteo Forecast (Open-Meteo + Chrome)",
+    description:
+      "Cerca le previsioni meteo reali per una città (oggi, domani, dopodomani) tramite Open-Meteo e apre la scheda meteo su Google Chrome.",
+    parameters: {
+      type: "object",
+      properties: {
+        city: { type: "string", default: "Roma" },
+        day_offset: {
+          type: "number",
+          default: 1,
+          description: "0=oggi, 1=domani, 2=dopodomani",
+        },
+        open_chrome: { type: "boolean", default: true },
+      },
+      required: ["city"],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const res = invokeCorticalCLI([
+        "weather",
+        "--city",
+        String(args.city || "Roma"),
+        "--day-offset",
+        String(args.day_offset ?? 1),
+        ...(args.open_chrome !== false ? ["--open-chrome"] : []),
+      ]);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // 4. Terminating structured report tool for subagents
   pi.registerTool?.({
     name: "submit_report",
+    label: "Submit Cortical Report",
     description:
       "Submit structured subagent progress report to the Cortical Orchestrator and terminate the subagent loop.",
     parameters: {
@@ -111,16 +238,15 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         verified_citations: { type: "array", items: { type: "string" } },
       },
       required: ["status", "summary"],
-    },
-    terminate: true,
-    execute: async (args: Record<string, unknown>) => {
+    } as any,
+    execute: async (_toolCallId, params) => {
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
               {
-                subagent_report: args,
+                subagent_report: params,
                 timestamp: new Date().toISOString(),
               },
               null,
@@ -128,13 +254,15 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             ),
           },
         ],
+        details: params,
       };
     },
   });
 
-  // 3. Orchestrator Subagent Spawner with Progressive Wiki Depth Escalation
+  // 5. Orchestrator Subagent Spawner with Progressive Wiki Depth Escalation
   pi.registerTool?.({
     name: "delegate_subagent",
+    label: "Delegate Cortical Subagent",
     description:
       "Spawn a specialized Cortical subagent with selected skills, bounded maxTurns, and progressive Second Brain synthesis depth ('light' -> 'medium' -> 'high' -> 'max').",
     parameters: {
@@ -145,8 +273,6 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         skills: {
           type: "array",
           items: { type: "string" },
-          description:
-            "Skills to inject (e.g. ['cortical-second-brain', 'modern-web-guidance', 'browser-use-playwright'])",
         },
         wiki_path: { type: "string", default: "/" },
         initial_depth: {
@@ -157,8 +283,9 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         max_turns: { type: "number", default: 6 },
       },
       required: ["role", "goal"],
-    },
-    execute: async (args: Record<string, unknown>) => {
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
       const wikiPath = String(args.wiki_path || "/");
       const depth = String(args.initial_depth || "light");
       let wikiContext: Record<string, unknown> = {};
@@ -194,6 +321,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             ),
           },
         ],
+        details: wikiContext,
       };
     },
   });

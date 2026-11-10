@@ -3,12 +3,11 @@
 Provides:
 1. Claude Code / Codex / Antigravity-style Mission Control UI at `http://127.0.0.1:8765/`
 2. Authentic Italian TTS (`say -v Alice` on macOS, `piper` `it_IT-paola-medium` on Linux)
-   with instant physical barge-in termination (`stop_native_tts`).
-3. Always-On Wake-Word Voice Router (`"Hei/Ehi/Hey Cortical"`) with <5ms built-in Italian
-   reflexes (clock, date, status) + multi-endpoint local LLM fallback (`:11434` Ollama,
-   `:8080` local/LAN `llama-server`).
-4. Live `pi` Agent & Subagent Spawner (`/api/agents/spawn`, `/api/agents`, `/api/agents/open-terminal`)
-   streaming real-time tool calls, thinking steps, Wiki navigations, and permission gates.
+   with physical self-echo isolation, audio ducking (`/api/voice/duck`), and instant barge-in recalculation.
+3. Explicit-only task creation (everyday conversations do NOT create tasks automatically) +
+   Smart Bounded Chat Memory (`MemoryCurator`, FIFO max 20 turns, ephemeral filter, task closing questions & compact archival).
+4. Standard MCP JSON-RPC 2.0 endpoint (`POST /api/mcp`) powering an interactive SVG Knowledge Graph Visualizer (`wiki_get_knowledge_graph`).
+5. Real-time Weather & Browser Grounding (`src/cortical/grounding.py`) for both voice and `pi`.
 """
 
 from __future__ import annotations
@@ -29,20 +28,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 
+from .grounding import extract_weather_intent, fetch_weather_forecast
 from .hardware.profiler import HardwareProfiler
+from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
-from .voice.engine import CorticalVoiceEngine, is_stop_command, strip_wake_word
+from .voice.engine import CorticalVoiceEngine, is_self_echo
 from .wiki.db import AccessContext, CorticalWikiDB, DepthTier
 from .wiki.fact_check import CitationVerifier
+from .wiki.mcp_server import CorticalWikiMCPServer
 
 _ACTIVE_TTS_LOCK = threading.Lock()
 _ACTIVE_TTS_PROC: Optional[subprocess.Popen[bytes]] = None
+_LAST_SPOKEN_TEXT: str = ""
+_LAST_SPOKEN_AT: float = 0.0
+_TTS_DUCKED: bool = False
+
+
+def is_tts_speaking() -> bool:
+    """Returns True if native TTS is currently playing audio."""
+    with _ACTIVE_TTS_LOCK:
+        if _ACTIVE_TTS_PROC is None:
+            return False
+        return _ACTIVE_TTS_PROC.poll() is None
 
 
 def stop_native_tts() -> None:
     """Immediately terminates any active TTS process for instant barge-in (<20ms)."""
-    global _ACTIVE_TTS_PROC
+    global _ACTIVE_TTS_PROC, _TTS_DUCKED
     with _ACTIVE_TTS_LOCK:
+        _TTS_DUCKED = False
         if _ACTIVE_TTS_PROC is not None:
             try:
                 _ACTIVE_TTS_PROC.terminate()
@@ -53,31 +67,48 @@ def stop_native_tts() -> None:
         subprocess.run(["pkill", "-x", "say"], stderr=subprocess.DEVNULL, check=False)
 
 
-def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188) -> bool:
+def duck_native_tts() -> dict[str, Any]:
+    """Ducks / interrupts ongoing TTS output when the user starts speaking a new phrase."""
+    global _TTS_DUCKED
+    was_speaking = is_tts_speaking()
+    _TTS_DUCKED = True
+    if was_speaking:
+        stop_native_tts()
+    return {"ducked": True, "was_speaking": was_speaking}
+
+
+def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188, volume: float = 1.0) -> bool:
     """Speaks Italian text using native macOS Italian voice (`Alice`) or Linux Piper (`paola`)."""
-    global _ACTIVE_TTS_PROC
+    global _ACTIVE_TTS_PROC, _LAST_SPOKEN_TEXT, _LAST_SPOKEN_AT, _TTS_DUCKED
     if not text or not text.strip():
         return False
     stop_native_tts()
+    _LAST_SPOKEN_TEXT = text.strip()
+    _LAST_SPOKEN_AT = time.monotonic()
+    _TTS_DUCKED = False
     try:
         sys_name = platform.system()
         if sys_name == "Darwin" and shutil.which("say"):
             allowed_voices = {"Alice", "Reed", "Shelley", "Eddy", "Sandy", "Flo", "Federica", "Luca"}
             chosen_voice = voice if voice in allowed_voices else "Alice"
+            vol_clamp = max(0.15, min(1.0, float(volume)))
+            styled_text = f"[[volm {vol_clamp:.2f}]] {text}"
             with _ACTIVE_TTS_LOCK:
                 _ACTIVE_TTS_PROC = subprocess.Popen(
-                    ["say", "-v", chosen_voice, "-r", str(rate), text],
+                    ["say", "-v", chosen_voice, "-r", str(rate), styled_text],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
             return True
 
         if sys_name == "Linux":
-            # Check for Piper Italian model first (like on the Linux laptop)
             piper_bin = shutil.which("piper") or "/home/bianco/.local/bin/piper"
             paola_model = Path.home() / ".local/share/local-ai/models/piper/it_IT-paola-medium.onnx"
             if Path(piper_bin).exists() and paola_model.exists() and shutil.which("aplay"):
-                cmd = f'printf %s {json.dumps(text)} | "{piper_bin}" --model "{paola_model}" --output-raw | aplay -r 22050 -f S16_LE -t raw - >/dev/null 2>&1'
+                cmd = (
+                    f'printf %s {json.dumps(text)} | "{piper_bin}" --model "{paola_model}" --output-raw '
+                    f"| aplay -r 22050 -f S16_LE -t raw - >/dev/null 2>&1"
+                )
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
                         ["bash", "-c", cmd],
@@ -99,7 +130,7 @@ def speak_native_tts(text: str, voice: str = "Alice", rate: int = 188) -> bool:
 
 
 def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> str:
-    """Queries available local/LAN OpenAI-compatible servers in Italian, rejecting English deprecation notices."""
+    """Queries deterministic grounding first, then available local/LAN OpenAI-compatible servers in Italian."""
     now = datetime.datetime.now()
     norm = prompt.lower().strip()
 
@@ -108,17 +139,41 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> 
         return f"Sono le {now.strftime('%H:%M')}."
     if any(k in norm for k in ("che giorno", "data di oggi", "quanti ne abbiamo")):
         giorni = ("lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica")
-        mesi = ("", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre")
+        mesi = (
+            "",
+            "gennaio",
+            "febbraio",
+            "marzo",
+            "aprile",
+            "maggio",
+            "giugno",
+            "luglio",
+            "agosto",
+            "settembre",
+            "ottobre",
+            "novembre",
+            "dicembre",
+        )
         return f"Oggi è {giorni[now.weekday()]} {now.day} {mesi[now.month]} {now.year}."
     if any(k in norm for k in ("chi sei", "cosa fai", "presentati")):
         return (
             "Sono Cortical, il tuo assistente agentico locale. "
-            "Uso la Wiki Merkle a 4 livelli per la memoria e coordino gli agenti su pi."
+            "Uso la Wiki Merkle a 4 livelli per la memoria e coordino gli agenti su pi solo quando richiesto."
         )
     if any(k in norm for k in ("come stai", "tutto bene", "mi senti")):
         return "Tutto perfetto! Ti sento forte e chiaro in italiano."
 
-    # 2. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN laptop :8080)
+    # 2. Deterministic Weather & Browser Grounding (e.g., "procedi cerca il meteo a roma per domani")
+    weather_intent = extract_weather_intent(prompt)
+    if weather_intent is not None:
+        forecast = fetch_weather_forecast(
+            city=weather_intent["city"],
+            day_offset=weather_intent["day_offset"],
+            open_browser=bool(weather_intent.get("open_browser", False)),
+        )
+        return str(forecast["summary_it"])
+
+    # 3. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN laptop :8080)
     candidates = [
         (base_url, "qwen2.5:1.5b" if ":11434" in base_url else "local-model"),
         ("http://127.0.0.1:8080/v1", "local-model"),
@@ -138,12 +193,13 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> 
                     "role": "system",
                     "content": (
                         f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
-                        f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano, in massimo 2 frasi chiare."
+                        f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
+                        "in massimo 2 frasi chiare e dirette."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 110,
+            "max_tokens": 120,
             "temperature": 0.2,
         }
         try:
@@ -165,21 +221,23 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> 
         except Exception:  # noqa: BLE001
             continue
 
-    return f"Ho ricevuto la richiesta: '{prompt}'. Puoi anche delegarla come task agli agenti pi."
+    return f"Ho ricevuto la richiesta: '{prompt}'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per {prompt}'."
 
 
 class PiAgentManager:
-    """Manages live `pi` coding agents and subagent loops with step-by-step telemetry."""
+    """Manages explicit-only `pi` coding tasks with isolated working notes and compact archival."""
 
     def __init__(
         self,
         repo_root: Path,
         wiki_db: CorticalWikiDB,
+        memory_curator: MemoryCurator,
         perm_gate: AdaptivePermissionGate,
         base_url_fn: Any,
     ) -> None:
         self.repo_root = repo_root
         self.wiki_db = wiki_db
+        self.memory_curator = memory_curator
         self.perm_gate = perm_gate
         self.base_url_fn = base_url_fn
         self.sessions: dict[str, dict[str, Any]] = {}
@@ -193,6 +251,22 @@ class PiAgentManager:
     def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         with self._lock:
             return self.sessions.get(session_id)
+
+    def mark_archived(self, session_id: str, archived_trace: str) -> None:
+        with self._lock:
+            if session_id in self.sessions:
+                self.sessions[session_id]["status"] = "archived"
+                self.sessions[session_id]["archived_trace"] = archived_trace
+                self.sessions[session_id]["steps"] = [
+                    {
+                        "index": 1,
+                        "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
+                        "type": "output",
+                        "title": "📦 Task Archiviato (Memoria di lavoro isolata rimossa, traccia sintetica nel Macro-Grafo)",
+                        "detail": archived_trace,
+                        "meta": {"archived": True},
+                    }
+                ]
 
     def stop_all(self) -> int:
         stopped = 0
@@ -228,7 +302,7 @@ class PiAgentManager:
             {
                 "index": len(s["steps"]) + 1,
                 "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
-                "type": step_type,  # 'thinking' | 'tool_call' | 'subagent' | 'output' | 'permission' | 'system'
+                "type": step_type,
                 "title": title,
                 "detail": detail,
                 "meta": meta or {},
@@ -257,6 +331,7 @@ class PiAgentManager:
             "updated_at": time.time(),
             "steps": [],
             "final_report": None,
+            "closing_questions": [],
         }
         with self._lock:
             self.sessions[session_id] = session_obj
@@ -279,14 +354,14 @@ class PiAgentManager:
     ) -> None:
         ctx = AccessContext()
         try:
-            # Step 1: Load 4-Tier Merkle Second Brain context deterministically
             self._append_step(
                 session_id,
                 "thinking",
-                f"Inizializzazione Orchestratore `pi` (Wiki Depth: {wiki_depth.upper()}, Skills: {', '.join(skills)})",
-                f"Obiettivo assegnato: {goal}",
+                f"Inizializzazione Task Esplicito `pi` (Wiki Depth: {wiki_depth.upper()}, Memoria Isolata per Task)",
+                f"Obiettivo: {goal}",
             )
-            time.sleep(0.15)
+            self.memory_curator.add_task_working_note(session_id, f"Avvio task: {goal}")
+            time.sleep(0.1)
 
             root_nav = self.wiki_db.navigate(ctx, path="/", depth=DepthTier(wiki_depth))
             children_summary = "\n".join(
@@ -301,7 +376,6 @@ class PiAgentManager:
                 {"tool": "wiki_navigate", "depth": wiki_depth},
             )
 
-            # Step 2: Search relevant files in FTS5 Second Brain
             hits = self.wiki_db.search(ctx, query=goal, depth=DepthTier(wiki_depth), limit=4)
             if hits:
                 hit_lines = "\n".join(
@@ -317,8 +391,8 @@ class PiAgentManager:
                 f"Risultati pertinenti dalla Wiki Merkle:\n{hit_lines}",
                 {"tool": "wiki_search", "hits": len(hits)},
             )
+            self.memory_curator.add_task_working_note(session_id, f"Ricerca FTS5: {len(hits)} nodi trovati")
 
-            # Step 3: Adaptive Permission Gate check
             perm_dec = self.perm_gate.evaluate("wiki_navigate", {"path": "/", "depth": wiki_depth})
             self._append_step(
                 session_id,
@@ -327,87 +401,15 @@ class PiAgentManager:
                 f"Pattern: {perm_dec.normalized_pattern} — {perm_dec.reason}",
             )
 
-            # Step 4: Try invoking real `pi --mode json -p` if configured, or synthesize with local LLM
-            pi_bin = shutil.which("pi")
-            pi_output_text = ""
-            if pi_bin:
-                self._append_step(
-                    session_id,
-                    "subagent",
-                    "delegate_subagent(harness='pi --mode json', extension='.pi/extensions/cortical-harness.ts')",
-                    f"Esecuzione sessione `pi` in {self.repo_root}...",
-                )
-                try:
-                    pi_cmd = [
-                        pi_bin,
-                        "--mode",
-                        "json",
-                        "-p",
-                        "--no-session",
-                    ]
-                    if ":11434" in self.base_url_fn():
-                        pi_cmd.extend(["--provider", "ollama", "--model", "qwen2.5:1.5b"])
-                    pi_cmd.extend(
-                        [
-                            "-e",
-                            str(self.repo_root / ".pi/extensions/cortical-harness.ts"),
-                            goal,
-                        ]
-                    )
-                    proc = subprocess.Popen(
-                        pi_cmd,
-                        cwd=str(self.repo_root),
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                    )
-                    with self._lock:
-                        self.processes[session_id] = proc
-                    out, _ = proc.communicate(timeout=12)
-                    for line in out.splitlines():
-                        if not line.strip().startswith("{"):
-                            continue
-                        ev = json.loads(line)
-                        ev_type = ev.get("type", "")
-                        if ev_type == "tool_call":
-                            self._append_step(
-                                session_id,
-                                "tool_call",
-                                f"pi tool_call: {ev.get('name', 'tool')}",
-                                json.dumps(ev.get("args", {}), indent=2),
-                            )
-                        elif ev_type == "message_end":
-                            msg = ev.get("message") or {}
-                            if msg.get("role") == "assistant" and not msg.get("errorMessage"):
-                                parts = msg.get("content") or []
-                                for p in parts:
-                                    if isinstance(p, dict) and p.get("text"):
-                                        pi_output_text += p["text"] + "\n"
-                except Exception:  # noqa: BLE001
-                    pass
-                finally:
-                    with self._lock:
-                        self.processes.pop(session_id, None)
+            pi_output_text = query_local_reflex_llm(goal, self.base_url_fn(), timeout=8.0)
 
-            if not pi_output_text.strip():
-                context_snippet = "\n".join(h["content"][:250] for h in hits[:2]) if hits else root_nav["content"]
-                synthesis_prompt = (
-                    f"Obiettivo: {goal}\n"
-                    f"Contesto dalla Wiki Cortical (livello {wiki_depth}): {context_snippet[:600]}\n"
-                    "Fornisci un report tecnico strutturato e conciso in italiano."
-                )
-                pi_output_text = query_local_reflex_llm(
-                    synthesis_prompt, self.base_url_fn(), timeout=8.0
-                )
-
-            # Step 5: Consolidate learned episode into High-Level Macro-Graph
             touched = [h["path"] for h in hits] if hits else ["/"]
             self.wiki_db.record_episode(
                 ctx,
                 episode_id=session_id,
-                title=f"[{ session_id }] {goal[:52]}",
+                title=f"[{session_id}] {goal[:52]}",
                 goal=goal,
-                outcome_status="completed",
+                outcome_status="active",
                 learned_summary=pi_output_text[:300],
                 skills_used=skills,
                 relations=[
@@ -419,20 +421,24 @@ class PiAgentManager:
                     for p in touched
                 ],
             )
+            closure_info = self.memory_curator.prepare_task_closure(session_id)
+            questions = closure_info.get("closing_questions", [])
+            q_text = "\n".join(f"  ? {q}" for q in questions)
             self._append_step(
                 session_id,
                 "output",
-                "submit_report(status='completed') + Consolidamento nel Macro-Grafo",
-                pi_output_text,
+                "Task attivo completato — Pronto per revisione o archiviazione sintetica",
+                f"{pi_output_text}\n\nDomande di chiusura task (prima dell'archiviazione):\n{q_text}",
             )
 
             with self._lock:
                 if self.sessions[session_id]["status"] == "working":
                     self.sessions[session_id]["status"] = "completed"
                     self.sessions[session_id]["final_report"] = pi_output_text
+                    self.sessions[session_id]["closing_questions"] = questions
 
             if speak_on_finish:
-                speak_native_tts(f"Compito completato. {pi_output_text[:180]}")
+                speak_native_tts(f"Task completato. {pi_output_text[:160]}")
 
         except Exception as exc:  # noqa: BLE001
             self._append_step(session_id, "system", f"Errore agente: {exc}")
@@ -493,7 +499,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
       background: var(--bg); color: var(--text); overflow: hidden;
     }
-    /* Top Mission Control Bar */
     .topbar {
       height: 58px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
@@ -551,10 +556,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: #0b1120; color: var(--text); border: 1px solid var(--border);
       border-radius: 7px; padding: 7px 10px; font-size: 0.83rem;
     }
-    /* Main 3-Pane Workspace */
     .workspace {
       flex: 1; display: grid;
-      grid-template-columns: 300px 1fr 360px;
+      grid-template-columns: 300px 1fr 410px;
       min-height: 0;
     }
     .pane {
@@ -569,7 +573,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: flex; justify-content: space-between; align-items: center;
     }
     .pane-body { flex: 1; overflow-y: auto; padding: 12px; }
-    /* Agent Roster Cards */
     .agent-item {
       padding: 10px 12px; border-radius: 9px; background: var(--panel);
       border: 1px solid var(--border); margin-bottom: 8px; cursor: pointer;
@@ -588,8 +591,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .status-working { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
     .status-completed { background: rgba(52, 211, 153, 0.2); color: var(--emerald); }
+    .status-archived { background: rgba(129, 140, 248, 0.2); color: var(--indigo); }
     .status-stopped, .status-error { background: rgba(248, 113, 113, 0.2); color: var(--rose); }
-    /* Center Timeline (Claude Code / Antigravity style) */
     .step-card {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
@@ -610,7 +613,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 9px; border-radius: 6px; border: 1px solid #1a2640;
       max-height: 240px; overflow-y: auto;
     }
-    /* Bottom Composer */
     .composer {
       padding: 12px 16px; background: var(--bg-sidebar);
       border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px;
@@ -623,12 +625,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: #cbd5e1;
     }
     .tree-node:hover { background: var(--panel-hover); color: var(--accent); }
-    .tabs { display: flex; gap: 4px; }
+    .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
     .tab {
-      padding: 4px 9px; border-radius: 6px; font-size: 0.72rem; cursor: pointer;
+      padding: 4px 8px; border-radius: 6px; font-size: 0.71rem; cursor: pointer;
       background: #0b1120; color: var(--muted); border: 1px solid var(--border);
     }
     .tab.active { background: var(--accent-glow); color: var(--accent); border-color: var(--accent); }
+    .graph-canvas-wrap {
+      background: #060a12; border: 1px solid var(--border); border-radius: 8px;
+      height: 360px; position: relative; overflow: hidden; margin-bottom: 8px;
+    }
+    .graph-legend {
+      display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.71rem; color: var(--muted);
+      margin-bottom: 8px; font-family: var(--mono);
+    }
+    .legend-dot {
+      width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 4px;
+    }
   </style>
 </head>
 <body>
@@ -642,10 +655,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- ALWAYS-ON VOICE CONTROL BAR -->
+    <!-- ALWAYS-ON VOICE CONTROL BAR WITH SELF-ECHO GUARD & DUCKING -->
     <div class="voice-bar">
       <div class="pulse-dot" id="mic-dot"></div>
-      <span class="live-transcript" id="live-transcript">Premi "Ascolto Continuo" e di' "Hei Cortical, che ore sono?"</span>
+      <span class="live-transcript" id="live-transcript">Anti-Echo & Ducking attivi · Di' "Hei Cortical, meteo a Roma domani"</span>
       <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Ascolto Continuo: OFF</button>
       <select id="tts-voice" title="Voce Italiana">
         <option value="Alice">🇮🇹 Voce: Alice (Nativa)</option>
@@ -663,14 +676,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- 3-PANE IDE WORKSPACE -->
   <div class="workspace">
-    <!-- LEFT PANE: AGENT ROSTER & 4-TIER WIKI TREE -->
+    <!-- LEFT PANE: EXPLICIT TASKS & 4-TIER WIKI TREE -->
     <div class="pane">
       <div class="pane-header">
-        <span>Agenti `pi` & Subagenti</span>
+        <span>Task Espliciti `pi` (Isolati)</span>
         <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
       </div>
       <div class="pane-body" id="agent-roster" style="max-height: 46%;">
-        <div style="color:var(--muted); font-size:0.8rem;">Nessun agente avviato. Scrivi un obiettivo sotto o parla al microfono.</div>
+        <div style="color:var(--muted); font-size:0.78rem;">
+          Le chiacchierate normali non creano task. I task vengono creati solo su richiesta esplicita ("crea un task..." o "+ Nuovo Task") e restano isolati fino all'archiviazione.
+        </div>
       </div>
 
       <div class="pane-header">
@@ -685,21 +700,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="pane-body" id="wiki-tree"></div>
     </div>
 
-    <!-- CENTER PANE: LIVE AGENT EXECUTION STREAM (CLAUDE CODE / ANTIGRAVITY STYLE) -->
+    <!-- CENTER PANE: LIVE STREAM -->
     <div class="pane">
       <div class="pane-header">
-        <span id="stream-title">Live Execution Stream — System 1 (Voce) & System 2 (`pi` Subagents)</span>
-        <span style="font-family:var(--mono); font-size:0.72rem; color:var(--accent);" id="active-session-badge">READY</span>
+        <span id="stream-title">Conversazione & Stream Esecutivo (Anti-Echo · Ducking · Meteo Live)</span>
+        <span style="font-family:var(--mono); font-size:0.72rem; color:var(--accent);" id="active-session-badge">CHAT & VOICE</span>
       </div>
       <div class="pane-body" id="agent-stream">
         <div class="step-card output">
-          <div class="step-meta"><span>CORTICAL READY</span><span>System 1 + System 2</span></div>
-          <div class="step-title">Benvenuto in Cortical Mission Control</div>
-          <pre class="step-detail">• Voce Italiana Nativa (Alice it_IT / Piper Paola) configurata.
-• Per parlare a mani libere: clicca "🎤 Ascolto Continuo" in alto e di':
-  - "Hei Cortical, che ore sono?" (System 1: risposta istantanea < 5ms)
-  - "Hei Cortical, analizza il progetto e aggiorna la wiki" (System 2: avvia un agente `pi` qui sotto)
-  - "Hei Cortical, basta" (Barge-in: ferma subito voce e agenti)</pre>
+          <div class="step-meta"><span>CORTICAL v0.2 READY</span><span>Anti-Echo · Smart Memory · MCP Graph</span></div>
+          <div class="step-title">Novità attive in Cortical</div>
+          <pre class="step-detail">• Isolamento Eco & Audio Ducking: Cortical ignora la propria voce e abbassa/interrompe la risposta se inizi a parlare, ricalcolando subito per la nuova domanda.
+• Zero Task Automatici: le chiacchierate quotidiane ("che ore sono", "cerca il meteo a Roma domani") non creano task. Usa "Crea un task per..." o "+ Nuovo Task" per i task.
+• Memoria Intelligente & Archiviazione Task: le domande effimere restano in un buffer leggero auto-pulito (max 20 turni); quando archivi un task, la memoria pesante del task viene rimossa lasciando solo una traccia sintetica nel grafo.
+• Grafo della Conoscenza MCP: clicca sul tab "🕸️ Grafo MCP" a destra per visualizzare i nodi tramite protocollo MCP standard.</pre>
         </div>
       </div>
 
@@ -707,9 +721,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="composer">
         <div class="composer-row">
           <select id="dispatch-mode">
-            <option value="auto">⚡ Auto (System 1 Voce / System 2 Agente `pi`)</option>
-            <option value="agent">🤖 Forza Agente `pi` (Con Steps & Wiki)</option>
-            <option value="voice">🔊 Risposta Rapida Vocale (System 1)</option>
+            <option value="auto">💬 Conversazione & Voce (Crea task solo se richiesto esplicitamente)</option>
+            <option value="agent">🤖 Crea Task Esplicito `pi` (Con Memoria Isolata)</option>
           </select>
           <select id="agent-depth">
             <option value="light">Contesto Wiki: LIGHT</option>
@@ -722,25 +735,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </label>
         </div>
         <div class="composer-row">
-          <input id="prompt-input" placeholder="Scrivi un comando o parla al microfono (es: 'Hei Cortical, che ore sono?' o 'Analizza l'architettura della Wiki')..." onkeydown="if(event.key==='Enter') submitComposer()" />
-          <button class="btn" onclick="submitComposer()">Esegui ↵</button>
+          <input id="prompt-input" placeholder="Prova: 'procedi cerca il meteo a roma per domani' oppure 'crea un task per analizzare la wiki'..." onkeydown="if(event.key==='Enter') submitComposer()" />
+          <button class="btn" onclick="submitComposer()">Invia ↵</button>
         </div>
       </div>
     </div>
 
-    <!-- RIGHT PANE: INSPECTOR (WIKI CONTENT / PERMISSIONS / MACRO-GRAPH) -->
+    <!-- RIGHT PANE: INSPECTOR (MCP GRAPH VISUALIZER / MEMORY / WIKI / PERMISSIONS) -->
     <div class="pane">
       <div class="pane-header">
         <span>Inspector</span>
         <div class="tabs">
-          <span class="tab active" id="tab-wiki" onclick="switchInspector('wiki')">Wiki Node</span>
+          <span class="tab active" id="tab-graph" onclick="switchInspector('graph')">🕸️ Grafo MCP</span>
+          <span class="tab" id="tab-mem" onclick="switchInspector('mem')">🧠 Memoria</span>
+          <span class="tab" id="tab-wiki" onclick="switchInspector('wiki')">Wiki</span>
           <span class="tab" id="tab-perm" onclick="switchInspector('perm')">Permessi</span>
-          <span class="tab" id="tab-graph" onclick="switchInspector('graph')">Macro-Grafo</span>
         </div>
       </div>
       <div class="pane-body">
+        <!-- Interactive MCP Knowledge Graph Visualizer -->
+        <div id="insp-graph">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <button class="btn btn-ghost" style="padding:4px 9px; font-size:0.74rem;" onclick="loadMcpKnowledgeGraph()">🔄 Aggiorna via MCP (`wiki_get_knowledge_graph`)</button>
+            <span id="graph-stats" style="font-size:0.72rem; font-family:var(--mono); color:var(--accent);"></span>
+          </div>
+          <div class="graph-legend">
+            <span><i class="legend-dot" style="background:#38bdf8;"></i>Dir/Merkle</span>
+            <span><i class="legend-dot" style="background:#94a3b8;"></i>File</span>
+            <span><i class="legend-dot" style="background:#fbbf24;"></i>Task Attivo</span>
+            <span><i class="legend-dot" style="background:#818cf8;"></i>Task Archiviato</span>
+            <span><i class="legend-dot" style="background:#34d399;"></i>Insight Memoria</span>
+          </div>
+          <div class="graph-canvas-wrap">
+            <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 380 350"></svg>
+          </div>
+          <pre class="step-detail" id="graph-view" style="max-height: 190px;">Clicca un nodo nel grafo sopra per ispezionare la traccia MCP.</pre>
+        </div>
+
+        <!-- Smart Memory & Chat Buffer Inspector -->
+        <div id="insp-mem" style="display:none;">
+          <div style="display:flex; gap:6px; margin-bottom:8px;">
+            <button class="btn btn-ghost" onclick="loadSmartMemory()">🔄 Aggiorna Stato Memoria</button>
+          </div>
+          <pre class="step-detail" id="mem-view" style="max-height: calc(100vh - 180px);">Caricamento memoria...</pre>
+        </div>
+
         <!-- Wiki Inspector -->
-        <div id="insp-wiki">
+        <div id="insp-wiki" style="display:none;">
           <div style="display:flex; gap:6px; margin-bottom:8px;">
             <input id="wiki-search-input" placeholder="Cerca nella Wiki (FTS5)..." style="flex:1;" onkeydown="if(event.key==='Enter') searchWiki()" />
             <button class="btn btn-ghost" onclick="searchWiki()">Cerca</button>
@@ -765,15 +806,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
           <pre class="step-detail" id="perm-view">Adaptive Permission Gate pronto.</pre>
         </div>
-
-        <!-- Macro-Graph Inspector -->
-        <div id="insp-graph" style="display:none;">
-          <div style="display:flex; gap:6px; margin-bottom:10px;">
-            <button class="btn btn-ghost" onclick="loadMacroGraph()">🔄 Aggiorna Macro-Grafo</button>
-            <button class="btn btn-ghost" onclick="testFactCheck()">✅ Verifica Citazione NLI</button>
-          </div>
-          <pre class="step-detail" id="graph-view" style="max-height: calc(100vh - 180px);"></pre>
-        </div>
       </div>
     </div>
   </div>
@@ -783,6 +815,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let selectedSessionId = null;
     let alwaysOnActive = false;
     let recognition = null;
+    let lastSpokenResponseText = '';
+    let lastSpokenAtMs = 0;
+    let activeAbortController = null;
+
+    function normalizeTokens(s) {
+      return (s || '')
+        .toLowerCase()
+        .replace(/[^\\w\\sàèéìòù]/g, ' ')
+        .split(/\\s+/)
+        .filter(w => w.length > 1);
+    }
+
+    // Client-side Self-Echo Guard: detects if WebSpeech picked up Cortical's own spoken output
+    function isSelfEchoClient(candidate) {
+      if (!lastSpokenResponseText) return false;
+      const elapsedSec = (Date.now() - lastSpokenAtMs) / 1000.0;
+      if (elapsedSec > 14.0) return false;
+      const candWords = normalizeTokens(candidate);
+      const spokenWords = new Set(normalizeTokens(lastSpokenResponseText));
+      if (!candWords.length || !spokenWords.size) return false;
+      const candJoined = candWords.join(' ');
+      const spokenJoined = normalizeTokens(lastSpokenResponseText).join(' ');
+      if (candJoined.length >= 6 && spokenJoined.includes(candJoined)) return true;
+      const overlap = candWords.filter(w => spokenWords.has(w)).length / candWords.length;
+      return overlap >= 0.52;
+    }
 
     async function loadHealth() {
       const r = await fetch('/health');
@@ -810,6 +868,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!text) return;
       if (overrideText === undefined) input.value = '';
 
+      // 1. Self-Echo Check
+      if (overrideText !== undefined && isSelfEchoClient(text)) {
+        document.getElementById('live-transcript').textContent = `🔇 [Eco della risposta ignorato]`;
+        return;
+      }
+
+      // 2. Barge-in Audio Ducking & In-Flight Abort / Recalculation
+      if (activeAbortController) {
+        activeAbortController.abort();
+      }
+      await fetch('/api/voice/duck', {method: 'POST', body: '{}'}).catch(() => {});
+
       const mode = document.getElementById('dispatch-mode').value;
       const depth = document.getElementById('agent-depth').value;
       const speak = document.getElementById('chk-speak').checked;
@@ -820,25 +890,47 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         return;
       }
 
-      // Send through Dual-Path Voice & Intent Router
-      const r = await fetch('/api/voice', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({utterance: text, speak, voice, wiki_depth: depth})
-      });
-      const d = await r.json();
+      activeAbortController = new AbortController();
+      try {
+        const r = await fetch('/api/voice', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({utterance: text, speak, voice, wiki_depth: depth}),
+          signal: activeAbortController.signal
+        });
+        const d = await r.json();
 
-      if (d.spawned_session_id) {
-        selectedSessionId = d.spawned_session_id;
-        await refreshAgents();
-      } else {
-        appendStreamCard(
-          d.route === 'stop' ? 'permission' : 'output',
-          `VOICE ROUTER → ${d.route.toUpperCase()}`,
-          `${d.latency_ms} ms`,
-          `Tu: "${text}"`,
-          `Cortical: ${d.spoken_response}`
-        );
+        if (d.route === 'ignored_echo') {
+          document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato dal server]`;
+          return;
+        }
+
+        if (d.spoken_response) {
+          lastSpokenResponseText = d.spoken_response;
+          lastSpokenAtMs = Date.now();
+        }
+
+        if (d.spawned_session_id) {
+          selectedSessionId = d.spawned_session_id;
+          await refreshAgents();
+          await loadMcpKnowledgeGraph();
+        } else {
+          selectedSessionId = null;
+          appendStreamCard(
+            d.route === 'stop' ? 'permission' : 'output',
+            `VOICE & CHAT ROUTER → ${d.route.toUpperCase()}`,
+            `${d.latency_ms} ms`,
+            `Tu: "${text}"`,
+            `Cortical: ${d.spoken_response}`
+          );
+          await loadMcpKnowledgeGraph();
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          appendStreamCard('system', 'BARGE-IN RECALCULATION', 'ABORTED', `Domanda precedente interrotta per ricalcolare la nuova richiesta`, '');
+        }
+      } finally {
+        activeAbortController = null;
       }
     }
 
@@ -851,11 +943,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const sess = await r.json();
       selectedSessionId = sess.session_id;
       await refreshAgents();
+      await loadMcpKnowledgeGraph();
     }
 
     function spawnQuickAgent() {
-      const goal = prompt("Inserisci l'obiettivo per il nuovo agente pi:", "Analizza la struttura del repository e riassumi i moduli principali");
+      const goal = prompt("Inserisci l'obiettivo per il nuovo Task esplicito pi:", "Analizza la struttura del repository e riassumi i moduli principali");
       if (goal) spawnAgentSession(goal, document.getElementById('agent-depth').value, true);
+    }
+
+    async function closeAndArchiveTask(event, sessionId) {
+      event.stopPropagation();
+      const prevRes = await fetch('/api/tasks/close-preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({episode_id: sessionId})
+      });
+      const prev = await prevRes.json();
+      const questions = (prev.closing_questions || []).join('\\n• ');
+      const notes = prompt(
+        `Chiusura & Archiviazione Task ${sessionId}\\n\\nDomande di chiusura di Cortical:\\n• ${questions}\\n\\nInserisci una nota finale (o lascia vuoto per salvare solo la traccia sintetica e pulire la memoria di lavoro del task):`,
+        "Confermo la sintesi e archivio il task."
+      );
+      if (notes === null) return;
+      const archRes = await fetch('/api/tasks/archive', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({episode_id: sessionId, user_closing_notes: notes})
+      });
+      const arch = await archRes.json();
+      appendStreamCard(
+        'output',
+        `TASK ARCHIVED → ${sessionId}`,
+        `Note rimosse: ${arch.purged_working_notes}`,
+        `📦 Task ${sessionId} archiviato nel Macro-Grafo`,
+        `Traccia sintetica conservata: ${arch.archived_trace}`
+      );
+      await refreshAgents();
+      await loadMcpKnowledgeGraph();
     }
 
     async function refreshAgents() {
@@ -865,7 +989,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const roster = document.getElementById('agent-roster');
       if (!sessions.length) return;
 
-      if (!selectedSessionId) selectedSessionId = sessions[0].session_id;
       roster.innerHTML = sessions.map(s => `
         <div class="agent-item ${s.session_id === selectedSessionId ? 'active' : ''}" onclick="selectSession('${s.session_id}')">
           <div class="agent-item-top">
@@ -875,23 +998,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="font-size:0.78rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
             ${s.goal}
           </div>
-          <div style="font-size:0.7rem; color:var(--muted); margin-top:4px; font-family:var(--mono);">
-            Wiki: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+            <span style="font-size:0.7rem; color:var(--muted); font-family:var(--mono);">
+              Wiki: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
+            </span>
+            ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 7px; font-size:0.68rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')">🏁 Archivia</button>` : ''}
           </div>
         </div>
       `).join('');
 
-      const active = sessions.find(s => s.session_id === selectedSessionId);
-      if (active) {
-        document.getElementById('active-session-badge').textContent = `${active.session_id} (${active.status.toUpperCase()})`;
-        const stream = document.getElementById('agent-stream');
-        stream.innerHTML = active.steps.map(st => `
-          <div class="step-card ${st.type}">
-            <div class="step-meta"><span>STEP #${st.index} · ${st.type.toUpperCase()}</span><span>${st.timestamp}</span></div>
-            <div class="step-title">${st.title}</div>
-            ${st.detail ? `<pre class="step-detail">${st.detail}</pre>` : ''}
-          </div>
-        `).join('');
+      if (selectedSessionId) {
+        const active = sessions.find(s => s.session_id === selectedSessionId);
+        if (active) {
+          document.getElementById('active-session-badge').textContent = `${active.session_id} (${active.status.toUpperCase()})`;
+          const stream = document.getElementById('agent-stream');
+          stream.innerHTML = active.steps.map(st => `
+            <div class="step-card ${st.type}">
+              <div class="step-meta"><span>STEP #${st.index} · ${st.type.toUpperCase()}</span><span>${st.timestamp}</span></div>
+              <div class="step-title">${st.title}</div>
+              ${st.detail ? `<pre class="step-detail">${st.detail}</pre>` : ''}
+            </div>
+          `).join('');
+        }
       }
     }
 
@@ -901,6 +1029,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function triggerStopBargeIn() {
+      if (activeAbortController) activeAbortController.abort();
       if (window.speechSynthesis) window.speechSynthesis.cancel();
       await fetch('/api/voice', {
         method: 'POST',
@@ -916,7 +1045,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       appendStreamCard('subagent', 'TERMINAL LAUNCHER', d.platform || 'CLI', 'Apertura sessione interattiva `pi`', JSON.stringify(d, null, 2));
     }
 
-    // Continuous Always-On Wake-Word Microphone (it-IT)
+    // Continuous Always-On Wake-Word Microphone with Self-Echo Filtering & Audio Ducking
     function toggleAlwaysOnMic() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) {
@@ -934,8 +1063,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       alwaysOnActive = true;
       document.getElementById('mic-dot').classList.add('listening');
-      document.getElementById('btn-always-on').textContent = '🟢 Ascolto Attivo (Ita)';
-      document.getElementById('live-transcript').textContent = 'In ascolto in italiano... Di\\' "Hei Cortical, che ore sono?"';
+      document.getElementById('btn-always-on').textContent = '🟢 Ascolto Attivo (Anti-Echo)';
+      document.getElementById('live-transcript').textContent = 'In ascolto... (ignoro la mia voce, abbasso il volume se parli)';
 
       recognition = new SR();
       recognition.lang = 'it-IT';
@@ -946,15 +1075,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const transcript = event.results[i][0].transcript.trim();
+          if (isSelfEchoClient(transcript)) {
+            document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato: "${transcript.slice(0, 28)}..."]`;
+            continue;
+          }
           if (event.results[i].isFinal) {
             document.getElementById('live-transcript').textContent = `🗣️ "${transcript}"`;
             submitComposer(transcript);
           } else {
             interim += transcript + ' ';
+            // User started speaking a new phrase while Cortical might be talking -> duck audio immediately
+            if (interim.trim().length > 4) {
+              fetch('/api/voice/duck', {method: 'POST', body: '{}'}).catch(() => {});
+            }
           }
         }
         if (interim) {
-          document.getElementById('live-transcript').textContent = `… ${interim}`;
+          document.getElementById('live-transcript').textContent = `🔉 [Ducking] … ${interim}`;
         }
       };
 
@@ -965,6 +1102,103 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       };
       recognition.start();
+    }
+
+    // Standard MCP Call (`POST /api/mcp`) to render the Interactive SVG Knowledge Graph
+    async function loadMcpKnowledgeGraph() {
+      const mcpReq = {
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: {
+          name: 'wiki_get_knowledge_graph',
+          arguments: { max_nodes: 45 }
+        }
+      };
+      const r = await fetch('/api/mcp', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(mcpReq)
+      });
+      const mcpRes = await r.json();
+      const rawText = mcpRes?.result?.content?.[0]?.text || '{}';
+      const graph = JSON.parse(rawText);
+      const stats = graph.stats || {};
+      document.getElementById('graph-stats').textContent =
+        `${stats.node_count || 0} nodi · ${stats.edge_count || 0} archi`;
+      renderKnowledgeGraphSvg(graph);
+    }
+
+    function renderKnowledgeGraphSvg(graph) {
+      const svg = document.getElementById('mcp-graph-svg');
+      const nodes = graph.nodes || [];
+      const edges = graph.edges || [];
+      if (!nodes.length) {
+        svg.innerHTML = '<text x="190" y="175" fill="#94a3b8" text-anchor="middle" font-size="12">Nessun nodo nel grafo</text>';
+        return;
+      }
+
+      const W = 380, H = 350, cx = W / 2, cy = H / 2;
+      const posMap = {};
+      const colorMap = {
+        dir: '#38bdf8',
+        file: '#94a3b8',
+        task_active: '#fbbf24',
+        task_archived: '#818cf8',
+        insight: '#34d399'
+      };
+
+      nodes.forEach((n, idx) => {
+        if (n.id === 'subtree:/' || n.id === 'node:/') {
+          posMap[n.id] = { x: cx, y: cy };
+          return;
+        }
+        const nType = n.type || n.kind || 'file';
+        const ring = nType === 'dir' ? 75 : (nType.startsWith('task_') ? 128 : 148);
+        const angle = (2 * Math.PI * idx) / Math.max(1, nodes.length - 1);
+        posMap[n.id] = {
+          x: Math.round(cx + ring * Math.cos(angle)),
+          y: Math.round(cy + ring * Math.sin(angle))
+        };
+      });
+
+      let html = '';
+      edges.forEach(e => {
+        const s = posMap[e.source];
+        const t = posMap[e.target];
+        if (!s || !t) return;
+        const stroke = e.kind === 'macro' ? '#fbbf24' : '#233253';
+        const dash = e.kind === 'macro' ? 'stroke-dasharray="4,3"' : '';
+        html += `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${stroke}" stroke-width="1.3" ${dash} opacity="0.75" />`;
+      });
+
+      nodes.forEach(n => {
+        const p = posMap[n.id];
+        if (!p) return;
+        const col = colorMap[n.type] || '#38bdf8';
+        const r = n.id === 'node:/' ? 10 : (n.type.startsWith('task_') ? 8 : 6);
+        const safeJson = encodeURIComponent(JSON.stringify(n));
+        const shortLabel = (n.label || '').slice(0, 16);
+        html += `
+          <g style="cursor:pointer;" onclick="inspectGraphNode('${safeJson}')">
+            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" stroke="#090d16" stroke-width="2" />
+            <text x="${p.x}" y="${p.y + r + 10}" fill="#cbd5e1" font-size="9" font-family="monospace" text-anchor="middle">${shortLabel}</text>
+          </g>
+        `;
+      });
+
+      svg.innerHTML = html;
+    }
+
+    function inspectGraphNode(encoded) {
+      const node = JSON.parse(decodeURIComponent(encoded));
+      document.getElementById('graph-view').textContent = JSON.stringify(node, null, 2);
+    }
+
+    async function loadSmartMemory() {
+      const r = await fetch('/api/memory/state');
+      const d = await r.json();
+      document.getElementById('mem-view').textContent = JSON.stringify(d, null, 2);
     }
 
     async function navigateWiki(path = '/') {
@@ -998,11 +1232,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function switchInspector(tab) {
-      ['wiki', 'perm', 'graph'].forEach(t => {
+      ['graph', 'mem', 'wiki', 'perm'].forEach(t => {
         document.getElementById(`insp-${t}`).style.display = (t === tab) ? 'block' : 'none';
         document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
       });
-      if (tab === 'graph') loadMacroGraph();
+      if (tab === 'graph') loadMcpKnowledgeGraph();
+      if (tab === 'mem') loadSmartMemory();
     }
 
     async function evalPerm() {
@@ -1033,27 +1268,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       evalPerm();
     }
 
-    async function loadMacroGraph() {
-      const r = await fetch('/api/wiki/macro-graph');
-      document.getElementById('graph-view').textContent = JSON.stringify(await r.json(), null, 2);
-    }
-
-    async function testFactCheck() {
-      const r = await fetch('/api/wiki/verify', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          claim_text: 'Cortical uses a 4-tier deterministic Merkle tree with light, medium, high, and max levels.',
-          source_path: '/README.md',
-          quoted_span: '4-Tier Deterministic Merkle Tree'
-        })
-      });
-      document.getElementById('graph-view').textContent = JSON.stringify(await r.json(), null, 2);
-    }
-
     loadHealth();
     navigateWiki('/');
-    setInterval(refreshAgents, 1500);
+    loadMcpKnowledgeGraph();
+    setInterval(refreshAgents, 2000);
   </script>
 </body>
 </html>
@@ -1061,7 +1279,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 
 class CorticalLiveService:
-    """Holds shared state for the live Cortical Mission Control HTTP, `pi` Agent & Voice server."""
+    """Holds shared state for the live Cortical Mission Control HTTP, MCP, Memory, `pi` Agent & Voice server."""
 
     def __init__(
         self,
@@ -1079,15 +1297,19 @@ class CorticalLiveService:
         self.hw_profile = self.profiler.detect()
         self.model_rec = self.profiler.recommend_models(self.hw_profile)
 
+        def _reflex(prompt: str) -> str:
+            return query_local_reflex_llm(prompt, self.model_rec.active_base_url)
+
+        self.memory_curator = MemoryCurator(self.wiki_db, llm_fn=_reflex)
+        self.mcp_server = CorticalWikiMCPServer(wiki_db_path)
+
         self.agent_mgr = PiAgentManager(
             repo_root=self.repo_root,
             wiki_db=self.wiki_db,
+            memory_curator=self.memory_curator,
             perm_gate=self.perm_gate,
             base_url_fn=lambda: self.model_rec.active_base_url,
         )
-
-        def _reflex(prompt: str) -> str:
-            return query_local_reflex_llm(prompt, self.model_rec.active_base_url)
 
         def _dispatch_agentic(goal: str) -> str:
             sess = self.agent_mgr.spawn_agent(goal=goal, wiki_depth="medium", speak_on_finish=True)
@@ -1097,12 +1319,17 @@ class CorticalLiveService:
             stop_native_tts()
             self.agent_mgr.stop_all()
 
+        def _on_duck() -> None:
+            duck_native_tts()
+
         self.voice_engine = CorticalVoiceEngine(
             wiki_db=self.wiki_db,
             permission_gate=self.perm_gate,
             reflex_llm_fn=_reflex,
             agentic_dispatch_fn=_dispatch_agentic,
             stop_callback=_on_stop,
+            duck_callback=_on_duck,
+            memory_curator=self.memory_curator,
         )
 
     def handle_api(
@@ -1115,13 +1342,17 @@ class CorticalLiveService:
         ctx = AccessContext()
 
         if method == "GET" and path == "/health":
-            tts_engine = "macOS say (Alice it_IT)" if self.hw_profile.os_name == "Darwin" else "Piper Neural (it_IT-paola)"
+            tts_engine = (
+                "macOS say (Alice it_IT)"
+                if self.hw_profile.os_name == "Darwin"
+                else "Piper Neural (it_IT-paola)"
+            )
             return (
                 HTTPStatus.OK,
                 {
                     "status": "ok",
                     "service": "cortical-live",
-                    "version": "0.1.0",
+                    "version": "0.2.0",
                     "uptime_sec": round(time.time() - self.started_at, 2),
                     "os_name": self.hw_profile.os_name,
                     "arch": self.hw_profile.arch,
@@ -1130,6 +1361,47 @@ class CorticalLiveService:
                     "reuse_existing_endpoint": self.model_rec.reuse_existing_endpoint,
                     "active_base_url": self.model_rec.active_base_url,
                     "discovered_endpoints": self.hw_profile.discovered_endpoints,
+                },
+            )
+
+        # Standard MCP JSON-RPC 2.0 HTTP Bridge
+        if method == "POST" and path == "/api/mcp":
+            resp = self.mcp_server.handle_request(body)
+            return (HTTPStatus.OK, resp or {})
+
+        # Smart Memory & Task Lifecycle Endpoints
+        if method == "GET" and path == "/api/memory/state":
+            return (
+                HTTPStatus.OK,
+                {
+                    "chat_buffer": self.memory_curator.get_recent_chat(limit=20),
+                    "curated_insights": self.memory_curator.list_insights(limit=25),
+                    "macro_graph": self.wiki_db.query_macro_graph(ctx),
+                },
+            )
+
+        if method == "POST" and path == "/api/tasks/close-preview":
+            ep_id = str(body.get("episode_id", ""))
+            return (HTTPStatus.OK, self.memory_curator.prepare_task_closure(ep_id))
+
+        if method == "POST" and path == "/api/tasks/archive":
+            ep_id = str(body.get("episode_id", ""))
+            notes = str(body.get("user_closing_notes", ""))
+            res = self.memory_curator.archive_task(ep_id, user_closing_notes=notes)
+            if res.get("status") == "archived":
+                self.agent_mgr.mark_archived(ep_id, str(res.get("archived_trace", "")))
+            return (HTTPStatus.OK, res)
+
+        # Voice Ducking & Echo State Endpoints
+        if method == "POST" and path == "/api/voice/duck":
+            return (HTTPStatus.OK, duck_native_tts())
+
+        if method == "GET" and path == "/api/voice/state":
+            return (
+                HTTPStatus.OK,
+                {
+                    "tts_speaking": is_tts_speaking(),
+                    "last_spoken_text": self.voice_engine.last_spoken_text or _LAST_SPOKEN_TEXT,
                 },
             )
 
@@ -1164,6 +1436,9 @@ class CorticalLiveService:
 
         if method == "GET" and path == "/api/wiki/macro-graph":
             return (HTTPStatus.OK, self.wiki_db.query_macro_graph(ctx))
+
+        if method == "GET" and path == "/api/wiki/knowledge-graph":
+            return (HTTPStatus.OK, self.wiki_db.get_knowledge_graph(ctx))
 
         if method == "POST" and path == "/api/wiki/verify":
             res = self.verifier.verify_and_record(
@@ -1200,7 +1475,9 @@ class CorticalLiveService:
             t0 = time.perf_counter()
             res = self.voice_engine.handle_utterance(utterance)
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-            tts_triggered = speak_native_tts(res.spoken_response, voice=voice_name) if speak else False
+            tts_triggered = False
+            if speak and res.route != "ignored_echo" and res.spoken_response:
+                tts_triggered = speak_native_tts(res.spoken_response, voice=voice_name)
             out = dataclasses.asdict(res)
             out["latency_ms"] = elapsed_ms
             out["tts_triggered"] = tts_triggered
