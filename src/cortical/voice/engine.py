@@ -132,17 +132,30 @@ def is_stop_command(text: str) -> bool:
     return False
 
 
+def _normalize_phonetic_italian(text: str) -> str:
+    out = text.lower()
+    out = re.sub(r"(\d+)[.,](\d+)\s*°c", r"\1 virgola \2 gradi", out)
+    out = re.sub(r"(\d+)\s*°c", r"\1 gradi", out)
+    out = re.sub(r"\bmin\s+(\d+)", r"minima \1", out)
+    out = re.sub(r"\bmax\s+(\d+)", r"massima \1", out)
+    out = re.sub(r"(\d+)\s*%", r"\1 per cento", out)
+    out = re.sub(r"(\d+)\s*km/h", r"\1 chilometri orari", out)
+    out = re.sub(r"\bmcp\b", "emme ci pi", out)
+    return _clean_transcript(out)
+
+
 def is_self_echo(
     incoming_text: str,
     last_spoken_text: str,
     elapsed_sec: float,
-    echo_window_sec: float = 14.0,
+    echo_window_sec: float = 25.0,
 ) -> bool:
     """Deterministically detects if incoming microphone audio is Cortical's own spoken output."""
     if not last_spoken_text or elapsed_sec > echo_window_sec:
         return False
-    norm_in = _clean_transcript(incoming_text)
-    norm_out = _clean_transcript(last_spoken_text)
+    norm_in = _normalize_phonetic_italian(incoming_text)
+    norm_out = _normalize_phonetic_italian(last_spoken_text)
+    raw_out = _clean_transcript(last_spoken_text)
     if not norm_in or not norm_out:
         return False
 
@@ -150,15 +163,22 @@ def is_self_echo(
     if is_stop_command(norm_in):
         return False
 
-    if len(norm_in) >= 6 and (norm_in in norm_out or norm_out in norm_in):
+    if len(norm_in) >= 5 and (
+        norm_in in norm_out
+        or norm_out in norm_in
+        or norm_in in raw_out
+        or raw_out in norm_in
+    ):
         return True
 
     in_words = [w for w in norm_in.split() if len(w) > 2]
-    out_words = set(w for w in norm_out.split() if len(w) > 2)
+    out_words = set(w for w in (norm_out + " " + raw_out).split() if len(w) > 2)
     if len(in_words) >= 2 and out_words:
         overlap = sum(1 for w in in_words if w in out_words) / len(in_words)
-        if overlap >= 0.55:
+        if overlap >= 0.45:
             return True
+    if len(in_words) == 1 and in_words[0] in out_words and elapsed_sec <= 8.0:
+        return True
     return False
 
 
@@ -233,15 +253,10 @@ class CorticalVoiceEngine:
         self,
         transcript: str,
         force_task: bool = False,
+        from_mic: bool = False,
+        tts_currently_speaking: bool = False,
     ) -> VoiceRouteResult:
         """Routes a transcribed voice utterance: Echo Guard -> Stop -> Permission -> Status -> System 1/2."""
-        elapsed = time.time() - self.last_spoken_at
-        if is_self_echo(transcript, self.last_spoken_text, elapsed):
-            return VoiceRouteResult(
-                route="ignored_echo",
-                spoken_response="",
-            )
-
         if is_stop_command(transcript):
             if self.stop_callback:
                 self.stop_callback()
@@ -252,11 +267,27 @@ class CorticalVoiceEngine:
                 spoken_response=resp,
             )
 
-        # User is asking a new question: interrupt/duck any previous ongoing speech
+        had_wake, cmd = strip_wake_word(transcript)
+
+        # Acoustic Speaker-Bleed Shield: while TTS is playing out of the speakers,
+        # ignore any microphone pickup that does NOT explicitly start with the wake-word ("Ehi Cortical...")
+        if from_mic and tts_currently_speaking and not had_wake:
+            return VoiceRouteResult(
+                route="ignored_echo",
+                spoken_response="",
+            )
+
+        elapsed = time.time() - self.last_spoken_at
+        if is_self_echo(transcript, self.last_spoken_text, elapsed):
+            return VoiceRouteResult(
+                route="ignored_echo",
+                spoken_response="",
+            )
+
+        # User is asking a genuine new question: interrupt/duck any previous ongoing speech
         if self.duck_callback:
             self.duck_callback()
 
-        _, cmd = strip_wake_word(transcript)
         if not cmd:
             resp = "Sono in ascolto, dimmi pure."
             self.record_spoken_output(resp)

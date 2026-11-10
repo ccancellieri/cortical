@@ -79,17 +79,39 @@ def shape_expressive_italian_text(text: str) -> str:
     return out
 
 
+_LAST_TTS_ENDED_AT: float = 0.0
+
+
 def is_tts_speaking() -> bool:
     """Returns True if native TTS is currently playing audio."""
+    global _LAST_TTS_ENDED_AT
     with _ACTIVE_TTS_LOCK:
         if _ACTIVE_TTS_PROC is None:
             return False
-        return _ACTIVE_TTS_PROC.poll() is None
+        alive = _ACTIVE_TTS_PROC.poll() is None
+        if not alive and _LAST_TTS_ENDED_AT < _LAST_SPOKEN_AT:
+            _LAST_TTS_ENDED_AT = time.monotonic()
+        return alive
+
+
+def is_tts_speaking_or_cooling_down(cooldown_sec: float = 2.2) -> bool:
+    """Returns True while TTS is actively playing OR within `cooldown_sec` after playback ends."""
+    if is_tts_speaking():
+        return True
+    now_m = time.monotonic()
+    if _LAST_TTS_ENDED_AT > 0 and (now_m - _LAST_TTS_ENDED_AT) <= cooldown_sec:
+        return True
+    # Also estimate speech duration (~13 chars/sec + 1.4s synthesis buffer) as safety net
+    if _LAST_SPOKEN_AT > 0 and _LAST_SPOKEN_TEXT:
+        est_duration = max(3.2, len(_LAST_SPOKEN_TEXT) / 13.5 + 1.8)
+        if (now_m - _LAST_SPOKEN_AT) <= est_duration:
+            return True
+    return False
 
 
 def stop_native_tts() -> None:
     """Immediately terminates any active TTS process for instant barge-in (<20ms)."""
-    global _ACTIVE_TTS_PROC, _TTS_DUCKED
+    global _ACTIVE_TTS_PROC, _TTS_DUCKED, _LAST_TTS_ENDED_AT
     with _ACTIVE_TTS_LOCK:
         _TTS_DUCKED = False
         if _ACTIVE_TTS_PROC is not None:
@@ -98,17 +120,18 @@ def stop_native_tts() -> None:
             except Exception:  # noqa: BLE001
                 pass
             _ACTIVE_TTS_PROC = None
+            _LAST_TTS_ENDED_AT = time.monotonic()
     if platform.system() == "Darwin":
         subprocess.run(["pkill", "-x", "say"], stderr=subprocess.DEVNULL, check=False)
         subprocess.run(["pkill", "-x", "afplay"], stderr=subprocess.DEVNULL, check=False)
 
 
-def duck_native_tts() -> dict[str, Any]:
-    """Ducks / interrupts ongoing TTS output when the user starts speaking a new phrase."""
+def duck_native_tts(force_stop: bool = False) -> dict[str, Any]:
+    """Ducks ongoing TTS output ONLY when an explicit barge-in / user interruption is confirmed."""
     global _TTS_DUCKED
     was_speaking = is_tts_speaking()
     _TTS_DUCKED = True
-    if was_speaking:
+    if force_stop and was_speaking:
         stop_native_tts()
     return {"ducked": True, "was_speaking": was_speaking}
 
@@ -124,10 +147,10 @@ def speak_native_tts(
     if not text or not text.strip():
         return False
     stop_native_tts()
-    _LAST_SPOKEN_TEXT = text.strip()
+    spoken_natural = shape_expressive_italian_text(text)
+    _LAST_SPOKEN_TEXT = f"{text.strip()} {spoken_natural}".strip()
     _LAST_SPOKEN_AT = time.monotonic()
     _TTS_DUCKED = False
-    spoken_natural = shape_expressive_italian_text(text)
     vol_clamp = max(0.15, min(1.0, float(volume)))
 
     try:
@@ -139,15 +162,14 @@ def speak_native_tts(
         )
         neural_voice = NEURAL_ITALIAN_VOICES.get(voice)
         if neural_voice and Path(edge_bin).exists():
-            mp3_path = f"/tmp/cortical_tts_{os.getpid()}.mp3"
-            pitch = "+2Hz" if "Isabella" in neural_voice or "Elsa" in neural_voice else "+0Hz"
-            rate_str = "+7%"
+            # Unique atomic MP3 path per utterance prevents file overwrite/stutter
+            mp3_path = f"/tmp/cortical_tts_{os.getpid()}_{int(time.time() * 1000)}.mp3"
             if sys_name == "Darwin" and shutil.which("afplay"):
                 cmd = (
-                    f'"{edge_bin}" --voice "{neural_voice}" --rate="{rate_str}" --pitch="{pitch}" '
+                    f'"{edge_bin}" --voice "{neural_voice}" '
                     f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
-                    f'&& afplay -v {vol_clamp:.2f} "{mp3_path}" >/dev/null 2>&1 '
-                    f'|| say -v Alice -r {rate} {json.dumps(spoken_natural)}'
+                    f'&& (afplay -v {vol_clamp:.2f} "{mp3_path}" >/dev/null 2>&1; rm -f "{mp3_path}") '
+                    f'|| (rm -f "{mp3_path}"; say -v Alice -r {rate} {json.dumps(spoken_natural)})'
                 )
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
@@ -159,9 +181,9 @@ def speak_native_tts(
             if sys_name == "Linux" and (shutil.which("mpv") or shutil.which("ffplay")):
                 player = "mpv --no-terminal" if shutil.which("mpv") else "ffplay -nodisp -autoexit -loglevel quiet"
                 cmd = (
-                    f'"{edge_bin}" --voice "{neural_voice}" --rate="{rate_str}" --pitch="{pitch}" '
+                    f'"{edge_bin}" --voice "{neural_voice}" '
                     f'--text {json.dumps(spoken_natural)} --write-media "{mp3_path}" >/dev/null 2>&1 '
-                    f'&& {player} "{mp3_path}" >/dev/null 2>&1'
+                    f'&& ({player} "{mp3_path}" >/dev/null 2>&1; rm -f "{mp3_path}")'
                 )
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
@@ -175,9 +197,8 @@ def speak_native_tts(
         if sys_name == "Darwin" and shutil.which("say"):
             allowed_voices = {"Alice", "Reed", "Shelley", "Eddy", "Sandy", "Flo", "Federica", "Luca"}
             chosen_voice = voice if voice in allowed_voices else "Alice"
-            # Add Apple Speech Synthesis prosody tags (pauses & pitch modulation) for less mechanical cadence
-            prosodic = spoken_natural.replace(". ", ". [[slnc 140]] ").replace(", ", ", [[slnc 65]] ")
-            styled_text = f"[[volm {vol_clamp:.2f}]] [[pbas +1]] {prosodic}"
+            prosodic = spoken_natural.replace(". ", ". [[slnc 120]] ")
+            styled_text = f"[[volm {vol_clamp:.2f}]] {prosodic}"
             with _ACTIVE_TTS_LOCK:
                 _ACTIVE_TTS_PROC = subprocess.Popen(
                     ["say", "-v", chosen_voice, "-r", str(rate), styled_text],
@@ -215,7 +236,7 @@ def speak_native_tts(
     return False
 
 
-def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> str:
+def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0) -> str:
     """Queries deterministic grounding first, then available local/LAN OpenAI-compatible servers in Italian."""
     now = datetime.datetime.now()
     norm = prompt.lower().strip()
@@ -280,12 +301,12 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 4.5) -> 
                     "content": (
                         f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
                         f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
-                        "in massimo 2 frasi chiare e dirette."
+                        "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 120,
+            "max_tokens": 350,
             "temperature": 0.2,
         }
         try:
@@ -936,29 +957,47 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let recognition = null;
     let lastSpokenResponseText = '';
     let lastSpokenAtMs = 0;
+    let localTtsShieldUntilMs = 0;
     let activeAbortController = null;
+
+    function hasWakeOrBargeInWord(s) {
+      return /\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta)\b/i.test(s || '');
+    }
+
+    function isTtsShieldActive() {
+      return Date.now() < localTtsShieldUntilMs;
+    }
 
     function normalizeTokens(s) {
       return (s || '')
         .toLowerCase()
-        .replace(/[^\\w\\sàèéìòù]/g, ' ')
-        .split(/\\s+/)
+        .replace(/(\d+)[.,](\d+)\s*°c/gi, '$1 virgola $2 gradi')
+        .replace(/(\d+)\s*°c/gi, '$1 gradi')
+        .replace(/\bmin\s+(\d+)/gi, 'minima $1')
+        .replace(/\bmax\s+(\d+)/gi, 'massima $1')
+        .replace(/(\d+)\s*%/g, '$1 per cento')
+        .replace(/[^\w\sàèéìòù]/g, ' ')
+        .split(/\s+/)
         .filter(w => w.length > 1);
     }
 
     // Client-side Self-Echo Guard: detects if WebSpeech picked up Cortical's own spoken output
     function isSelfEchoClient(candidate) {
+      if (!candidate) return false;
+      if (hasWakeOrBargeInWord(candidate)) return false;
+      // While Cortical is actively speaking (or in acoustic tail cooldown), any non-wake-word mic input is speaker bleed
+      if (isTtsShieldActive()) return true;
       if (!lastSpokenResponseText) return false;
       const elapsedSec = (Date.now() - lastSpokenAtMs) / 1000.0;
-      if (elapsedSec > 14.0) return false;
+      if (elapsedSec > 25.0) return false;
       const candWords = normalizeTokens(candidate);
       const spokenWords = new Set(normalizeTokens(lastSpokenResponseText));
       if (!candWords.length || !spokenWords.size) return false;
       const candJoined = candWords.join(' ');
       const spokenJoined = normalizeTokens(lastSpokenResponseText).join(' ');
-      if (candJoined.length >= 6 && spokenJoined.includes(candJoined)) return true;
+      if (candJoined.length >= 5 && spokenJoined.includes(candJoined)) return true;
       const overlap = candWords.filter(w => spokenWords.has(w)).length / candWords.length;
-      return overlap >= 0.52;
+      return overlap >= 0.45;
     }
 
     async function loadHealth() {
@@ -983,21 +1022,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function submitComposer(overrideText) {
       const input = document.getElementById('prompt-input');
-      const text = (overrideText !== undefined ? overrideText : input.value).trim();
+      const fromMic = (overrideText !== undefined);
+      const text = (fromMic ? overrideText : input.value).trim();
       if (!text) return;
-      if (overrideText === undefined) input.value = '';
+      if (!fromMic) input.value = '';
 
-      // 1. Self-Echo Check
-      if (overrideText !== undefined && isSelfEchoClient(text)) {
-        document.getElementById('live-transcript').textContent = `🔇 [Eco della risposta ignorato]`;
+      // 1. Self-Echo & Acoustic Shield Check for Microphone Input
+      if (fromMic && isSelfEchoClient(text)) {
+        document.getElementById('live-transcript').textContent = `🔇 [Eco altoparlante ignorato]`;
         return;
       }
 
-      // 2. Barge-in Audio Ducking & In-Flight Abort / Recalculation
+      // 2. Barge-in Abort only when typed manually or when user explicitly says Wake/Stop word
       if (activeAbortController) {
         activeAbortController.abort();
       }
-      await fetch('/api/voice/duck', {method: 'POST', body: '{}'}).catch(() => {});
+      if (!fromMic || hasWakeOrBargeInWord(text)) {
+        await fetch('/api/voice/duck', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({force_stop: true})
+        }).catch(() => {});
+      }
 
       const mode = document.getElementById('dispatch-mode').value;
       const depth = document.getElementById('agent-depth').value;
@@ -1009,12 +1055,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         return;
       }
 
+      if (speak) {
+        // Pre-arm acoustic shield before server starts speaking
+        localTtsShieldUntilMs = Date.now() + 4500;
+      }
+
       activeAbortController = new AbortController();
       try {
         const r = await fetch('/api/voice', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({utterance: text, speak, voice, wiki_depth: depth}),
+          body: JSON.stringify({utterance: text, speak, voice, wiki_depth: depth, from_mic: fromMic}),
           signal: activeAbortController.signal
         });
         const d = await r.json();
@@ -1027,6 +1078,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (d.spoken_response) {
           lastSpokenResponseText = d.spoken_response;
           lastSpokenAtMs = Date.now();
+          if (speak && d.route !== 'stop') {
+            // Keep acoustic shield active for the full duration of the spoken response + 2.2s tail
+            const estMs = Math.max(4800, d.spoken_response.length * 82 + 2400);
+            localTtsShieldUntilMs = Date.now() + estMs;
+          } else {
+            localTtsShieldUntilMs = Date.now() + 1200;
+          }
         }
 
         if (d.spawned_session_id) {
@@ -1226,7 +1284,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         for (let i = event.resultIndex; i < event.results.length; ++i) {
           const transcript = event.results[i][0].transcript.trim();
           if (isSelfEchoClient(transcript)) {
-            document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato: "${transcript.slice(0, 28)}..."]`;
+            document.getElementById('live-transcript').textContent = `🔇 [Scudo Anti-Eco: ignoro la mia voce]`;
             continue;
           }
           if (event.results[i].isFinal) {
@@ -1234,14 +1292,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             submitComposer(transcript);
           } else {
             interim += transcript + ' ';
-            // User started speaking a new phrase while Cortical might be talking -> duck audio immediately
-            if (interim.trim().length > 4) {
-              fetch('/api/voice/duck', {method: 'POST', body: '{}'}).catch(() => {});
+            // Only interrupt ongoing TTS during interim speech if user explicitly says a Wake/Stop word
+            if (hasWakeOrBargeInWord(interim)) {
+              fetch('/api/voice/duck', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({force_stop: true})
+              }).catch(() => {});
             }
           }
         }
-        if (interim) {
-          document.getElementById('live-transcript').textContent = `🔉 [Ducking] … ${interim}`;
+        if (interim && !isTtsShieldActive()) {
+          document.getElementById('live-transcript').textContent = `🎙️ … ${interim}`;
         }
       };
 
@@ -1507,7 +1569,7 @@ class CorticalLiveService:
             self.agent_mgr.stop_all()
 
         def _on_duck() -> None:
-            duck_native_tts()
+            duck_native_tts(force_stop=True)
 
         self.voice_engine = CorticalVoiceEngine(
             wiki_db=self.wiki_db,
@@ -1626,13 +1688,15 @@ class CorticalLiveService:
 
         # Voice Ducking & Echo State Endpoints
         if method == "POST" and path == "/api/voice/duck":
-            return (HTTPStatus.OK, duck_native_tts())
+            force_stop = bool(body.get("force_stop", False))
+            return (HTTPStatus.OK, duck_native_tts(force_stop=force_stop))
 
         if method == "GET" and path == "/api/voice/state":
             return (
                 HTTPStatus.OK,
                 {
                     "tts_speaking": is_tts_speaking(),
+                    "tts_shield_active": is_tts_speaking_or_cooling_down(),
                     "last_spoken_text": self.voice_engine.last_spoken_text or _LAST_SPOKEN_TEXT,
                 },
             )
@@ -1703,9 +1767,14 @@ class CorticalLiveService:
         if method == "POST" and path == "/api/voice":
             utterance = str(body.get("utterance", ""))
             speak = bool(body.get("speak", False))
-            voice_name = str(body.get("voice", "Alice"))
+            voice_name = str(body.get("voice", "IsabellaNeural"))
+            from_mic = bool(body.get("from_mic", False))
             t0 = time.perf_counter()
-            res = self.voice_engine.handle_utterance(utterance)
+            res = self.voice_engine.handle_utterance(
+                utterance,
+                from_mic=from_mic,
+                tts_currently_speaking=is_tts_speaking_or_cooling_down(),
+            )
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             tts_triggered = False
             if speak and res.route != "ignored_echo" and res.spoken_response:

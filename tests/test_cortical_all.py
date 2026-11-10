@@ -356,6 +356,22 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(echo_res.spoken_response, "")
         self.assertTrue(is_self_echo("Risposta sintetica per analizza", res1.spoken_response, 2.0))
 
+        # 3. Acoustic Speaker-Bleed Shield: while TTS is speaking, un-prefixed mic bleed is ignored,
+        #    whereas explicit wake-word ("Ehi Cortical...") or stop-word ("Fermati") barges in cleanly.
+        bleed_res = voice.handle_utterance(
+            "parole distorte dall altoparlante mentre parla",
+            from_mic=True,
+            tts_currently_speaking=True,
+        )
+        self.assertEqual(bleed_res.route, "ignored_echo")
+
+        barge_res = voice.handle_utterance(
+            "Ehi Cortical, che ore sono?",
+            from_mic=True,
+            tts_currently_speaking=True,
+        )
+        self.assertEqual(barge_res.route, "system1_reflex")
+
     def test_11_smart_memory_curator_and_task_archival(self) -> None:
         """Tests bounded chat buffer (max 20), ephemeral filtering, LLM curation, closing questions, and compact task archival."""
         db = CorticalWikiDB(self.wiki_db_path)
