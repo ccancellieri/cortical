@@ -248,15 +248,22 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertTrue(Path(out_cfg["mcp_config_path"]).exists())
 
     def test_7_dual_path_voice_engine(self) -> None:
-        """Tests resilient barge-in stop words, voice permission approval, and System 1 vs System 2 routing."""
+        """Tests resilient barge-in stop words, 'hei cortical' wake word, voice permission approval, and System 1 vs System 2 routing."""
         self.assertTrue(is_stop_command("Ehi Cortical basta"))
+        self.assertTrue(is_stop_command("Hei Cortical basta"))
         self.assertTrue(is_stop_command("hey peppe ba sta per favore"))
         self.assertTrue(is_stop_command("fer ma ti subito"))
         self.assertFalse(is_stop_command("Ehi Cortical, raccontami una storia abbastanza lunga"))
 
-        had_wake, rem = strip_wake_word("Ehi Cortical, che ore sono?")
+        had_wake, rem = strip_wake_word("Hei Cortical, che ore sono?")
         self.assertTrue(had_wake)
         self.assertEqual(rem, "che ore sono")
+
+        # Built-in clock reflex without external LLM
+        voice_builtin = CorticalVoiceEngine()
+        clock_res = voice_builtin.handle_utterance("hei cortical che ore sono")
+        self.assertEqual(clock_res.route, "system1_reflex")
+        self.assertIn("Sono le", clock_res.spoken_response)
 
         db = CorticalWikiDB(self.wiki_db_path)
         gate = AdaptivePermissionGate(self.perm_db_path)

@@ -2,19 +2,20 @@
 
 Upgrades and generalizes Peppe's voice capabilities for cross-platform (macOS + Linux) operation:
 1. Resilient Wake-Word & Stop/Barge-In Detection (`is_stop_command`):
-   Handles Whisper syllable splits ("ba sta", "fer ma ti") and wake prefixes ("ehi cortical basta").
-2. Voice Permission Gate Integration:
-   Allows approving or denying pending agent tool requests by voice
-   ("cortical approva e ricorda", "cortical blocca").
+   Handles Whisper/WebSpeech variations ("hei cortical", "ehi cortical", "hey cortical",
+   "ba sta", "fer ma ti") and immediately stops active TTS/agents.
+2. Instant Built-in Italian Reflexes (< 5ms):
+   Answers clock/time ("che ore sono"), date ("che giorno è"), system status, and
+   voice permission confirmations without waiting for an LLM roundtrip.
 3. Dual-Path Routing:
-   - System 1 (Fast Reflex < 1s): Direct voice queries, web grounding, and subagent status checks
-     are answered immediately via the lightweight reflex model (reusing `:8080` on small laptops).
+   - System 1 (Fast Reflex < 1s): Direct voice queries, web grounding, and subagent status checks.
    - System 2 (Async Agentic Orchestrator): Multi-step coding, browser automation, or deep Wiki
      tasks are delegated in background to `pi` while immediately acknowledging by voice.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -24,11 +25,15 @@ from ..wiki.db import AccessContext, CorticalWikiDB
 
 WAKE_PREFIXES = (
     "ehi cortical",
+    "hei cortical",
     "hey cortical",
+    "ei cortical",
+    "ai cortical",
     "ciao cortical",
     "ok cortical",
     "cortical",
     "ehi peppe",
+    "hei peppe",
     "hey peppe",
     "peppe",
 )
@@ -57,16 +62,48 @@ AGENTIC_INTENT_KEYWORDS = (
     "orchestra",
     "sottoagente",
     "subagent",
+    "agente",
     "refactoring",
     "implementa",
     "scrivi codice",
+    "modifica il file",
+    "crea un file",
     "apri chrome",
     "compila il form",
     "candidatura",
     "indicizza",
     "crawla",
     "analizza il progetto",
+    "analizza il codice",
     "esegui i test",
+    "lancia pi",
+    "usa pi",
+)
+
+GIORNI_SETTIMANA = (
+    "lunedì",
+    "martedì",
+    "mercoledì",
+    "giovedì",
+    "venerdì",
+    "sabato",
+    "domenica",
+)
+
+MESI_ANNO = (
+    "",
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
 )
 
 
@@ -76,20 +113,28 @@ def _clean_transcript(text: str) -> str:
 
 
 def strip_wake_word(text: str) -> tuple[bool, str]:
-    """Strips wake word if present; returns (had_wake_word, remaining_command)."""
+    """Strips wake word if present (including 'hei/ehi/hey cortical'); returns (had_wake_word, remaining_command)."""
     norm = _clean_transcript(text)
     for prefix in WAKE_PREFIXES:
         if norm == prefix:
             return (True, "")
         if norm.startswith(prefix + " "):
             return (True, norm[len(prefix) :].strip())
+    # Fuzzy match if wake word appears after a greeting word like "allora hei cortical ..."
+    m = re.match(r"^(?:allora\s+| senti\s+)?(?:ehi|hei|hey|ei|ciao|ok)?\s*cortical\b\s*(.*)$", norm)
+    if m:
+        return (True, m.group(1).strip())
     return (False, norm)
 
 
 def is_stop_command(text: str) -> bool:
     """Resilient barge-in / stop detector tolerant of Whisper syllable splits and filler prefixes."""
     _, remainder = strip_wake_word(text)
-    tokens = [t for t in remainder.split() if t not in {"ehi", "hey", "ok", "per", "favore", "ora"}]
+    tokens = [
+        t
+        for t in remainder.split()
+        if t not in {"ehi", "hei", "hey", "ok", "per", "favore", "ora", "subito"}
+    ]
     if not tokens:
         return False
 
@@ -120,24 +165,39 @@ class CorticalVoiceEngine:
         permission_gate: Optional[AdaptivePermissionGate] = None,
         reflex_llm_fn: Optional[Callable[[str], str]] = None,
         agentic_dispatch_fn: Optional[Callable[[str], str]] = None,
+        stop_callback: Optional[Callable[[], None]] = None,
     ) -> None:
         self.wiki_db = wiki_db
         self.permission_gate = permission_gate
-        self.reflex_llm_fn = reflex_llm_fn or (
-            lambda prompt: f"Risposta rapida System 1: {prompt}"
-        )
+        self.reflex_llm_fn = reflex_llm_fn
         self.agentic_dispatch_fn = agentic_dispatch_fn or (
             lambda goal: f"task-{abs(hash(goal)) % 10000}"
         )
+        self.stop_callback = stop_callback
         self.pending_permission: Optional[tuple[str, dict[str, Any]]] = None
         self.active_background_tasks: dict[str, str] = {}
 
     def register_pending_permission(self, tool_name: str, args: dict[str, Any]) -> None:
         self.pending_permission = (tool_name, args)
 
+    def _instant_builtin_reflex(self, cmd: str) -> Optional[str]:
+        """Handles clock, date, and identity questions deterministically in <5ms if not overridden."""
+        now = datetime.datetime.now()
+        if any(p in cmd for p in ("che ore sono", "che ora e", "che ora è", "dimmi l ora")):
+            giorno = GIORNI_SETTIMANA[now.weekday()]
+            mese = MESI_ANNO[now.month]
+            return f"Sono le {now.strftime('%H:%M')} di {giorno} {now.day} {mese}."
+        if any(p in cmd for p in ("che giorno e", "che giorno è", "data di oggi", "quanti ne abbiamo")):
+            giorno = GIORNI_SETTIMANA[now.weekday()]
+            mese = MESI_ANNO[now.month]
+            return f"Oggi è {giorno} {now.day} {mese} {now.year}."
+        return None
+
     def handle_utterance(self, transcript: str) -> VoiceRouteResult:
         """Routes a transcribed voice utterance through Stop -> Permission -> Status -> System 1/2."""
         if is_stop_command(transcript):
+            if self.stop_callback:
+                self.stop_callback()
             return VoiceRouteResult(
                 route="stop",
                 spoken_response="Ricevuto, mi fermo subito.",
@@ -201,14 +261,18 @@ class CorticalVoiceEngine:
             return VoiceRouteResult(
                 route="system2_agentic",
                 spoken_response=(
-                    f"Avvio l'orchestratore in background per questo compito (ID {task_id}). "
-                    "Ti avviso appena il sottoagente ha terminato."
+                    f"Avvio l'agente su pi per questo compito (ID {task_id}). "
+                    "Puoi seguire i passaggi in tempo reale nella console."
                 ),
                 dispatched_task_goal=cmd,
             )
 
         # 4. System 1: Fast Reflex (<1s direct response)
-        answer = self.reflex_llm_fn(cmd)
+        if self.reflex_llm_fn is not None:
+            answer = self.reflex_llm_fn(cmd)
+        else:
+            builtin = self._instant_builtin_reflex(cmd)
+            answer = builtin or f"Risposta rapida System 1: {cmd}"
         return VoiceRouteResult(
             route="system1_reflex",
             spoken_response=answer,
