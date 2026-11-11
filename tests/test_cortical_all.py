@@ -785,6 +785,10 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(task_res.lang, "en")
 
         # 4. Bilingual Guides, UI Language Toggle & Web Audio GainNode Ducking + AEC in DASHBOARD_HTML
+        import re as _re
+        import shutil as _shutil
+        import subprocess as _subp
+
         self.assertIn("btn-ui-lang", DASHBOARD_HTML)
         self.assertIn("GUIDE_DOCS", DASHBOARD_HTML)
         self.assertIn("duckAssistantAudio", DASHBOARD_HTML)
@@ -792,6 +796,17 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertIn("echoCancellation: true", DASHBOARD_HTML)
         self.assertIn("JennyNeural", DASHBOARD_HTML)
         self.assertIn("Cortical v0.4 Interactive Guide (EN / IT)", DASHBOARD_HTML)
+
+        # Verify extracted <script> has zero JS syntax errors via node --check
+        script_m = _re.search(r"<script>(.*?)</script>", DASHBOARD_HTML, _re.S)
+        self.assertIsNotNone(script_m)
+        assert script_m is not None
+        node_bin = _shutil.which("node")
+        if node_bin:
+            js_path = Path(self.tmp_dir.name) / "dashboard_check.js"
+            js_path.write_text(script_m.group(1), encoding="utf-8")
+            chk = _subp.run([node_bin, "--check", str(js_path)], capture_output=True, text=True, check=False)
+            self.assertEqual(chk.returncode, 0, f"DASHBOARD_HTML JS syntax error: {chk.stderr}")
 
         # 5. Bilingual Skill Enhancement Output
         hub = CorticalSkillHub(CorticalWikiDB(self.wiki_db_path), self.root / ".pi" / "skills")

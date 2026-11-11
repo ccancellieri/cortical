@@ -848,30 +848,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--bg); color: var(--text); overflow: hidden;
     }
     .topbar {
-      height: 62px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
-      flex-shrink: 0; gap: 14px;
+      min-height: 58px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 6px 14px;
+      flex-shrink: 0; gap: 10px; flex-wrap: wrap;
     }
-    .brand { display: flex; align-items: center; gap: 12px; min-width: 240px; }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 190px; }
     .brand-logo {
-      width: 34px; height: 34px; border-radius: 9px;
+      width: 32px; height: 32px; border-radius: 9px;
       background: linear-gradient(135deg, var(--accent), var(--indigo));
       display: flex; align-items: center; justify-content: center;
-      font-weight: 900; font-size: 1.05rem; color: #070b14; font-family: var(--mono);
+      font-weight: 900; font-size: 1rem; color: #070b14; font-family: var(--mono);
       box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
     }
-    .brand-title { font-weight: 800; font-size: 1.05rem; letter-spacing: -0.02em; }
-    .brand-sub { font-size: 0.72rem; color: var(--muted); max-width: 340px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .brand-title { font-weight: 800; font-size: 1rem; letter-spacing: -0.02em; }
+    .brand-sub { font-size: 0.7rem; color: var(--muted); max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* PRIMARY CENTRAL VIEW SWITCHER */
     .main-nav {
-      display: flex; align-items: center; gap: 6px;
-      background: #080d19; padding: 5px; border-radius: 11px; border: 1px solid var(--border);
+      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+      background: #080d19; padding: 4px; border-radius: 11px; border: 1px solid var(--border);
     }
     .nav-tab {
-      padding: 8px 16px; border-radius: 8px; font-size: 0.83rem; font-weight: 700;
+      padding: 6px 11px; border-radius: 8px; font-size: 0.79rem; font-weight: 700;
       cursor: pointer; color: var(--muted); border: 1px solid transparent;
-      display: inline-flex; align-items: center; gap: 7px; transition: all 0.15s;
+      display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; white-space: nowrap;
     }
     .nav-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
     .nav-tab.active {
@@ -881,9 +881,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .voice-bar {
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
       background: var(--panel); border: 1px solid var(--border);
-      padding: 5px 11px; border-radius: 999px;
+      padding: 4px 9px; border-radius: 14px; max-width: 100%;
     }
     .pulse-dot {
       width: 10px; height: 10px; border-radius: 50%; background: var(--muted);
@@ -900,8 +900,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       100% { transform: scale(0.95); opacity: 1; }
     }
     .live-transcript {
-      font-size: 0.78rem; color: var(--accent); font-family: var(--mono);
-      min-width: 170px; max-width: 320px; white-space: nowrap;
+      font-size: 0.75rem; color: var(--accent); font-family: var(--mono);
+      min-width: 90px; max-width: 190px; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
     }
     .btn {
@@ -1260,7 +1260,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </select>
       <button class="btn btn-danger" id="btn-stop-top" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti / Stop immediately">🛑 Stop</button>
       <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale / Open pi in Terminal">🖥️ `pi`</button>
-      <button class="btn btn-ghost" id="btn-ui-lang" onclick="toggleUiLanguage()" title="Switch Language / Cambia Lingua (IT / EN)">🇮🇹 IT</button>
+      <button class="btn btn-ghost" id="btn-ui-lang" style="border-color: rgba(56,189,248,0.55); color: var(--accent);" onclick="toggleUiLanguage()" title="Switch Language / Cambia Lingua (IT / EN)">🌐 IT / EN</button>
       <button class="btn btn-ghost" id="btn-guide-top" onclick="openHelpSection('doc-stream', event)" title="Guida Interattiva / Interactive Guide">📖 Guida</button>
     </div>
   </div>
@@ -1611,7 +1611,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         micOn: '🟢 Mic Attivo',
         micDenied: '🎤 Mic: Negato',
         promptPlaceholder: "Chiedi a Cortical (IT o EN) con i file/skill allegati o di' 'Ehi Cortical...'",
-        liveReady: 'Ducking & AEC pronti · Di\' "Ehi Cortical..." o "Hey Cortical..."',
+        liveReady: `Ducking & AEC pronti · Di' "Ehi Cortical..." o "Hey Cortical..."`,
         duckNormal: '🔊 100%',
         duckLow: '🔉 14% Duck · Priorità Voce',
         newTaskBtn: '+ Nuovo Task',
@@ -1855,7 +1855,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function attachContextItemApi(itemType, itemRef, depthTier = 'medium', label = null) {
+    async function attachContextItemApi(itemType, itemRef, depthTier = 'medium', label = null, inlineContent = null) {
       if (!itemRef) return;
       try {
         const r = await fetch('/api/context/attach', {
@@ -1866,7 +1866,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             item_type: itemType,
             item_ref: itemRef,
             depth_tier: depthTier,
-            label: label
+            label: label,
+            inline_content: inlineContent
           })
         });
         const d = await r.json();
@@ -1947,19 +1948,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       refEl.value = '';
     }
 
-    function handleBrowserFileSelected(event) {
+    async function handleBrowserFileSelected(event) {
       const input = event.target;
       if (!input.files || !input.files[0]) return;
       const file = input.files[0];
-      const suggested = file.name;
-      const fullPath = prompt(
-        `File selezionato: "${suggested}".\\nInserisci il percorso relativo o assoluto del file sul tuo sistema:`,
-        suggested
-      );
-      if (fullPath && fullPath.trim()) {
-        attachContextItemApi('file', fullPath.trim(), 'medium');
+      const tier = document.getElementById('agent-depth')?.value || 'medium';
+      try {
+        const inlineContent = await file.text();
+        await attachContextItemApi('file', file.name, tier, file.name, inlineContent);
+      } catch (err) {
+        const fullPath = prompt(
+          `File selezionato: "${file.name}".\\nInserisci il percorso relativo o assoluto del file sul tuo sistema:`,
+          file.name
+        );
+        if (fullPath && fullPath.trim()) {
+          await attachContextItemApi('file', fullPath.trim(), tier);
+        }
+      } finally {
+        input.value = '';
       }
-      input.value = '';
     }
 
     function inspectAttachment3Plus1(attachmentId) {
