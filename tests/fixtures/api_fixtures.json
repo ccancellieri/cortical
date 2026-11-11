@@ -61,6 +61,34 @@
         "Premio Nobel per la fisica"
       ],
       "text": "Albert Einstein (Ulma, 14 marzo 1879 – Princeton, 18 aprile 1955) è stato un fisico e filosofo della scienza tedesco naturalizzato statunitense.\n\nNel 1905 pubblicò quattro articoli rivoluzionari sull'effetto fotoelettrico, il moto browniano, la relatività ristretta e l'equivalenza massa-energia (E=mc²).\n\nNel 1915 formulò la teoria della relatività generale descrivendo la gravità come curvatura dello spaziotempo. Nel 1921 ricevette il Premio Nobel per la fisica."
+    },
+    "wikipedia_einstein_en": {
+      "url": "https://en.wikipedia.org/wiki/Albert_Einstein",
+      "title": "Albert Einstein - Wikipedia",
+      "headings": [
+        "Early life and education",
+        "Special relativity",
+        "General relativity",
+        "Nobel Prize in Physics"
+      ],
+      "text": "Albert Einstein was a German-born theoretical physicist best known for developing the theory of relativity.\n\nIn 1905 he published four groundbreaking papers on the photoelectric effect, Brownian motion, special relativity, and mass-energy equivalence (E=mc2).\n\nIn 1915 he formulated general relativity, and in 1921 he received the Nobel Prize in Physics."
+    }
+  },
+  "bilingual_voice_cases": {
+    "en_search": {
+      "utterance": "open the browser and go to wikipedia and search for Albert Einstein",
+      "voice": "JennyNeural",
+      "lang": "en",
+      "discourse_hints": {
+        "acoustic_user_priority": true,
+        "mic_rms": 0.085,
+        "assistant_rms": 0.018
+      }
+    },
+    "speaker_bleed": {
+      "utterance": "previsioni cielo sereno",
+      "from_mic": true,
+      "client_tts_speaking": true
     }
   }
 }

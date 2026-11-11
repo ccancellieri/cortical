@@ -87,7 +87,10 @@ function isWeatherQuery(text: string): boolean {
     norm.includes("meteo") ||
     norm.includes("che tempo fa") ||
     norm.includes("previsioni") ||
-    norm.includes("temperatura")
+    norm.includes("temperatura") ||
+    norm.includes("weather") ||
+    norm.includes("forecast") ||
+    norm.includes("temperature")
   );
 }
 
@@ -98,7 +101,11 @@ function isPageReadQuery(text: string): boolean {
     norm.includes("scheda") ||
     norm.includes("articolo") ||
     norm.includes("aperta") ||
-    norm.includes("aperto");
+    norm.includes("aperto") ||
+    norm.includes("page") ||
+    norm.includes("article") ||
+    norm.includes("tab") ||
+    norm.includes("open page");
   if (!hasPage) return false;
   return (
     norm.includes("leggi") ||
@@ -106,7 +113,12 @@ function isPageReadQuery(text: string): boolean {
     norm.includes("riassumi") ||
     norm.includes("sintetizza") ||
     norm.includes("concetti") ||
-    norm.includes("spiega")
+    norm.includes("spiega") ||
+    norm.includes("read") ||
+    norm.includes("summarize") ||
+    norm.includes("summary") ||
+    norm.includes("concepts") ||
+    norm.includes("explain")
   );
 }
 
@@ -119,7 +131,14 @@ function isBrowserSearchQuery(text: string): boolean {
     norm.includes("vai su wikipedia") ||
     norm.includes("cerca su wikipedia") ||
     norm.includes("cerca su google") ||
-    norm.includes("fai una ricerca")
+    norm.includes("fai una ricerca") ||
+    norm.includes("open the browser") ||
+    norm.includes("open chrome") ||
+    norm.includes("go to wikipedia") ||
+    norm.includes("search wikipedia") ||
+    norm.includes("search google") ||
+    norm.includes("do a search") ||
+    norm.includes("search for")
   );
 }
 
@@ -131,7 +150,12 @@ function isExplicitTaskStart(text: string): boolean {
     norm.includes("apri un task") ||
     norm.includes("nuovo task") ||
     norm.includes("lavora in multiagent") ||
-    norm.includes("orchestra un sottoagente")
+    norm.includes("orchestra un sottoagente") ||
+    norm.includes("create a task") ||
+    norm.includes("create task") ||
+    norm.includes("open a task") ||
+    norm.includes("new task") ||
+    norm.includes("orchestrate a subagent")
   );
 }
 

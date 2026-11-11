@@ -103,17 +103,94 @@ WMO_WEATHER_IT = {
     99: "temporale forte con grandine",
 }
 
+WMO_WEATHER_EN = {
+    0: "clear sky",
+    1: "mostly clear",
+    2: "partly cloudy",
+    3: "overcast",
+    45: "foggy",
+    48: "freezing fog",
+    51: "light drizzle",
+    53: "moderate drizzle",
+    55: "dense drizzle",
+    61: "light rain",
+    63: "moderate rain",
+    65: "heavy rain",
+    71: "light snow",
+    73: "moderate snow",
+    75: "heavy snow",
+    80: "light rain showers",
+    81: "moderate rain showers",
+    82: "violent rain showers",
+    95: "thunderstorm",
+    96: "thunderstorm with hail",
+    99: "severe thunderstorm with hail",
+}
+
 CITY_DEFAULT_COORDS = {
     "roma": (41.8919, 12.5113, "Roma"),
-    "rome": (41.8919, 12.5113, "Roma"),
+    "rome": (41.8919, 12.5113, "Rome"),
     "milano": (45.4642, 9.1900, "Milano"),
+    "milan": (45.4642, 9.1900, "Milan"),
     "napoli": (40.8518, 14.2681, "Napoli"),
+    "naples": (40.8518, 14.2681, "Naples"),
     "torino": (45.0703, 7.6869, "Torino"),
+    "turin": (45.0703, 7.6869, "Turin"),
     "firenze": (43.7696, 11.2558, "Firenze"),
+    "florence": (43.7696, 11.2558, "Florence"),
     "bologna": (44.4949, 11.3426, "Bologna"),
     "barcellona": (41.3874, 2.1686, "Barcellona"),
+    "barcelona": (41.3874, 2.1686, "Barcelona"),
     "valencia": (39.4699, -0.3763, "Valencia"),
+    "london": (51.5074, -0.1278, "London"),
+    "londra": (51.5074, -0.1278, "Londra"),
+    "new york": (40.7128, -74.0060, "New York"),
+    "paris": (48.8566, 2.3522, "Paris"),
+    "parigi": (48.8566, 2.3522, "Parigi"),
+    "berlin": (52.5200, 13.4050, "Berlin"),
+    "madrid": (40.4168, -3.7038, "Madrid"),
 }
+
+_IT_DETECT_TOKENS = frozenset({
+    "che", "ore", "sono", "meteo", "domani", "oggi", "dopodomani", "apri", "cerca",
+    "ricerca", "vai", "pagina", "riassumi", "leggi", "scheda", "concetti", "ciao",
+    "grazie", "come", "per", "con", "nella", "sul", "sulla", "della", "delle",
+    "fammi", "dimmi", "crea", "nuovo", "chiudi", "fermati", "basta", "silenzio",
+    "chi", "sei", "cosa", "puoi", "fare", "fai", "parlami", "spiega", "italiano",
+})
+
+_EN_DETECT_TOKENS = frozenset({
+    "the", "what", "when", "where", "who", "how", "why", "which", "weather",
+    "forecast", "tomorrow", "today", "open", "search", "find", "look", "browser",
+    "page", "tab", "summarize", "summary", "read", "explain", "concepts", "hello",
+    "hey", "please", "thank", "thanks", "create", "new", "close", "stop", "quiet",
+    "cancel", "wait", "time", "date", "about", "with", "for", "from", "into",
+    "your", "you", "are", "can", "english", "switch", "language",
+})
+
+
+def detect_language(text: str, default: str = "it") -> str:
+    """Detects whether an utterance is predominantly English ('en') or Italian ('it')."""
+    raw = (text or "").strip()
+    if not raw:
+        return default
+    if any(ch in raw.lower() for ch in ("à", "è", "é", "ì", "ò", "ù")):
+        return "it"
+    words = re.findall(r"[a-zA-Z]+", raw.lower())
+    if not words:
+        return default
+    it_score = sum(2 if w in _IT_DETECT_TOKENS else 0 for w in words)
+    en_score = sum(2 if w in _EN_DETECT_TOKENS else 0 for w in words)
+    # Lightweight inflection bonus for common English phrasing
+    if re.search(r"\b(what's|what is|open the|search for|go to|read the|summarize the|hey cortical|create a task)\b", raw.lower()):
+        en_score += 3
+    if re.search(r"\b(che ore|apri il|fai una|vai su|vai in|leggi la|riassumi i|ehi cortical|crea un task)\b", raw.lower()):
+        it_score += 3
+    if en_score > it_score:
+        return "en"
+    if it_score > en_score:
+        return "it"
+    return default
 
 
 def open_url_in_chrome(url: str, background: bool = True) -> bool:
@@ -142,42 +219,56 @@ def open_url_in_chrome(url: str, background: bool = True) -> bool:
 
 
 def extract_weather_intent(text: str) -> Optional[dict[str, Any]]:
-    """Detects if a prompt asks for weather and extracts (city, day_offset, day_label)."""
+    """Detects IT/EN weather prompts and extracts (city, day_offset, day_label, lang)."""
     norm = text.lower().strip()
-    if not any(w in norm for w in ("meteo", "che tempo fa", "previsioni", "temperatura", "pioverà", "piove")):
+    weather_kw = (
+        "meteo",
+        "che tempo fa",
+        "previsioni",
+        "temperatura",
+        "pioverà",
+        "piove",
+        "weather",
+        "forecast",
+        "temperature",
+        "will it rain",
+    )
+    if not any(w in norm for w in weather_kw):
         return None
 
+    lang = detect_language(text)
     day_offset = 0
-    day_label = "oggi"
-    if "dopodomani" in norm:
+    day_label = "today" if lang == "en" else "oggi"
+    if "dopodomani" in norm or "day after tomorrow" in norm:
         day_offset = 2
-        day_label = "dopodomani"
-    elif "domani" in norm:
+        day_label = "the day after tomorrow" if lang == "en" else "dopodomani"
+    elif "domani" in norm or "tomorrow" in norm:
         day_offset = 1
-        day_label = "domani"
+        day_label = "tomorrow" if lang == "en" else "domani"
 
-    # Extract city after 'a ', 'in ', 'per ', 'di ' or match known cities
-    city = "Roma"
+    city = "Rome" if lang == "en" else "Roma"
     for known_key, (_, _, canonical) in CITY_DEFAULT_COORDS.items():
         if re.search(rf"\b{re.escape(known_key)}\b", norm):
             city = canonical
             break
     else:
         m = re.search(
-            r"\b(?:meteo|tempo|previsioni)\s+(?:a|in|di|per)\s+([a-zA-ZàèéìòùÀÈÉÌÒÙ]+)",
+            r"\b(?:meteo|tempo|previsioni|weather|forecast)\s+(?:a|in|di|per|for|at)\s+([a-zA-ZàèéìòùÀÈÉÌÒÙ]+(?:\s+[a-zA-Z]+)?)",
             norm,
         )
         if m:
             candidate = m.group(1).strip()
-            if candidate not in {"oggi", "domani", "dopodomani", "adesso", "ora"}:
-                city = candidate.capitalize()
+            skip_words = {"oggi", "domani", "dopodomani", "adesso", "ora", "today", "tomorrow", "now"}
+            if candidate not in skip_words:
+                city = " ".join(part.capitalize() for part in candidate.split())
 
-    open_browser = any(w in norm for w in ("chrome", "browser", "apri", "cerca", "procedi"))
+    open_browser = any(w in norm for w in ("chrome", "browser", "apri", "cerca", "procedi", "open", "search"))
     return {
         "city": city,
         "day_offset": day_offset,
         "day_label": day_label,
         "open_browser": open_browser,
+        "lang": lang,
     }
 
 
@@ -186,18 +277,21 @@ def fetch_weather_forecast(
     day_offset: int = 1,
     open_chrome: bool = False,
     open_browser: bool = False,
+    lang: str = "auto",
 ) -> dict[str, Any]:
-    """Fetches real weather forecast from Open-Meteo API and optionally opens Chrome."""
+    """Fetches real weather forecast from Open-Meteo API in IT or EN and optionally opens Chrome."""
+    eff_lang = "en" if lang == "en" else "it"
     should_open = open_chrome or open_browser
     city_key = city.lower().strip()
-    lat, lon, display_city = CITY_DEFAULT_COORDS.get(city_key, (41.8919, 12.5113, city.capitalize()))
+    default_name = "Rome" if eff_lang == "en" and city_key in ("roma", "rome", "") else city.capitalize()
+    lat, lon, display_city = CITY_DEFAULT_COORDS.get(city_key, (41.8919, 12.5113, default_name))
 
     if city_key not in CITY_DEFAULT_COORDS:
         try:
             geo_url = (
                 "https://geocoding-api.open-meteo.com/v1/search?name="
                 + urllib.parse.quote(city)
-                + "&count=1&language=it&format=json"
+                + f"&count=1&language={eff_lang}&format=json"
             )
             with urllib.request.urlopen(geo_url, timeout=3.5) as r:  # noqa: S310
                 gdata = json.loads(r.read().decode("utf-8"))
@@ -210,9 +304,14 @@ def fetch_weather_forecast(
             pass
 
     target_date = (datetime.date.today() + datetime.timedelta(days=day_offset)).isoformat()
-    day_label = {0: "oggi", 1: "domani", 2: "dopodomani"}.get(day_offset, target_date)
+    day_labels = {0: "today", 1: "tomorrow", 2: "day after tomorrow"} if eff_lang == "en" else {0: "oggi", 1: "domani", 2: "dopodomani"}
+    day_label = day_labels.get(day_offset, target_date)
 
-    chrome_url = f"https://www.ilmeteo.it/meteo/{urllib.parse.quote(display_city)}"
+    chrome_url = (
+        f"https://www.weather.com/weather/today/l/{lat},{lon}"
+        if eff_lang == "en"
+        else f"https://www.ilmeteo.it/meteo/{urllib.parse.quote(display_city)}"
+    )
     chrome_opened = open_url_in_chrome(chrome_url, background=True) if should_open else False
 
     api_url = (
@@ -230,18 +329,27 @@ def fetch_weather_forecast(
             t_min = round(float(daily["temperature_2m_min"][idx]), 1)
             precip = int(daily.get("precipitation_probability_max", [0])[idx] or 0)
             wind = round(float(daily.get("windspeed_10m_max", [0])[idx] or 0), 1)
-            cond = WMO_WEATHER_IT.get(code, "variabile")
+            cond_it = WMO_WEATHER_IT.get(code, "variabile")
+            cond_en = WMO_WEATHER_EN.get(code, "variable")
+            cond = cond_en if eff_lang == "en" else cond_it
 
             summary_it = (
-                f"Previsioni meteo per {display_city} ({day_label}, {daily['time'][idx]}): cielo {cond}, "
+                f"Previsioni meteo per {display_city} ({day_label}, {daily['time'][idx]}): cielo {cond_it}, "
                 f"temperature comprese tra {t_min}°C e {t_max}°C, "
                 f"probabilità di pioggia del {precip}% e vento fino a {wind} km/h."
             )
+            summary_en = (
+                f"Weather forecast for {display_city} ({day_label}, {daily['time'][idx]}): {cond_en}, "
+                f"temperatures between {t_min}°C and {t_max}°C, "
+                f"rain probability {precip}% and wind up to {wind} km/h."
+            )
             if chrome_opened:
                 summary_it += f" Ho aperto anche la scheda meteo di {display_city} su Chrome."
+                summary_en += f" I also opened the weather tab for {display_city} in Chrome."
 
             return {
                 "ok": True,
+                "lang": eff_lang,
                 "city": display_city,
                 "date": daily["time"][idx],
                 "day_label": day_label,
@@ -252,21 +360,30 @@ def fetch_weather_forecast(
                 "wind_kmh": wind,
                 "chrome_opened": chrome_opened,
                 "chrome_url": chrome_url,
+                "summary": summary_en if eff_lang == "en" else summary_it,
                 "summary_it": summary_it,
             }
     except Exception as exc:  # noqa: BLE001
+        err_it = (
+            f"Previsioni meteo per {display_city} ({day_label}): aperta scheda Chrome ({chrome_url})."
+            if chrome_opened
+            else f"Previsioni meteo per {display_city} ({day_label}): servizio offline ({exc})."
+        )
+        err_en = (
+            f"Weather forecast for {display_city} ({day_label}): opened Chrome tab ({chrome_url})."
+            if chrome_opened
+            else f"Weather forecast for {display_city} ({day_label}): service offline ({exc})."
+        )
         return {
             "ok": False,
+            "lang": eff_lang,
             "city": display_city,
             "date": target_date,
             "day_label": day_label,
             "chrome_opened": chrome_opened,
             "chrome_url": chrome_url,
-            "summary_it": (
-                f"Previsioni meteo per {display_city} ({day_label}): aperta scheda Chrome ({chrome_url})."
-                if chrome_opened
-                else f"Previsioni meteo per {display_city} ({day_label}): servizio offline ({exc})."
-            ),
+            "summary": err_en if eff_lang == "en" else err_it,
+            "summary_it": err_it,
         }
 
 
@@ -328,27 +445,37 @@ def _clean_web_text(raw: str) -> str:
 
 
 def extract_page_read_intent(text: str) -> Optional[dict[str, Any]]:
-    """Detects follow-up requests to read or summarize concepts from the currently open browser page."""
+    """Detects IT/EN follow-up requests to read or summarize concepts from the currently open browser page."""
     norm = re.sub(r"\s+", " ", text.lower()).strip()
-    page_refs = ("pagina", "scheda", "tab", "articolo", "sito", "wikipedia", "browser", "chrome", "aperta", "aperto")
+    lang = detect_language(text)
+    page_refs = (
+        "pagina", "scheda", "tab", "articolo", "sito", "wikipedia", "browser", "chrome", "aperta", "aperto",
+        "page", "article", "site", "website", "open page", "current page",
+    )
     has_page_ref = any(r in norm for r in page_refs)
     if not has_page_ref:
         return None
 
-    summarize_words = ("riassumi", "riassumere", "riassunto", "sintetizza", "concetti", "punti chiave", "spiega", "spiegami", "cosa dice", "di cosa parla")
+    summarize_words = (
+        "riassumi", "riassumere", "riassunto", "sintetizza", "concetti", "punti chiave",
+        "spiega", "spiegami", "cosa dice", "di cosa parla",
+        "summarize", "summarise", "summary", "concepts", "key points", "explain",
+        "what does it say", "what is it about",
+    )
     if any(w in norm for w in summarize_words):
         return {"mode": "summarize"}
 
-    read_words = ("leggi", "leggimi", "leggere", "recita", "leggi ad alta voce")
+    read_words = ("leggi", "leggimi", "leggere", "recita", "leggi ad alta voce", "read", "read aloud", "read me")
     if any(w in norm for w in read_words):
         return {"mode": "read"}
     return None
 
 
 def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
-    """Extracts visual Chrome navigation, site target, and form-search query from natural Italian speech."""
+    """Extracts visual Chrome navigation, site target, and form-search query from IT/EN speech."""
     raw = text.strip()
     norm = re.sub(r"\s+", " ", raw.lower()).strip()
+    lang = detect_language(text)
 
     # Do not intercept follow-up read/summarize commands on an already-open page
     if extract_page_read_intent(norm) is not None:
@@ -372,6 +499,21 @@ def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
             "apri il sito",
             "cerca su ",
             "cerca in ",
+            "open the browser",
+            "open browser",
+            "open chrome",
+            "open google chrome",
+            "in browser",
+            "on chrome",
+            "in chrome",
+            "do a search",
+            "search for ",
+            "search on ",
+            "search in ",
+            "look up ",
+            "go to ",
+            "open the site",
+            "open website",
         )
     )
     known_sites = list(SITE_SEARCH_CONFIGS.keys())
@@ -389,31 +531,29 @@ def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
     if not has_browser_verb and not mentioned_site and not explicit_url:
         return None
 
-    # Extract search query after trailing 'cerca ...' / 'ricerca per ...' / 'cercami ...'
     query: Optional[str] = None
     m_search = re.search(
-        r"\b(?:e\s+|poi\s+)?(?:cercami|cerca(?:\s+su\s+[a-z0-9._-]+|\s+in\s+[a-z0-9._-]+|\s+sul\s+browser|\s+su\s+chrome)?|trova|cercare)\s+(.+)$",
+        r"\b(?:e\s+|poi\s+|and\s+|then\s+)?(?:cercami|cerca(?:\s+su\s+[a-z0-9._-]+|\s+in\s+[a-z0-9._-]+|\s+sul\s+browser|\s+su\s+chrome)?|trova|cercare|search\s+for|search(?:\s+on\s+[a-z0-9._-]+|\s+in\s+[a-z0-9._-]+)?|look\s+up|find)\s+(.+)$",
         raw,
         flags=re.IGNORECASE,
     )
     if m_search:
         candidate = m_search.group(1).strip(" .,;:!?\"'")
         site_alts = "|".join(known_sites)
-        candidate = re.sub(rf"^(?:su|in|per)\s+(?:{site_alts}|browser|chrome)\s+", "", candidate, flags=re.IGNORECASE).strip()
-        candidate = re.sub(rf"\s+(?:su|in|con|nel)\s+(?:il\s+)?(?:{site_alts}|browser|chrome|google\s+chrome)$", "", candidate, flags=re.IGNORECASE).strip()
-        # Avoid capturing filler phrases if "cerca" came early ("fai una ricerca per me...")
-        if candidate and not re.match(r"^(?:per me|su|in)\b", candidate, flags=re.IGNORECASE):
+        candidate = re.sub(rf"^(?:su|in|per|on|for)\s+(?:{site_alts}|browser|chrome)\s+", "", candidate, flags=re.IGNORECASE).strip()
+        candidate = re.sub(rf"\s+(?:su|in|con|nel|on)\s+(?:il\s+|the\s+)?(?:{site_alts}|browser|chrome|google\s+chrome)$", "", candidate, flags=re.IGNORECASE).strip()
+        if candidate and not re.match(r"^(?:per me|for me|su|in|on)\b", candidate, flags=re.IGNORECASE):
             query = candidate
 
     if not query:
         m_ricerca = re.search(
-            r"\bfai\s+una\s+ricerca(?:\s+per\s+me)?(?:\s+(?:su|in)\s+(?:[a-z0-9._-]+))?\s*(?:,|su|di|per)?\s+(.+)$",
+            r"\b(?:fai\s+una\s+ricerca(?:\s+per\s+me)?|do\s+a\s+search(?:\s+for\s+me)?)(?:\s+(?:su|in|on)\s+(?:[a-z0-9._-]+))?\s*(?:,|su|di|per|for|about)?\s+(.+)$",
             raw,
             flags=re.IGNORECASE,
         )
         if m_ricerca:
             tail = m_ricerca.group(1).strip(" .,;:!?\"'")
-            if not any(p in tail.lower() for p in ("apri il browser", "apri chrome", "vai in ", "vai su ")):
+            if not any(p in tail.lower() for p in ("apri il browser", "apri chrome", "vai in ", "vai su ", "open chrome", "open the browser", "go to ")):
                 query = tail
 
     site = mentioned_site or ("google" if query and not explicit_url else None)
@@ -426,6 +566,7 @@ def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
         "url": explicit_url,
         "query": query,
         "focus": True,
+        "lang": lang,
     }
 
 
@@ -488,10 +629,15 @@ def visual_chrome_navigate_and_search(
     url: Optional[str] = None,
     focus: bool = True,
     runner: Optional[Callable[[str, float], tuple[bool, str]]] = None,
+    lang: str = "auto",
 ) -> dict[str, Any]:
     """Opens Google Chrome in focus, navigates visually, fills the search form, and submits the search."""
     global _LAST_OPENED_BROWSER_PAGE
-    cfg = SITE_SEARCH_CONFIGS.get((site or "").lower(), {})
+    eff_lang = "en" if lang == "en" else "it"
+    cfg = dict(SITE_SEARCH_CONFIGS.get((site or "").lower(), {}))
+    if eff_lang == "en" and (site or "").lower() == "wikipedia" and not url:
+        cfg["base_url"] = "https://en.wikipedia.org"
+        cfg["search_url"] = "https://en.wikipedia.org/w/index.php?search={query}"
     target_url = url or cfg.get("base_url") or "https://www.google.com"
     exec_apple = runner or _default_osascript_runner
     sys_name = platform.system() if runner is None else "Darwin"
@@ -612,20 +758,29 @@ def visual_chrome_navigate_and_search(
         "snippet": snippet,
     }
 
-    site_disp = site.capitalize() if site else "il browser"
+    site_disp_it = site.capitalize() if site else "il browser"
+    site_disp_en = site.capitalize() if site else "the browser"
     if query:
         summary_it = (
-            f"Ho portato Chrome in primo piano, aperto {site_disp}, compilato il campo di ricerca con "
+            f"Ho portato Chrome in primo piano, aperto {site_disp_it}, compilato il campo di ricerca con "
             f"'{query}' e inviato la ricerca. Pagina aperta: {page_title}."
+        )
+        summary_en = (
+            f"I brought Chrome to the front, opened {site_disp_en}, filled the search field with "
+            f"'{query}', and submitted the search. Opened page: {page_title}."
         )
         if snippet:
             summary_it += f" Anteprima: {snippet[:180]}"
+            summary_en += f" Preview: {snippet[:180]}"
         summary_it += " Se vuoi, chiedimi di leggere o riassumere i concetti della pagina aperta."
+        summary_en += " If you want, ask me to read or summarize the key concepts of the open page."
     else:
         summary_it = f"Ho aperto {final_url} su Google Chrome in primo piano."
+        summary_en = f"I opened {final_url} in Google Chrome in the foreground."
 
     return {
         "ok": True,
+        "lang": eff_lang,
         "skill": "visual-chrome-navigation",
         "method": method,
         "site": site,
@@ -635,6 +790,7 @@ def visual_chrome_navigate_and_search(
         "final_url": final_url,
         "page_title": page_title,
         "snippet": snippet,
+        "summary": summary_en if eff_lang == "en" else summary_it,
         "summary_it": summary_it,
     }
 
@@ -717,37 +873,50 @@ def format_page_reading_response(
     page: dict[str, Any],
     mode: str = "summarize",
     summarize_llm_fn: Optional[Callable[[str], str]] = None,
+    lang: str = "it",
 ) -> str:
-    """Formats either a concept summary or clean spoken reading of the active Chrome page in Italian."""
-    title = str(page.get("title") or "Pagina web")
+    """Formats either a concept summary or clean spoken reading of the active Chrome page in IT or EN."""
+    eff_lang = "en" if lang == "en" else "it"
+    title = str(page.get("title") or ("Web page" if eff_lang == "en" else "Pagina web"))
     text = str(page.get("text") or "").strip()
     headings = [str(h) for h in (page.get("headings") or []) if h]
     if not text:
+        if eff_lang == "en":
+            return f"I cannot read the text content of the open tab ({page.get('url') or 'Chrome'}). Make sure Allow JavaScript from Apple Events is enabled in Chrome or that the page finished loading."
         return f"Non riesco a leggere il contenuto testuale della scheda aperta ({page.get('url') or 'Chrome'}). Assicurati che in Chrome sia abilitato JavaScript da eventi Apple o che la pagina sia caricata."
 
     if mode == "read":
-        # Clean lead text up to ~850 chars breaking on sentence boundary
         excerpt = text[:850]
         last_dot = excerpt.rfind(".")
         if last_dot > 250:
             excerpt = excerpt[: last_dot + 1]
-        return f"Lettura della pagina {title}. {excerpt}"
+        return (f"Reading page {title}. {excerpt}" if eff_lang == "en" else f"Lettura della pagina {title}. {excerpt}")
 
-    # mode == 'summarize'
     if summarize_llm_fn is not None:
-        llm_prompt = (
-            f"Sei Cortical. Riassumi in italiano chiaro, scorrevole e naturale i concetti principali di questa pagina web aperta su Chrome (4-5 frasi complete da ascoltare a voce).\n"
-            f"Titolo: {title}\n"
-            f"Sezioni: {', '.join(headings[:6])}\n\n"
-            f"Testo estratto:\n{text[:3200]}"
-        )
+        if eff_lang == "en":
+            llm_prompt = (
+                "You are Cortical. Summarize the main concepts of this open Chrome web page in clear, natural spoken English (4-5 complete sentences).\n"
+                f"Title: {title}\n"
+                f"Sections: {', '.join(headings[:6])}\n\n"
+                f"Extracted text:\n{text[:3200]}"
+            )
+        else:
+            llm_prompt = (
+                "Sei Cortical. Riassumi in italiano chiaro, scorrevole e naturale i concetti principali di questa pagina web aperta su Chrome (4-5 frasi complete da ascoltare a voce).\n"
+                f"Titolo: {title}\n"
+                f"Sezioni: {', '.join(headings[:6])}\n\n"
+                f"Testo estratto:\n{text[:3200]}"
+            )
         llm_out = summarize_llm_fn(llm_prompt)
         if llm_out and "ho ricevuto la richiesta" not in llm_out.lower():
             return llm_out
 
-    # Deterministic clean extractive Italian concept summary fallback
     paragraphs = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 40]
     lead = paragraphs[0][:380] if paragraphs else text[:380]
+    if eff_lang == "en":
+        sec_note = f" Key sections cover: {', '.join(headings[:5])}." if headings else ""
+        extra = f" Additionally: {paragraphs[1][:260]}" if len(paragraphs) > 1 else ""
+        return f"Key concepts from {title}: {lead}.{sec_note}{extra}".replace("..", ".")
     sec_note = f" Le sezioni principali trattano: {', '.join(headings[:5])}." if headings else ""
     extra = f" Inoltre: {paragraphs[1][:260]}" if len(paragraphs) > 1 else ""
     return f"Concetti chiave dalla pagina {title}: {lead}.{sec_note}{extra}".replace("..", ".")

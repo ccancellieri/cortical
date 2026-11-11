@@ -47,6 +47,17 @@ EPHEMERAL_PATTERNS = [
     r"\bbasta\b",
     r"\bstop\b",
     r"\bfermati\b",
+    r"\bwhat\s+time\b",
+    r"\bwhat\s+day\b",
+    r"\bweather\b",
+    r"\bforecast\b",
+    r"\btemperature\b",
+    r"\bsearch\s+for\b",
+    r"\bopen\s+(?:the\s+)?browser\b",
+    r"\bopen\s+(?:google\s+)?chrome\b",
+    r"\bgo\s+to\s+(?:wikipedia|google|youtube|duckduckgo)\b",
+    r"\bhello\b",
+    r"\bthanks?\b",
 ]
 
 DURABLE_MEMORY_TRIGGERS = (
@@ -59,6 +70,14 @@ DURABLE_MEMORY_TRIGGERS = (
     "preferisco",
     "usa sempre",
     "non usare mai",
+    "remember that",
+    "save to memory",
+    "important note",
+    "architectural decision",
+    "project standard",
+    "i prefer",
+    "always use",
+    "never use",
 )
 
 EXPLICIT_TASK_TRIGGERS = (
@@ -68,6 +87,12 @@ EXPLICIT_TASK_TRIGGERS = (
     "avvia un task",
     "apri un task",
     "orchestra un sottoagente",
+    "create a task",
+    "create task",
+    "new task",
+    "start a task",
+    "open a task",
+    "orchestrate a subagent",
     "delega a un agente",
 )
 

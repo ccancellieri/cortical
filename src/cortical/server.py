@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .grounding import (
+    detect_language,
     extract_browser_intent,
     extract_page_read_intent,
     extract_weather_intent,
@@ -42,7 +43,7 @@ from .hardware.profiler import HardwareProfiler
 from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
 from .skills_hub import CorticalSkillHub
-from .voice.engine import CorticalVoiceEngine, is_self_echo
+from .voice.engine import CorticalVoiceEngine, is_human_discourse_or_question, is_self_echo
 from .wiki.db import AccessContext, CorticalWikiDB, DepthTier
 from .wiki.fact_check import CitationVerifier
 from .wiki.mcp_server import CorticalWikiMCPServer
@@ -52,6 +53,9 @@ _ACTIVE_TTS_PROC: Optional[subprocess.Popen[bytes]] = None
 _LAST_SPOKEN_TEXT: str = ""
 _LAST_SPOKEN_AT: float = 0.0
 _TTS_DUCKED: bool = False
+
+_TTS_AUDIO_CACHE: dict[str, tuple[bytes, str]] = {}
+_TTS_CACHE_MAX = 16
 
 NEURAL_ITALIAN_VOICES = {
     "IsabellaNeural": "it-IT-IsabellaNeural",
@@ -64,15 +68,43 @@ NEURAL_ITALIAN_VOICES = {
     "it-IT-DiegoNeural": "it-IT-DiegoNeural",
 }
 
+NEURAL_ENGLISH_VOICES = {
+    "JennyNeural": "en-US-JennyNeural",
+    "GuyNeural": "en-US-GuyNeural",
+    "AriaNeural": "en-US-AriaNeural",
+    "SoniaNeural": "en-GB-SoniaNeural",
+    "en-US-JennyNeural": "en-US-JennyNeural",
+    "en-US-GuyNeural": "en-US-GuyNeural",
+    "en-US-AriaNeural": "en-US-AriaNeural",
+    "en-GB-SoniaNeural": "en-GB-SoniaNeural",
+}
 
-def shape_expressive_italian_text(text: str) -> str:
-    """Naturalizes technical symbols, numbers, and punctuation for expressive Italian speech, resolving any escaped unicode codes."""
+NEURAL_VOICES = {**NEURAL_ITALIAN_VOICES, **NEURAL_ENGLISH_VOICES}
+
+
+def resolve_neural_voice(voice: str, lang: str = "it") -> tuple[Optional[str], str]:
+    """Resolves requested voice ID or 'auto' into (edge_tts_voice, resolved_lang)."""
+    req = (voice or "IsabellaNeural").strip()
+    if req == "auto":
+        return ("en-US-JennyNeural", "en") if lang == "en" else ("it-IT-IsabellaNeural", "it")
+    if req in NEURAL_ENGLISH_VOICES:
+        return (NEURAL_ENGLISH_VOICES[req], "en")
+    if req in NEURAL_ITALIAN_VOICES:
+        return (NEURAL_ITALIAN_VOICES[req], "it")
+    # Match language to selected offline/fallback voice if text language switched dynamically
+    if lang == "en" and req in {"IsabellaNeural", "ElsaNeural", "Federica"}:
+        return ("en-US-JennyNeural", "en")
+    if req in {"Samantha", "Daniel"}:
+        return (None, "en")
+    return (None, "en" if lang == "en" else "it")
+
+
+def shape_expressive_text(text: str, lang: str = "auto") -> str:
+    """Naturalizes symbols, escaped unicode codes, numbers, and abbreviations for expressive IT or EN speech."""
     import re as _re
 
     out = text.strip()
 
-    # 0. Decode any literal unicode or ascii escape representations (\u00e0 -> à, \u00e8 -> è, etc.)
-    # This prevents TTS from literally spelling out "barra inversa 00 e zero..."
     def _repl_u(m: _re.Match[str]) -> str:
         try:
             return chr(int(m.group(1), 16))
@@ -81,27 +113,41 @@ def shape_expressive_italian_text(text: str) -> str:
 
     out = _re.sub(r"\\u([0-9a-fA-F]{4})", _repl_u, out)
     out = _re.sub(r"\\x([0-9a-fA-F]{2})", _repl_u, out)
-    # Common accent octal/hex fallbacks
     out = out.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"')
-    out = _re.sub(r"\\[0-9]{2,3}", " ", out)  # remove stray octal escapes
+    out = _re.sub(r"\\[0-9]{2,3}", " ", out)
 
-    # Strip markdown syntax
+    eff_lang = detect_language(out) if lang == "auto" else lang
     out = _re.sub(r"[`*_#]+", "", out)
     out = _re.sub(r"\(\s*", ", ", out)
     out = _re.sub(r"\s*\)", ", ", out)
-    out = _re.sub(r"\bmin\s+(\d+)", r"minima \1", out, flags=_re.IGNORECASE)
-    out = _re.sub(r"\bmax\s+(\d+)", r"massima \1", out, flags=_re.IGNORECASE)
-    out = _re.sub(r"(\d+)[.,](\d+)\s*°C", r"\1 virgola \2 gradi", out)
-    out = _re.sub(r"(\d+)\s*°C", r"\1 gradi", out)
-    out = _re.sub(r"(\d+)[.,](\d+)\s*km/h", r"\1 chilometri orari", out)
-    out = _re.sub(r"(\d+)\s*km/h", r"\1 chilometri orari", out)
-    out = _re.sub(r"(\d+)\s*%", r"\1 per cento", out)
-    out = _re.sub(r"\bMCP\b", "emme ci pì", out)
-    out = _re.sub(r"\bpi\b", "pì", out)
+
+    if eff_lang == "en":
+        out = _re.sub(r"\bmin\s+(\d+)", r"minimum \1", out, flags=_re.IGNORECASE)
+        out = _re.sub(r"\bmax\s+(\d+)", r"maximum \1", out, flags=_re.IGNORECASE)
+        out = _re.sub(r"(\d+)[.,](\d+)\s*°C", r"\1 point \2 degrees Celsius", out)
+        out = _re.sub(r"(\d+)\s*°C", r"\1 degrees Celsius", out)
+        out = _re.sub(r"(\d+(?:[.,]\d+)?)\s*km/h", r"\1 kilometers per hour", out)
+        out = _re.sub(r"(\d+)\s*%", r"\1 percent", out)
+        out = _re.sub(r"\bMCP\b", "M C P", out)
+    else:
+        out = _re.sub(r"\bmin\s+(\d+)", r"minima \1", out, flags=_re.IGNORECASE)
+        out = _re.sub(r"\bmax\s+(\d+)", r"massima \1", out, flags=_re.IGNORECASE)
+        out = _re.sub(r"(\d+)[.,](\d+)\s*°C", r"\1 virgola \2 gradi", out)
+        out = _re.sub(r"(\d+)\s*°C", r"\1 gradi", out)
+        out = _re.sub(r"(\d+)[.,](\d+)\s*km/h", r"\1 chilometri orari", out)
+        out = _re.sub(r"(\d+)\s*km/h", r"\1 chilometri orari", out)
+        out = _re.sub(r"(\d+)\s*%", r"\1 per cento", out)
+        out = _re.sub(r"\bMCP\b", "emme ci pì", out)
+        out = _re.sub(r"\bpi\b", "pì", out)
     out = _re.sub(r",\s*,+", ", ", out)
     out = _re.sub(r",\s*\.", ".", out)
     out = _re.sub(r"\s+", " ", out).strip()
     return out
+
+
+def shape_expressive_italian_text(text: str) -> str:
+    """Naturalizes technical symbols, numbers, and punctuation for expressive Italian speech."""
+    return shape_expressive_text(text, lang="it")
 
 
 _LAST_TTS_ENDED_AT: float = 0.0
@@ -161,33 +207,103 @@ def duck_native_tts(force_stop: bool = False) -> dict[str, Any]:
     return {"ducked": True, "was_speaking": was_speaking}
 
 
+def synthesize_tts_audio_bytes(
+    text: str,
+    voice: str = "IsabellaNeural",
+    lang: str = "auto",
+) -> tuple[Optional[bytes], str, str]:
+    """Synthesizes expressive IT/EN speech bytes (MP3 via edge-tts or macOS say AIFF fallback) for Web Audio ducking."""
+    global _LAST_SPOKEN_TEXT, _LAST_SPOKEN_AT, _TTS_DUCKED
+    if not text or not text.strip():
+        return (None, "audio/mpeg", voice)
+    eff_lang = detect_language(text) if lang == "auto" else lang
+    spoken_natural = shape_expressive_text(text, lang=eff_lang)
+    neural_voice, resolved_lang = resolve_neural_voice(voice, lang=eff_lang)
+    _LAST_SPOKEN_TEXT = spoken_natural
+    _LAST_SPOKEN_AT = time.monotonic()
+    _TTS_DUCKED = False
+
+    edge_bin = (
+        shutil.which("edge-tts")
+        or str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "edge-tts")
+    )
+    if neural_voice and Path(edge_bin).exists():
+        tmp_mp3 = Path(f"/tmp/cortical_web_tts_{os.getpid()}_{int(time.time() * 1000)}.mp3")
+        try:
+            proc = subprocess.run(
+                [edge_bin, "--voice", neural_voice, "--text", spoken_natural, "--write-media", str(tmp_mp3)],
+                capture_output=True,
+                timeout=12.0,
+                check=False,
+            )
+            if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 128:
+                return (tmp_mp3.read_bytes(), "audio/mpeg", neural_voice)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            tmp_mp3.unlink(missing_ok=True)
+
+    # Offline fallback on macOS returning browser-playable MP4/AAC or WAV via say + afconvert
+    if platform.system() == "Darwin" and shutil.which("say") and shutil.which("afconvert"):
+        offline_voice = "Samantha" if resolved_lang == "en" else (voice if voice in {"Alice", "Federica", "Luca"} else "Alice")
+        tmp_aiff = Path(f"/tmp/cortical_web_say_{os.getpid()}_{int(time.time() * 1000)}.aiff")
+        tmp_wav = tmp_aiff.with_suffix(".wav")
+        try:
+            subprocess.run(["say", "-v", offline_voice, "-o", str(tmp_aiff), spoken_natural], check=False, timeout=8.0)
+            if tmp_aiff.exists():
+                subprocess.run(
+                    ["afconvert", "-f", "WAVE", "-d", "LEI16@22050", str(tmp_aiff), str(tmp_wav)],
+                    check=False,
+                    timeout=8.0,
+                )
+                if tmp_wav.exists() and tmp_wav.stat().st_size > 128:
+                    return (tmp_wav.read_bytes(), "audio/wav", offline_voice)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            tmp_aiff.unlink(missing_ok=True)
+            tmp_wav.unlink(missing_ok=True)
+    return (None, "audio/mpeg", neural_voice or voice)
+
+
+def cache_tts_audio(audio_bytes: bytes, mime_type: str) -> str:
+    """Stores short-lived TTS audio bytes in a bounded in-memory ring cache and returns its ID."""
+    audio_id = f"tts_{int(time.time() * 1000)}_{len(_TTS_AUDIO_CACHE)}"
+    _TTS_AUDIO_CACHE[audio_id] = (audio_bytes, mime_type)
+    while len(_TTS_AUDIO_CACHE) > _TTS_CACHE_MAX:
+        oldest_key = next(iter(_TTS_AUDIO_CACHE))
+        _TTS_AUDIO_CACHE.pop(oldest_key, None)
+    return audio_id
+
+
 def speak_native_tts(
     text: str,
     voice: str = "IsabellaNeural",
     rate: int = 192,
     volume: float = 1.0,
+    lang: str = "auto",
 ) -> bool:
-    """Speaks Italian text using Expressive Neural TTS (`edge-tts` Isabella/Giuseppe) or Piper/Prosodic say fallback."""
+    """Speaks IT or EN text using Expressive Neural TTS (`edge-tts`) or Piper/Prosodic `say` fallback."""
     global _ACTIVE_TTS_PROC, _LAST_SPOKEN_TEXT, _LAST_SPOKEN_AT, _TTS_DUCKED
     if not text or not text.strip():
         return False
     stop_native_tts()
-    spoken_natural = shape_expressive_italian_text(text)
+    eff_lang = detect_language(text) if lang == "auto" else lang
+    spoken_natural = shape_expressive_text(text, lang=eff_lang)
+    neural_voice, resolved_lang = resolve_neural_voice(voice, lang=eff_lang)
     _LAST_SPOKEN_TEXT = spoken_natural
     _LAST_SPOKEN_AT = time.monotonic()
     _TTS_DUCKED = False
     vol_clamp = max(0.15, min(1.0, float(volume)))
+    fallback_mac_voice = "Samantha" if resolved_lang == "en" else "Alice"
 
     try:
         sys_name = platform.system()
-        # 1. Expressive Neural Italian TTS via edge-tts (`it-IT-IsabellaNeural`, `it-IT-GiuseppeMultilingualNeural`, etc.)
         edge_bin = (
             shutil.which("edge-tts")
             or str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "edge-tts")
         )
-        neural_voice = NEURAL_ITALIAN_VOICES.get(voice)
         if neural_voice and Path(edge_bin).exists():
-            # Unique atomic MP3 path per utterance prevents file overwrite/stutter
             mp3_path = f"/tmp/cortical_tts_{os.getpid()}_{int(time.time() * 1000)}.mp3"
             quoted_text = shlex.quote(spoken_natural)
             if sys_name == "Darwin" and shutil.which("afplay"):
@@ -195,7 +311,7 @@ def speak_native_tts(
                     f'"{edge_bin}" --voice "{neural_voice}" '
                     f'--text {quoted_text} --write-media "{mp3_path}" >/dev/null 2>&1 '
                     f'&& (afplay -v {vol_clamp:.2f} "{mp3_path}" >/dev/null 2>&1; rm -f "{mp3_path}") '
-                    f'|| (rm -f "{mp3_path}"; say -v Alice -r {rate} {quoted_text})'
+                    f'|| (rm -f "{mp3_path}"; say -v {fallback_mac_voice} -r {rate} {quoted_text})'
                 )
                 with _ACTIVE_TTS_LOCK:
                     _ACTIVE_TTS_PROC = subprocess.Popen(
@@ -221,8 +337,8 @@ def speak_native_tts(
 
         # 2. Offline Local Fallbacks (macOS Prosody-Modulated say / Linux Neural Piper)
         if sys_name == "Darwin" and shutil.which("say"):
-            allowed_voices = {"Alice", "Reed", "Shelley", "Eddy", "Sandy", "Flo", "Federica", "Luca"}
-            chosen_voice = voice if voice in allowed_voices else "Alice"
+            allowed_voices = {"Alice", "Reed", "Shelley", "Eddy", "Sandy", "Flo", "Federica", "Luca", "Samantha", "Daniel"}
+            chosen_voice = voice if voice in allowed_voices else fallback_mac_voice
             prosodic = spoken_natural.replace(". ", ". [[slnc 120]] ")
             styled_text = f"[[volm {vol_clamp:.2f}]] {prosodic}"
             with _ACTIVE_TTS_LOCK:
@@ -311,62 +427,73 @@ def _query_llm_endpoints(
     return None
 
 
-def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0) -> str:
-    """Queries deterministic grounding first, then available local/LAN OpenAI-compatible servers in Italian."""
+def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0, lang: str = "auto") -> str:
+    """Queries deterministic IT/EN grounding first, then available local/LAN OpenAI-compatible servers."""
     now = datetime.datetime.now()
     norm = prompt.lower().strip()
+    eff_lang = detect_language(prompt) if lang == "auto" else ("en" if lang == "en" else "it")
 
-    # 1. Instant deterministic Italian reflexes (< 2ms)
-    if any(k in norm for k in ("che ore sono", "che ora e", "che ora è", "dimmi l ora", "orario")):
-        return f"Sono le {now.strftime('%H:%M')}."
-    if any(k in norm for k in ("che giorno", "data di oggi", "quanti ne abbiamo")):
+    # 1. Instant deterministic IT/EN reflexes (< 2ms)
+    if any(k in norm for k in ("che ore sono", "che ora e", "che ora è", "dimmi l ora", "orario", "what time is it", "what's the time", "tell me the time")):
+        return f"It's {now.strftime('%H:%M')}." if eff_lang == "en" else f"Sono le {now.strftime('%H:%M')}."
+    if any(k in norm for k in ("che giorno", "data di oggi", "quanti ne abbiamo", "what day is it", "what's the date", "today's date")):
+        if eff_lang == "en":
+            days_en = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+            months_en = ("", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+            return f"Today is {days_en[now.weekday()]}, {months_en[now.month]} {now.day}, {now.year}."
         giorni = ("lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica")
         mesi = (
-            "",
-            "gennaio",
-            "febbraio",
-            "marzo",
-            "aprile",
-            "maggio",
-            "giugno",
-            "luglio",
-            "agosto",
-            "settembre",
-            "ottobre",
-            "novembre",
-            "dicembre",
+            "", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+            "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
         )
         return f"Oggi è {giorni[now.weekday()]} {now.day} {mesi[now.month]} {now.year}."
-    if any(k in norm for k in ("chi sei", "cosa fai", "presentati")):
+    if any(k in norm for k in ("chi sei", "cosa fai", "presentati", "who are you", "what do you do", "introduce yourself")):
+        if eff_lang == "en":
+            return (
+                "I'm Cortical, your bilingual local agentic assistant. "
+                "I use the 3+1 Merkle Wiki for curated memory and orchestrate pi multi-agent tasks only when explicitly requested."
+            )
         return (
-            "Sono Cortical, il tuo assistente agentico locale. "
-            "Uso la Wiki Merkle a 4 livelli per la memoria e coordino gli agenti su pi solo quando richiesto."
+            "Sono Cortical, il tuo assistente agentico bilingue locale. "
+            "Uso la Wiki Merkle a 3+1 livelli per la memoria e coordino gli agenti su pi solo quando richiesto."
         )
-    if any(k in norm for k in ("come stai", "tutto bene", "mi senti")):
-        return "Tutto perfetto! Ti sento forte e chiaro in italiano."
+    if any(k in norm for k in ("come stai", "tutto bene", "mi senti", "how are you", "can you hear me")):
+        return (
+            "Doing great! I hear you loud and clear in English."
+            if eff_lang == "en"
+            else "Tutto perfetto! Ti sento forte e chiaro in italiano."
+        )
 
-    # 2. Deterministic Weather & Browser Grounding (e.g., "procedi cerca il meteo a roma per domani")
+    # 2. Deterministic Weather & Browser Grounding (IT & EN)
     weather_intent = extract_weather_intent(prompt)
     if weather_intent is not None:
         forecast = fetch_weather_forecast(
             city=weather_intent["city"],
             day_offset=weather_intent["day_offset"],
             open_browser=bool(weather_intent.get("open_browser", False)),
+            lang=eff_lang,
         )
-        return str(forecast["summary_it"])
+        return str(forecast.get("summary") or forecast["summary_it"])
 
-    # 3. Active Chrome Tab Reading & Concept Summarization ("leggi la pagina" / "riassumi i concetti della pagina aperta")
+    # 3. Active Chrome Tab Reading & Concept Summarization (IT & EN)
     read_intent = extract_page_read_intent(prompt)
     if read_intent is not None:
         page = read_active_chrome_page()
-        sys_sum = (
-            f"Sei Cortical, assistente vocale italiano creato da Carlo Cancellieri. "
-            f"Ora locale: {now.strftime('%H:%M')}. Riassumi i concetti chiave in italiano chiaro e scorrevole."
-        )
+        if eff_lang == "en":
+            sys_sum = (
+                f"You are Cortical, a bilingual voice assistant created by Carlo Cancellieri. "
+                f"Local time: {now.strftime('%H:%M')}. Summarize key concepts in clear, natural spoken English."
+            )
+        else:
+            sys_sum = (
+                f"Sei Cortical, assistente vocale italiano creato da Carlo Cancellieri. "
+                f"Ora locale: {now.strftime('%H:%M')}. Riassumi i concetti chiave in italiano chiaro e scorrevole."
+            )
         return format_page_reading_response(
             page,
             mode=read_intent["mode"],
             summarize_llm_fn=lambda lp: _query_llm_endpoints(sys_sum, lp, base_url, timeout=timeout) or "",
+            lang=eff_lang,
         )
 
     # 4. Visual Chrome Navigation, Form Filling & Search Submission (in focus!)
@@ -377,19 +504,29 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0) -> 
             query=browser_intent.get("query"),
             url=browser_intent.get("url"),
             focus=bool(browser_intent.get("focus", True)),
+            lang=eff_lang,
         )
-        return str(nav["summary_it"])
+        return str(nav.get("summary") or nav["summary_it"])
 
-    # 5. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN laptop :8080)
-    sys_chat = (
-        f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
-        f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
-        "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
-    )
+    # 5. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN :8080)
+    if eff_lang == "en":
+        sys_chat = (
+            f"You are Cortical, a bilingual engineering & voice assistant created by Carlo Cancellieri. "
+            f"Local time: {now.strftime('%H:%M')}. Reply ALWAYS and ONLY in clear, natural English "
+            "(2-3 complete sentences without cutting off)."
+        )
+    else:
+        sys_chat = (
+            f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
+            f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
+            "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
+        )
     llm_out = _query_llm_endpoints(sys_chat, prompt, base_url, timeout=timeout)
     if llm_out:
         return llm_out
 
+    if eff_lang == "en":
+        return f"I received your request: '{prompt}'. If you want an operational multi-agent task, say 'create a task for {prompt}'."
     return f"Ho ricevuto la richiesta: '{prompt}'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per {prompt}'."
 
 
@@ -1036,13 +1173,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="help-drawer-backdrop" class="help-drawer-backdrop" onclick="closeHelpDrawer(event)">
     <div class="help-drawer" onclick="event.stopPropagation()">
       <div class="pane-header" style="border-bottom-color: rgba(56,189,248,0.3);">
-        <span style="color:var(--accent); font-size:0.84rem;">📖 Guida Interattiva di Cortical v0.4</span>
-        <button class="btn btn-ghost" style="padding:3px 9px;" onclick="closeHelpDrawer()">✕ Chiudi</button>
+        <span id="help-drawer-title" style="color:var(--accent); font-size:0.84rem;">📖 Guida Interattiva di Cortical v0.4 (IT / EN)</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.72rem;" id="btn-drawer-lang" onclick="toggleUiLanguage()">🇬🇧 EN</button>
+          <button class="btn btn-ghost" id="btn-help-close" style="padding:3px 9px;" onclick="closeHelpDrawer()">✕ Chiudi</button>
+        </div>
       </div>
       <div class="pane-body" id="help-drawer-body">
         <div class="doc-section" id="doc-stream">
-          <h4>⚡ Stream Operativo & Voce Neurale Anti-Eco</h4>
-          <p>Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti (pensiero, tool MCP invocati, output). Lo <b>Scudo Acustico Half-Duplex</b> blocca l'ascolto del microfono mentre Cortical parla più 2.2s di coda acustica, evitando auto-interruzioni. Per interromperlo volontariamente (barge-in), pronuncia <code>"Ehi Cortical..."</code> o clicca <b>🛑 Stop</b>.</p>
+          <h4>⚡ Stream Operativo, Audio Ducking & Isolamento Voce Utente</h4>
+          <p>Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti. Cortical riproduce la propria voce tramite <b>Web Audio GainNode</b> abbinato alla cancellazione acustica dell'eco WebRTC (<code>echoCancellation</code>) e analisi spettrale: quando parli, <b>abbassa istantaneamente il volume dell'assistente al 14%</b> (stile Alexa / Google Home), isola e dà priorità alla tua frase, e se fai una nuova domanda interrompe la risposta precedente ricalcolando subito. Supporta italiano e inglese.</p>
         </div>
         <div class="doc-section" id="doc-attachments">
           <h4>📎 Contesto Allegato per Chat e Task (File, Cartelle, Skill, Plugin)</h4>
@@ -1086,34 +1226,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- DEDICATED CENTRAL WORKSPACE TABS -->
     <div class="main-nav">
       <div class="nav-tab active" id="main-tab-stream" onclick="switchMainStage('stream')">
-        ⚡ Stream & Voce
-        <span class="help-btn" data-tip="Flusso live di conversazione, voce neurale con scudo anti-eco e passi degli agenti." onclick="openHelpSection('doc-stream', event)">?</span>
+        <span id="lbl-tab-stream">⚡ Stream & Voce</span>
+        <span class="help-btn" data-tip="Flusso live, audio ducking stile Alexa, isolamento voce e passi degli agenti." data-tip-en="Live stream, Alexa-style audio ducking, user voice isolation & agent steps." onclick="openHelpSection('doc-stream', event)">?</span>
       </div>
       <div class="nav-tab" id="main-tab-graph" onclick="switchMainStage('graph')">
-        🧠 Grafo dei Concetti <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.72rem; opacity:0.85;">(MCP)</span>
-        <span class="help-btn" data-tip="Mappa interattiva dei concetti: configura i parametri del framework (loop, modelli) o elimina i concetti utente." onclick="openHelpSection('doc-graph', event)">?</span>
+        <span id="lbl-tab-graph">🧠 Grafo dei Concetti</span> <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.72rem; opacity:0.85;">(MCP)</span>
+        <span class="help-btn" data-tip="Mappa interattiva dei concetti: configura i parametri del framework (loop, modelli) o elimina i concetti utente." data-tip-en="Interactive concept map: configure framework pillars (loops, models) or delete user concepts." onclick="openHelpSection('doc-graph', event)">?</span>
       </div>
       <div class="nav-tab" id="main-tab-brain" onclick="switchMainStage('brain')">
-        📎 Contesto 3+1, Skill & Sicurezza
-        <span class="help-btn" data-tip="Gestisci i file/cartelle/skill/plugin allegati, ispeziona le sintesi a 3+1 livelli e configura i permessi." onclick="openHelpSection('doc-studio', event)">?</span>
+        <span id="lbl-tab-brain">📎 Contesto 3+1, Skill & Sicurezza</span>
+        <span class="help-btn" data-tip="Gestisci file/cartelle/skill/plugin allegati, ispeziona sintesi 3+1 e permessi." data-tip-en="Manage attached files/folders/skills/plugins, inspect 3+1 syntheses and permissions." onclick="openHelpSection('doc-studio', event)">?</span>
       </div>
     </div>
 
-    <!-- VOICE & TERMINAL CONTROLS -->
+    <!-- VOICE, DUCKING & BILINGUAL CONTROLS -->
     <div class="voice-bar">
       <div class="pulse-dot" id="mic-dot"></div>
-      <span class="live-transcript" id="live-transcript">Scudo Anti-Eco attivo · Di' "Ehi Cortical..."</span>
+      <span class="live-transcript" id="live-transcript">Ducking & AEC pronti · Di' "Ehi Cortical..."</span>
+      <span id="acoustic-duck-badge" style="font-family:var(--mono); font-size:0.7rem; padding:3px 7px; border-radius:6px; border:1px solid var(--border); color:var(--muted);">🔊 100%</span>
       <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Mic: OFF</button>
-      <select id="tts-voice" title="Voce Italiana Espressiva">
-        <option value="IsabellaNeural" selected>🇮🇹 Isabella Neurale</option>
+      <select id="tts-voice" title="Bilingual Neural Voice (IT / EN)">
+        <option value="auto" selected>🌐 Auto (IT / EN)</option>
+        <option value="IsabellaNeural">🇮🇹 Isabella Neurale</option>
         <option value="GiuseppeNeural">🇮🇹 Giuseppe Neurale</option>
         <option value="ElsaNeural">🇮🇹 Elsa Neurale</option>
         <option value="DiegoNeural">🇮🇹 Diego Neurale</option>
+        <option value="JennyNeural">🇺🇸 Jenny Neural (EN)</option>
+        <option value="GuyNeural">🇺🇸 Guy Neural (EN)</option>
+        <option value="AriaNeural">🇺🇸 Aria Neural (EN)</option>
+        <option value="SoniaNeural">🇬🇧 Sonia Neural (EN)</option>
         <option value="Federica">🇮🇹 Federica (Offline)</option>
+        <option value="Samantha">🇺🇸 Samantha (Offline EN)</option>
       </select>
-      <button class="btn btn-danger" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti">🛑 Stop</button>
-      <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale">🖥️ `pi`</button>
-      <button class="btn btn-ghost" onclick="openHelpSection('doc-stream', event)" title="Apri la Guida Interattiva di Cortical">📖 Guida</button>
+      <button class="btn btn-danger" id="btn-stop-top" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti / Stop immediately">🛑 Stop</button>
+      <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale / Open pi in Terminal">🖥️ `pi`</button>
+      <button class="btn btn-ghost" id="btn-ui-lang" onclick="toggleUiLanguage()" title="Switch Language / Cambia Lingua (IT / EN)">🇮🇹 IT</button>
+      <button class="btn btn-ghost" id="btn-guide-top" onclick="openHelpSection('doc-stream', event)" title="Guida Interattiva / Interactive Guide">📖 Guida</button>
     </div>
   </div>
 
@@ -1435,6 +1583,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let localTtsShieldUntilMs = 0;
     let activeAbortController = null;
     let cachedAttachments = [];
+    let uiLang = localStorage.getItem('cortical_ui_lang') || 'it';
 
     // Interactive Concept Graph State
     let cachedGraphData = { nodes: [], edges: [], stats: {} };
@@ -1448,6 +1597,112 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let draggedNodeId = null;
     let nodePositions = {};
 
+    const I18N = {
+      it: {
+        guideTitle: '📖 Guida Interattiva di Cortical v0.4 (IT / EN)',
+        close: '✕ Chiudi',
+        toggleLangBtn: '🇮🇹 IT',
+        drawerLangBtn: '🇬🇧 EN',
+        tabStream: '⚡ Stream & Voce',
+        tabGraph: '🧠 Grafo dei Concetti',
+        tabBrain: '📎 Contesto 3+1, Skill & Sicurezza',
+        guideBtn: '📖 Guida',
+        micOff: '🎤 Mic: OFF',
+        micOn: '🟢 Mic Attivo',
+        micDenied: '🎤 Mic: Negato',
+        promptPlaceholder: "Chiedi a Cortical (IT o EN) con i file/skill allegati o di' 'Ehi Cortical...'",
+        liveReady: 'Ducking & AEC pronti · Di\' "Ehi Cortical..." o "Hey Cortical..."',
+        duckNormal: '🔊 100%',
+        duckLow: '🔉 14% Duck · Priorità Voce',
+        newTaskBtn: '+ Nuovo Task',
+        clearBtn: '🧹 Pulisci',
+        openGraphBtn: '🧠 Apri Grafo & Configura Concetti',
+        tooltipHint: '💡 Clicca per aprire la guida interattiva',
+      },
+      en: {
+        guideTitle: '📖 Cortical v0.4 Interactive Guide (EN / IT)',
+        close: '✕ Close',
+        toggleLangBtn: '🇬🇧 EN',
+        drawerLangBtn: '🇮🇹 IT',
+        tabStream: '⚡ Stream & Voice',
+        tabGraph: '🧠 Concept Graph',
+        tabBrain: '📎 Context 3+1, Skills & Safety',
+        guideBtn: '📖 Guide',
+        micOff: '🎤 Mic: OFF',
+        micOn: '🟢 Mic Active',
+        micDenied: '🎤 Mic: Denied',
+        promptPlaceholder: "Ask Cortical (EN or IT) with attached files/skills or say 'Hey Cortical...'",
+        liveReady: 'Ducking & AEC Ready · Say "Hey Cortical..." or "Ehi Cortical..."',
+        duckNormal: '🔊 100%',
+        duckLow: '🔉 14% Duck · Voice Priority',
+        newTaskBtn: '+ New Task',
+        clearBtn: '🧹 Clear',
+        openGraphBtn: '🧠 Open Graph & Configure Concepts',
+        tooltipHint: '💡 Click to open the interactive guide',
+      }
+    };
+
+    const GUIDE_DOCS = {
+      it: {
+        'doc-stream': ['⚡ Stream Operativo, Audio Ducking & Isolamento Voce Utente', 'Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti. Cortical riproduce la propria voce tramite <b>Web Audio GainNode</b> abbinato alla cancellazione acustica dell\\\'eco WebRTC (<code>echoCancellation</code>) e analisi spettrale: quando parli, <b>abbassa istantaneamente il volume dell\\\'assistente al 14%</b> (stile Alexa / Google Home), isola e dà priorità alla tua frase, e se fai una nuova domanda interrompe la risposta precedente ricalcolando subito. Supporta italiano e inglese.'],
+        'doc-attachments': ['📎 Contesto Allegato per Chat e Task (File, Cartelle, Skill, Plugin)', 'Cortical <b>non</b> pre-carica automaticamente la propria cartella sorgente. Come in ChatGPT o Claude Code, per ogni discussione o task puoi allegare esplicitamente <b>📄 File</b>, <b>📁 Cartelle</b>, <b>⚡ Skill</b> e <b>🔌 Plugin/MCP</b>. Gli elementi allegati vengono sintetizzati nei 3+1 livelli (Light, Medium, High, Max) e passati automaticamente al Cortical Harness.'],
+        'doc-graph': ['🧠 Grafo Semantico dei Concetti (MCP)', 'Rappresenta la memoria concettuale (non l\\\'elenco grezzo dei file): mostra i <b>5 Pilastri Fondamentali del Framework</b> (anello doppio 🔒) insieme ai concetti estratti dai tuoi allegati, agli insight appresi dalle conversazioni, alle skill generate e ai task.'],
+        'doc-concept-config': ['⚙️ Configurazione ed Eliminazione dei Concetti', 'Cliccando un nodo nel Grafo dei Concetti:<br/>• <b>Concetti Fondamentali del Framework (🔒 Core):</b> sono protetti da eliminazione, ma puoi <b>configurarli dal vivo</b> (es. in <i>Orchestratore Multi-Agente</i> imposti quanti loop massimi fanno gli agenti e quali modelli usare).<br/>• <b>Concetti Sviluppati / Utente (✨ Utente):</b> puoi sia configurarli sia eliminarli definitivamente dalla memoria cliccando <b>🗑️ Elimina Concetto dalla Memoria</b>.'],
+        'doc-studio': ['🧭 Studio Contesto 3+1, Skill Router & Sicurezza', 'La terza tab centrale unifica 3 strumenti:<br/>1. <b>Ispezione Sintesi 3+1 degli Allegati:</b> compressione in L1 (~50 tok), L2 (~250 tok), L3 (~1000 tok) e +1 Max.<br/>2. <b>Simulatore Prompt & Skill:</b> verifica quali skill e modelli vengono attivati.<br/>3. <b>Adaptive Permission Gate:</b> gestisci permessi automatici e blocchi di sicurezza.'],
+        'doc-tasks': ['🤖 Task Espliciti Multi-Agente & Archiviazione 3+1', 'Le chiacchierate quotidiane (ora, meteo, ricerche veloci) non aprono task. Un task si apre solo quando lo richiedi esplicitamente o clicchi <b>+ Nuovo Task</b>. Quando archivi (<b>📦 Archivia</b>), Cortical sintetizza la discussione nei 3+1 livelli e valuta la compilazione di nuove Skill.']
+      },
+      en: {
+        'doc-stream': ['⚡ Live Stream, Alexa-Style Ducking & User Voice Isolation', 'Displays live bilingual voice/text chat and agent steps. Assistant audio plays through a <b>Web Audio GainNode</b> paired with WebRTC hardware echo cancellation (<code>echoCancellation</code>) and spectral tone comparison: when you speak, Cortical <b>smoothly lowers playback volume to 14%</b> (like Alexa / Google Home), isolates your voice from its own assistant tone, and cancels the previous reply to recalculate your new question immediately. Supports English & Italian.'],
+        'doc-attachments': ['📎 Scoped Context Attachments (Files, Folders, Skills, Plugins)', 'Cortical <b>never</b> auto-loads its own source repository. Just like ChatGPT or Claude Code, explicitly attach <b>📄 Files</b>, <b>📁 Folders</b>, <b>⚡ Skills</b>, and <b>🔌 Plugins/MCP</b> for any chat or task. Attachments are summarized across 3+1 tiers (Light, Medium, High, Max) and passed cleanly into the Cortical Harness.'],
+        'doc-graph': ['🧠 Semantic Concept Knowledge Graph (MCP)', 'Displays conceptual memory rather than raw file dumps: shows the <b>5 Core Framework Pillars</b> (double ring 🔒) connected to concepts extracted from attachments, curated conversation insights, procedural skills, and explicit tasks.'],
+        'doc-concept-config': ['⚙️ Concept Configuration & Deletion', 'Click any node in the Concept Graph:<br/>• <b>Core Framework Pillars (🔒 Core):</b> protected from deletion, yet <b>live-configurable</b> (e.g., tune max agent loops and Analyst/Implementer/Reviewer models).<br/>• <b>User-Developed Concepts (✨ User):</b> configurable and permanently removable with <b>🗑️ Delete Concept from Memory</b>.'],
+        'doc-studio': ['🧭 3+1 Context Studio, Skill Router & Safety Gate', 'Unifies three live panels:<br/>1. <b>3+1 Attachment Synthesis:</b> inspect compression across L1 (~50 tok), L2 (~250 tok), L3 (~1000 tok), and +1 Max.<br/>2. <b>Skill & Prompt Router Simulator:</b> preview selected skills and tier routing.<br/>3. <b>Adaptive Permission Gate:</b> manage safe patterns and deterministic blocks.'],
+        'doc-tasks': ['🤖 Explicit Multi-Agent Tasks & 3+1 Archival', 'Everyday chitchat (clock, weather, quick browser searches) never creates tasks. Tasks spawn only when explicitly requested or via <b>+ New Task</b>. Archiving (<b>📦 Archive</b>) distills discussions into 3+1 Wiki levels and evaluates reusable Skill compilation.']
+      }
+    };
+
+    function applyUiTranslations(lang) {
+      uiLang = (lang === 'en') ? 'en' : 'it';
+      localStorage.setItem('cortical_ui_lang', uiLang);
+      const t = I18N[uiLang];
+      const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+      setTxt('help-drawer-title', t.guideTitle);
+      setTxt('btn-help-close', t.close);
+      setTxt('btn-ui-lang', t.toggleLangBtn);
+      setTxt('btn-drawer-lang', t.drawerLangBtn);
+      setTxt('lbl-tab-stream', t.tabStream);
+      setTxt('lbl-tab-graph', t.tabGraph);
+      setTxt('lbl-tab-brain', t.tabBrain);
+      setTxt('btn-guide-top', t.guideBtn);
+      const micBtn = document.getElementById('btn-always-on');
+      if (micBtn) micBtn.textContent = alwaysOnActive ? t.micOn : t.micOff;
+      const pi = document.getElementById('prompt-input');
+      if (pi && !micFinalBuffer && !micInterimBuffer) pi.placeholder = t.promptPlaceholder;
+      const lt = document.getElementById('live-transcript');
+      if (lt && !alwaysOnActive) lt.textContent = t.liveReady;
+      const guideSet = GUIDE_DOCS[uiLang] || GUIDE_DOCS.it;
+      Object.entries(guideSet).forEach(([secId, [title, body]]) => {
+        const sec = document.getElementById(secId);
+        if (sec) {
+          const h4 = sec.querySelector('h4');
+          const p = sec.querySelector('p');
+          if (h4) h4.innerHTML = title;
+          if (p) p.innerHTML = body;
+        }
+      });
+      if (recognition) {
+        recognition.lang = (uiLang === 'en') ? 'en-US' : 'it-IT';
+      }
+    }
+
+    function setUiLanguage(lang) {
+      applyUiTranslations(lang);
+    }
+
+    function toggleUiLanguage() {
+      setUiLanguage(uiLang === 'en' ? 'it' : 'en');
+    }
+
     // =========================================================================
     // INTERACTIVE HELP (?) HOVER TOOLTIPS & CLICK-TO-DOCS DRAWER
     // =========================================================================
@@ -1458,9 +1713,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.body.addEventListener('mouseover', (e) => {
         const target = e.target.closest('[data-tip]');
         if (!target) return;
-        const tip = target.getAttribute('data-tip');
+        const tip = (uiLang === 'en' && target.getAttribute('data-tip-en'))
+          ? target.getAttribute('data-tip-en')
+          : target.getAttribute('data-tip');
         if (!tip) return;
-        tooltip.innerHTML = `${tip}<span class="tt-hint">💡 Clicca per aprire la guida interattiva</span>`;
+        const hint = (I18N[uiLang] || I18N.it).tooltipHint;
+        tooltip.innerHTML = `${tip}<span class="tt-hint">${hint}</span>`;
         tooltip.style.display = 'block';
         positionTooltip(e, tooltip);
       });
@@ -1733,12 +1991,216 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    // =========================================================================
+    // WEB AUDIO GAINNODE DUCKING, HARDWARE AEC3 & SPECTRAL VOICE PRIORITY
+    // =========================================================================
+    let assistantAudioCtx = null;
+    let assistantGainNode = null;
+    let assistantAnalyser = null;
+    let assistantAudioEl = null;
+    let assistantSourceNode = null;
+    let micMediaStream = null;
+    let micAnalyser = null;
+    let acousticMonitorTimer = null;
+    let duckRestoreTimer = null;
+    let acousticUserPriorityDetected = false;
+    let assistantDucked = false;
+    let assistantBaselineCentroidHz = 0;
+    let lastMicRms = 0;
+    let lastAssistantRms = 0;
+
+    function updateDuckBadge(ducked) {
+      const badge = document.getElementById('acoustic-duck-badge');
+      if (!badge) return;
+      const t = I18N[uiLang] || I18N.it;
+      if (ducked) {
+        badge.textContent = t.duckLow;
+        badge.style.color = '#fbbf24';
+        badge.style.borderColor = 'rgba(251,191,36,0.55)';
+      } else {
+        badge.textContent = t.duckNormal;
+        badge.style.color = 'var(--muted)';
+        badge.style.borderColor = 'var(--border)';
+      }
+    }
+
+    function ensureAssistantAudioPipeline() {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      if (!assistantAudioCtx) {
+        assistantAudioCtx = new AC();
+        assistantGainNode = assistantAudioCtx.createGain();
+        assistantGainNode.gain.value = 1.0;
+        assistantAnalyser = assistantAudioCtx.createAnalyser();
+        assistantAnalyser.fftSize = 1024;
+        assistantAudioEl = new Audio();
+        assistantAudioEl.crossOrigin = 'anonymous';
+        assistantSourceNode = assistantAudioCtx.createMediaElementSource(assistantAudioEl);
+        assistantSourceNode.connect(assistantAnalyser);
+        assistantAnalyser.connect(assistantGainNode);
+        assistantGainNode.connect(assistantAudioCtx.destination);
+        assistantAudioEl.onended = () => {
+          localTtsShieldUntilMs = 0;
+          restoreAssistantAudio(1.0);
+        };
+      }
+      if (assistantAudioCtx.state === 'suspended') {
+        assistantAudioCtx.resume().catch(() => {});
+      }
+      return true;
+    }
+
+    function isAssistantAudioPlaying() {
+      return Boolean(assistantAudioEl && !assistantAudioEl.paused && !assistantAudioEl.ended);
+    }
+
+    function duckAssistantAudio(level = 0.14) {
+      if (!assistantGainNode || !assistantAudioCtx) return;
+      const now = assistantAudioCtx.currentTime;
+      assistantGainNode.gain.cancelScheduledValues(now);
+      assistantGainNode.gain.setTargetAtTime(level, now, 0.035);
+      assistantDucked = true;
+      updateDuckBadge(true);
+    }
+
+    function restoreAssistantAudio(level = 1.0) {
+      if (!assistantGainNode || !assistantAudioCtx) return;
+      const now = assistantAudioCtx.currentTime;
+      assistantGainNode.gain.cancelScheduledValues(now);
+      assistantGainNode.gain.setTargetAtTime(level, now, 0.14);
+      assistantDucked = false;
+      updateDuckBadge(false);
+    }
+
+    function stopAssistantAudio() {
+      if (duckRestoreTimer) {
+        clearTimeout(duckRestoreTimer);
+        duckRestoreTimer = null;
+      }
+      if (assistantAudioEl) {
+        try {
+          assistantAudioEl.pause();
+          assistantAudioEl.currentTime = 0;
+        } catch (_) {}
+      }
+      restoreAssistantAudio(1.0);
+    }
+
+    async function playAssistantAudioUrl(url) {
+      if (!url || !ensureAssistantAudioPipeline()) return;
+      stopAssistantAudio();
+      assistantAudioEl.src = url;
+      assistantBaselineCentroidHz = 0;
+      restoreAssistantAudio(1.0);
+      try {
+        await assistantAudioEl.play();
+      } catch (err) {
+        console.warn('Web Audio play warning:', err);
+      }
+    }
+
+    function getAnalyserRmsAndCentroid(analyser, sampleRate) {
+      if (!analyser) return { rms: 0, centroidHz: 0 };
+      const timeData = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(timeData);
+      let sumSq = 0;
+      for (let i = 0; i < timeData.length; i++) sumSq += timeData[i] * timeData[i];
+      const rms = Math.sqrt(sumSq / timeData.length);
+
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(freqData);
+      const binHz = (sampleRate || 48000) / (analyser.fftSize || 1024);
+      let weighted = 0;
+      let total = 0;
+      for (let i = 1; i < freqData.length; i++) {
+        const mag = freqData[i];
+        weighted += mag * (i * binHz);
+        total += mag;
+      }
+      return { rms, centroidHz: total > 0 ? weighted / total : 0 };
+    }
+
+    async function startAcousticMonitor() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      ensureAssistantAudioPipeline();
+      try {
+        if (!micMediaStream) {
+          // Enabling hardware WebRTC AEC3 on the same Chrome AudioContext reference eliminates assistant tone leakage
+          micMediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+          });
+          const micSource = assistantAudioCtx.createMediaStreamSource(micMediaStream);
+          micAnalyser = assistantAudioCtx.createAnalyser();
+          micAnalyser.fftSize = 1024;
+          micSource.connect(micAnalyser);
+        }
+        if (acousticMonitorTimer) clearInterval(acousticMonitorTimer);
+        acousticMonitorTimer = setInterval(() => {
+          if (!alwaysOnActive || !micAnalyser || !assistantAudioCtx) return;
+          const sr = assistantAudioCtx.sampleRate || 48000;
+          const micStats = getAnalyserRmsAndCentroid(micAnalyser, sr);
+          const asstStats = getAnalyserRmsAndCentroid(assistantAnalyser, sr);
+          lastMicRms = Number(micStats.rms.toFixed(4));
+          lastAssistantRms = Number(asstStats.rms.toFixed(4));
+
+          if (isAssistantAudioPlaying() && asstStats.rms > 0.015 && asstStats.centroidHz > 80) {
+            assistantBaselineCentroidHz = assistantBaselineCentroidHz
+              ? (assistantBaselineCentroidHz * 0.85 + asstStats.centroidHz * 0.15)
+              : asstStats.centroidHz;
+          }
+
+          if (isAssistantAudioPlaying()) {
+            const pitchDiffRatio = (assistantBaselineCentroidHz > 80 && micStats.centroidHz > 80)
+              ? Math.abs(micStats.centroidHz - assistantBaselineCentroidHz) / assistantBaselineCentroidHz
+              : 0;
+            const userSpeakingNow = micStats.rms > 0.024 && (micStats.rms > asstStats.rms * 0.9 || pitchDiffRatio > 0.14);
+            if (userSpeakingNow) {
+              acousticUserPriorityDetected = true;
+              if (!assistantDucked) duckAssistantAudio(0.14);
+              if (duckRestoreTimer) clearTimeout(duckRestoreTimer);
+              duckRestoreTimer = setTimeout(() => {
+                if (!micInterimBuffer && !micFinalBuffer && isAssistantAudioPlaying()) {
+                  restoreAssistantAudio(1.0);
+                  acousticUserPriorityDetected = false;
+                }
+              }, 1600);
+            }
+          }
+        }, 70);
+      } catch (err) {
+        console.warn('Hardware AEC getUserMedia unavailable:', err);
+      }
+    }
+
+    function stopAcousticMonitor() {
+      if (acousticMonitorTimer) {
+        clearInterval(acousticMonitorTimer);
+        acousticMonitorTimer = null;
+      }
+      if (micMediaStream) {
+        micMediaStream.getTracks().forEach(t => t.stop());
+        micMediaStream = null;
+      }
+      micAnalyser = null;
+      acousticUserPriorityDetected = false;
+    }
+
     function hasWakeOrBargeInWord(s) {
-      return /\\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta)\\b/i.test(s || '');
+      return /\\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta|quiet|cancel|nevermind|enough|wait)\\b/i.test(s || '');
+    }
+
+    function detectLangClient(s) {
+      if (!s) return uiLang || 'it';
+      if (/[àèéìòù]/i.test(s)) return 'it';
+      const enHits = (s.match(/\\b(the|what|when|where|how|weather|tomorrow|open|search|browser|wikipedia|read|summarize|page|hey|create|task)\\b/gi) || []).length;
+      const itHits = (s.match(/\\b(che|cosa|come|meteo|domani|apri|cerca|browser|leggi|riassumi|pagina|ehi|crea|task|ora)\\b/gi) || []).length;
+      if (enHits > itHits) return 'en';
+      if (itHits > enHits) return 'it';
+      return uiLang || 'it';
     }
 
     function isTtsShieldActive() {
-      return Date.now() < localTtsShieldUntilMs;
+      return isAssistantAudioPlaying() || Date.now() < localTtsShieldUntilMs;
     }
 
     function normalizeTokens(s) {
@@ -1810,17 +2272,33 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!text) return;
       if (!fromMic) input.value = '';
 
-      if (fromMic && isSelfEchoClient(text)) {
-        document.getElementById('live-transcript').textContent = `🔇 [Eco altoparlante ignorato]`;
+      if (fromMic && isSelfEchoClient(text) && !acousticUserPriorityDetected) {
+        document.getElementById('live-transcript').textContent = `🔇 [Eco altoparlante ignorato / Speaker bleed ignored]`;
         return;
+      }
+
+      // Spoken language switching shortcuts
+      if (/\\b(parla inglese|in inglese|switch to english|speak english)\\b/i.test(text)) {
+        setUiLanguage('en');
+        const vSel = document.getElementById('tts-voice');
+        if (vSel && !vSel.value.includes('Jenny') && !vSel.value.includes('Guy') && vSel.value !== 'auto') {
+          vSel.value = 'JennyNeural';
+        }
+      } else if (/\\b(parla italiano|in italiano|switch to italian|speak italian)\\b/i.test(text)) {
+        setUiLanguage('it');
+        const vSel = document.getElementById('tts-voice');
+        if (vSel && vSel.value !== 'auto') vSel.value = 'IsabellaNeural';
       }
 
       if (activeAbortController) {
         activeAbortController.abort();
       }
       const wordCount = normalizeTokens(text).length;
-      if (!fromMic || hasWakeOrBargeInWord(text) || (wordCount >= 4 && !isSelfEchoClient(text))) {
+      const wasSpeaking = isAssistantAudioPlaying();
+      const hadUserPriority = acousticUserPriorityDetected || hasWakeOrBargeInWord(text) || (wordCount >= 3 && !isSelfEchoClient(text));
+      if (!fromMic || hadUserPriority) {
         localTtsShieldUntilMs = 0;
+        stopAssistantAudio();
         await fetch('/api/voice/duck', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -1832,6 +2310,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const depth = document.getElementById('agent-depth').value;
       const speak = document.getElementById('chk-speak').checked;
       const voice = document.getElementById('tts-voice').value;
+      const utteranceLang = detectLangClient(text);
 
       if (mode === 'agent') {
         switchMainStage('stream');
@@ -1844,20 +2323,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const r = await fetch('/api/voice', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({utterance: text, speak, voice, wiki_depth: depth, from_mic: fromMic}),
+          body: JSON.stringify({
+            utterance: text,
+            speak,
+            client_audio: true,
+            client_tts_speaking: wasSpeaking,
+            voice,
+            lang: utteranceLang,
+            wiki_depth: depth,
+            from_mic: fromMic,
+            discourse_hints: {
+              acoustic_user_priority: hadUserPriority,
+              mic_rms: lastMicRms,
+              assistant_rms: lastAssistantRms
+            }
+          }),
           signal: activeAbortController.signal
         });
         const d = await r.json();
+        acousticUserPriorityDetected = false;
 
         if (d.route === 'ignored_echo') {
-          document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato dal server]`;
+          document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato / Self-echo ignored]`;
           return;
         }
 
         if (d.spoken_response) {
           lastSpokenResponseText = d.spoken_response;
           lastSpokenAtMs = Date.now();
-          if (speak && d.route !== 'stop') {
+          if (d.audio_url && speak && d.route !== 'stop') {
+            await playAssistantAudioUrl(d.audio_url);
+          } else if (speak && d.route !== 'stop') {
             const estMs = Math.min(7500, Math.max(2500, d.spoken_response.length * 55 + 1100));
             localTtsShieldUntilMs = Date.now() + estMs;
           } else {
@@ -2024,11 +2520,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function triggerStopBargeIn() {
       if (activeAbortController) activeAbortController.abort();
+      stopAssistantAudio();
       if (window.speechSynthesis) window.speechSynthesis.cancel();
       await fetch('/api/voice', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({utterance: 'Ehi Cortical basta', speak: true, voice: document.getElementById('tts-voice').value})
+        body: JSON.stringify({
+          utterance: uiLang === 'en' ? 'Hey Cortical stop' : 'Ehi Cortical basta',
+          speak: true,
+          client_audio: true,
+          lang: uiLang,
+          voice: document.getElementById('tts-voice').value
+        })
       });
       refreshAgents();
     }
@@ -2055,12 +2558,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       micInterimBuffer = '';
       const promptInput = document.getElementById('prompt-input');
       if (promptInput) {
-        promptInput.placeholder = "Chiedi a Cortical (con i file/skill allegati qui sopra) o di' 'Ehi Cortical...'";
+        promptInput.placeholder = (I18N[uiLang] || I18N.it).promptPlaceholder;
       }
       if (!combined) return;
-      if (isSelfEchoClient(combined)) {
+      if (isSelfEchoClient(combined) && !acousticUserPriorityDetected) {
         const lt = document.getElementById('live-transcript');
-        if (lt) lt.textContent = '🔇 [Eco altoparlante ignorato]';
+        if (lt) lt.textContent = '🔇 [Eco altoparlante ignorato / Bleed ignored]';
         return;
       }
       const lt = document.getElementById('live-transcript');
@@ -2091,6 +2594,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
       if (alwaysOnActive) {
         alwaysOnActive = false;
+        stopAcousticMonitor();
         if (micCommitTimer) clearTimeout(micCommitTimer);
         if (micRestartTimer) clearTimeout(micRestartTimer);
         micFinalBuffer = '';
@@ -2100,20 +2604,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
         micIsRecognizing = false;
         document.getElementById('mic-dot').classList.remove('listening');
-        document.getElementById('btn-always-on').textContent = '🎤 Mic: OFF';
-        document.getElementById('live-transcript').textContent = 'Microfono in pausa.';
+        document.getElementById('btn-always-on').textContent = (I18N[uiLang] || I18N.it).micOff;
+        document.getElementById('live-transcript').textContent = (uiLang === 'en') ? 'Microphone paused.' : 'Microfono in pausa.';
         return;
       }
 
       alwaysOnActive = true;
       micFinalBuffer = '';
       micInterimBuffer = '';
+      startAcousticMonitor();
       document.getElementById('mic-dot').classList.add('listening');
-      document.getElementById('btn-always-on').textContent = '🟢 Mic Attivo';
-      document.getElementById('live-transcript').textContent = 'In ascolto (parla pure, anche frasi lunghe)...';
+      document.getElementById('btn-always-on').textContent = (I18N[uiLang] || I18N.it).micOn;
+      document.getElementById('live-transcript').textContent = (uiLang === 'en')
+        ? 'Listening (AEC + Ducking active, speak naturally)...'
+        : 'In ascolto (AEC + Ducking attivi, parla pure)...';
 
       recognition = new SR();
-      recognition.lang = 'it-IT';
+      recognition.lang = (uiLang === 'en') ? 'en-US' : 'it-IT';
       recognition.continuous = true;
       recognition.interimResults = true;
       recognition.maxAlternatives = 1;
@@ -2153,8 +2660,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             scheduleMicCommit(1250);
           } else {
             currentInterim += chunk + ' ';
+            // Smooth Alexa-style ducking as soon as non-echo interim user speech starts!
+            if (isAssistantAudioPlaying() && !isSelfEchoClient(currentInterim)) {
+              acousticUserPriorityDetected = true;
+              duckAssistantAudio(0.14);
+            }
             if (hasWakeOrBargeInWord(currentInterim)) {
               localTtsShieldUntilMs = 0;
+              stopAssistantAudio();
               fetch('/api/voice/duck', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2712,6 +3225,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // =========================================================================
     window.addEventListener('DOMContentLoaded', () => {
       initHelpTooltips();
+      applyUiTranslations(uiLang);
       loadHealth();
       loadScopedContext();
       navigateWiki('/');
@@ -3054,21 +3568,44 @@ class CorticalLiveService:
         if method == "POST" and path == "/api/voice":
             utterance = str(body.get("utterance", ""))
             speak = bool(body.get("speak", False))
+            client_audio = bool(body.get("client_audio", False))
             voice_name = str(body.get("voice", "IsabellaNeural"))
             from_mic = bool(body.get("from_mic", False))
+            preferred_lang = str(body.get("lang", "")) or None
+            discourse_hints = body.get("discourse_hints") if isinstance(body.get("discourse_hints"), dict) else None
+            tts_active = bool(body.get("client_tts_speaking", False)) or is_tts_speaking_or_cooling_down()
             t0 = time.perf_counter()
             res = self.voice_engine.handle_utterance(
                 utterance,
                 from_mic=from_mic,
-                tts_currently_speaking=is_tts_speaking_or_cooling_down(),
+                tts_currently_speaking=tts_active,
+                discourse_hints=discourse_hints,
+                preferred_lang=preferred_lang,
             )
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             tts_triggered = False
+            audio_url = None
+            used_voice = voice_name
             if speak and res.route != "ignored_echo" and res.spoken_response:
-                tts_triggered = speak_native_tts(res.spoken_response, voice=voice_name)
+                if client_audio:
+                    audio_bytes, mime, used_voice = synthesize_tts_audio_bytes(
+                        res.spoken_response,
+                        voice=voice_name,
+                        lang=res.lang,
+                    )
+                    if audio_bytes:
+                        aid = cache_tts_audio(audio_bytes, mime)
+                        audio_url = f"/api/tts/audio?id={aid}"
+                        tts_triggered = True
+                    else:
+                        tts_triggered = speak_native_tts(res.spoken_response, voice=voice_name, lang=res.lang)
+                else:
+                    tts_triggered = speak_native_tts(res.spoken_response, voice=voice_name, lang=res.lang)
             out = dataclasses.asdict(res)
             out["latency_ms"] = elapsed_ms
             out["tts_triggered"] = tts_triggered
+            out["audio_url"] = audio_url
+            out["tts_voice_used"] = used_voice
             if res.route == "system2_agentic":
                 sessions = self.agent_mgr.list_sessions()
                 if sessions:
@@ -3096,6 +3633,22 @@ def run_live_server(
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+                return
+
+            if parsed.path == "/api/tts/audio":
+                q = urllib.parse.parse_qs(parsed.query)
+                aid = (q.get("id") or [""])[0]
+                item = _TTS_AUDIO_CACHE.get(aid)
+                if not item:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Audio segment not found"})
+                    return
+                audio_bytes, mime = item
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(audio_bytes)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(audio_bytes)
                 return
 
             q = urllib.parse.parse_qs(parsed.query)

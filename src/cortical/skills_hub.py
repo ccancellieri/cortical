@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .grounding import detect_language
 from .wiki.db import AccessContext, CorticalWikiDB, DepthTier
 
 STOP_WORDS = frozenset(
@@ -688,9 +689,15 @@ class CorticalSkillHub:
             for r in team_roster
         )
 
+        req_lang = detect_language(prompt)
+        lang_rule = (
+            "Always reply in clear, technically rigorous English."
+            if req_lang == "en"
+            else "Rispondi sempre in italiano chiaro e tecnicamente rigoroso."
+        )
         enhanced_instructions = (
             f"=== CORTICAL HARNESS — Orchestratore Multi-Agent & 3+1 Second Brain ===\n"
-            f"Rispondi sempre in italiano chiaro e tecnicamente rigoroso.\n"
+            f"{lang_rule}\n"
             f"Configurazione Orchestratore: Max Loop Agenti = {max_loops} | Modelli = Analyst({role_model_map['arch_analyst']}), Implementer({role_model_map['code_implementer']}), Reviewer({role_model_map['reviewer']}).\n\n"
             f"=== 1. CONTESTO SPECIFICO ALLEGATO & WIKI (Livello 3+1: {depth.value.upper()}) ===\n"
             f"{wiki_block}\n\n"

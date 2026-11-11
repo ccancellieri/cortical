@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from ..grounding import (
+    detect_language,
     extract_browser_intent,
     extract_page_read_intent,
     extract_weather_intent,
@@ -39,6 +40,8 @@ WAKE_PREFIXES = (
     "ehi cortical",
     "hei cortical",
     "hey cortical",
+    "hi cortical",
+    "hello cortical",
     "ei cortical",
     "ai cortical",
     "ciao cortical",
@@ -60,6 +63,12 @@ STOP_EXACT_WORDS = {
     "annulla",
     "taci",
     "chiudi",
+    "quiet",
+    "silence",
+    "cancel",
+    "nevermind",
+    "enough",
+    "wait",
 }
 
 STOP_SYLLABLE_PATTERNS = [
@@ -94,6 +103,31 @@ MESI_ANNO = (
     "ottobre",
     "novembre",
     "dicembre",
+)
+
+DAYS_EN = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+MONTHS_EN = (
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
 
 
@@ -190,6 +224,30 @@ def is_self_echo(
     return False
 
 
+_USER_DISCOURSE_STARTERS = (
+    "che ", "cosa ", "come ", "quando ", "dove ", "perché", "perche ", "chi ", "quale ",
+    "apri ", "cerca ", "cercami ", "vai ", "leggi ", "riassumi ", "crea ", "fammi ", "dimmi ",
+    "puoi ", "mi dici ", "what ", "how ", "when ", "where ", "why ", "who ", "which ",
+    "open ", "search ", "find ", "go to ", "read ", "summarize ", "create ", "tell me ",
+    "can you ", "could you ", "please ", "switch ",
+)
+
+
+def is_human_discourse_or_question(text: str, last_spoken_text: str = "") -> bool:
+    """Classifies whether incoming speech is a genuine human question/command vs assistant bleed."""
+    norm = _clean_transcript(text)
+    if not norm:
+        return False
+    tokens = norm.split()
+    if len(tokens) < 2 and "?" not in text:
+        return False
+    if last_spoken_text and is_self_echo(text, last_spoken_text, elapsed_sec=4.0):
+        return False
+    if "?" in text or any(norm.startswith(p) for p in _USER_DISCOURSE_STARTERS):
+        return True
+    return len(tokens) >= 4
+
+
 @dataclass
 class VoiceRouteResult:
     route: str  # 'ignored_echo' | 'stop' | 'permission_feedback' | 'status_report' | 'system1_reflex' | 'system2_agentic'
@@ -197,6 +255,7 @@ class VoiceRouteResult:
     dispatched_task_goal: Optional[str] = None
     permission_updated: Optional[str] = None
     memory_curation: Optional[dict[str, Any]] = None
+    lang: str = "it"
 
 
 class CorticalVoiceEngine:
@@ -235,31 +294,46 @@ class CorticalVoiceEngine:
             self.last_spoken_text = spoken_text.strip()
             self.last_spoken_at = time.time()
 
-    def _instant_builtin_reflex(self, cmd: str) -> Optional[str]:
+    def _instant_builtin_reflex(self, cmd: str, lang: Optional[str] = None) -> Optional[str]:
+        eff_lang = lang if lang in ("it", "en") else detect_language(cmd)
         now = datetime.datetime.now()
-        if any(p in cmd for p in ("che ore sono", "che ora e", "che ora è", "dimmi l ora")):
+        if any(p in cmd for p in ("che ore sono", "che ora e", "che ora è", "dimmi l ora", "what time is it", "what's the time", "tell me the time")):
+            if eff_lang == "en":
+                day_en = DAYS_EN[now.weekday()]
+                month_en = MONTHS_EN[now.month]
+                return f"It's {now.strftime('%H:%M')} on {day_en}, {month_en} {now.day}."
             giorno = GIORNI_SETTIMANA[now.weekday()]
             mese = MESI_ANNO[now.month]
             return f"Sono le {now.strftime('%H:%M')} di {giorno} {now.day} {mese}."
-        if any(p in cmd for p in ("che giorno e", "che giorno è", "data di oggi", "quanti ne abbiamo")):
+        if any(p in cmd for p in ("che giorno e", "che giorno è", "data di oggi", "quanti ne abbiamo", "what day is it", "what's the date", "today's date")):
+            if eff_lang == "en":
+                day_en = DAYS_EN[now.weekday()]
+                month_en = MONTHS_EN[now.month]
+                return f"Today is {day_en}, {month_en} {now.day}, {now.year}."
             giorno = GIORNI_SETTIMANA[now.weekday()]
             mese = MESI_ANNO[now.month]
             return f"Oggi è {giorno} {now.day} {mese} {now.year}."
 
         weather_intent = extract_weather_intent(cmd)
         if weather_intent:
-            open_chrome = any(w in cmd for w in ("chrome", "browser", "apri", "cerca"))
+            open_chrome = any(w in cmd for w in ("chrome", "browser", "apri", "cerca", "open", "search"))
             w = fetch_weather_forecast(
                 city=weather_intent["city"],
                 day_offset=weather_intent["day_offset"],
                 open_chrome=open_chrome,
+                lang=eff_lang,
             )
-            return str(w["summary_it"])
+            return str(w.get("summary") or w["summary_it"])
 
         read_intent = extract_page_read_intent(cmd)
         if read_intent:
             page = read_active_chrome_page()
-            return format_page_reading_response(page, mode=read_intent["mode"], summarize_llm_fn=self.reflex_llm_fn)
+            return format_page_reading_response(
+                page,
+                mode=read_intent["mode"],
+                summarize_llm_fn=self.reflex_llm_fn,
+                lang=eff_lang,
+            )
 
         browser_intent = extract_browser_intent(cmd)
         if browser_intent:
@@ -268,8 +342,9 @@ class CorticalVoiceEngine:
                 query=browser_intent.get("query"),
                 url=browser_intent.get("url"),
                 focus=bool(browser_intent.get("focus", True)),
+                lang=eff_lang,
             )
-            return str(nav_res["summary_it"])
+            return str(nav_res.get("summary") or nav_res["summary_it"])
         return None
 
     def handle_utterance(
@@ -278,26 +353,39 @@ class CorticalVoiceEngine:
         force_task: bool = False,
         from_mic: bool = False,
         tts_currently_speaking: bool = False,
+        discourse_hints: Optional[dict[str, Any]] = None,
+        preferred_lang: Optional[str] = None,
     ) -> VoiceRouteResult:
-        """Routes a transcribed voice utterance: Echo Guard -> Stop -> Permission -> Status -> System 1/2."""
+        """Routes a transcribed voice utterance: Acoustic Priority Guard -> Stop -> Permission -> Status -> System 1/2."""
+        detected_lang = detect_language(transcript, default=preferred_lang or "it")
         if is_stop_command(transcript):
             if self.stop_callback:
                 self.stop_callback()
-            resp = "Ricevuto, mi fermo subito."
+            resp = "Got it, stopping right away." if detected_lang == "en" else "Ricevuto, mi fermo subito."
             self.record_spoken_output(resp)
             return VoiceRouteResult(
                 route="stop",
                 spoken_response=resp,
+                lang=detected_lang,
             )
 
         had_wake, cmd = strip_wake_word(transcript)
+        cmd_lang = detect_language(cmd or transcript, default=detected_lang)
 
-        # Acoustic Speaker-Bleed Shield: while TTS is playing out of the speakers,
-        # ignore any microphone pickup that does NOT explicitly start with the wake-word ("Ehi Cortical...")
-        if from_mic and tts_currently_speaking and not had_wake:
+        # Acoustic Speaker-Bleed Shield & Voice Priority:
+        # 1) Default strict shield when tts_currently_speaking=True without wake or acoustic user priority.
+        # 2) When client WebRTC AEC + spectral/RMS detector confirms distinct user speech while ducking
+        #    (discourse_hints={'acoustic_user_priority': True}), accept coherent user questions/commands cleanly.
+        acoustic_priority = bool(
+            isinstance(discourse_hints, dict)
+            and discourse_hints.get("acoustic_user_priority")
+            and is_human_discourse_or_question(transcript, self.last_spoken_text)
+        )
+        if from_mic and tts_currently_speaking and not had_wake and not acoustic_priority:
             return VoiceRouteResult(
                 route="ignored_echo",
                 spoken_response="",
+                lang=cmd_lang,
             )
 
         elapsed = time.time() - self.last_spoken_at
@@ -305,92 +393,121 @@ class CorticalVoiceEngine:
             return VoiceRouteResult(
                 route="ignored_echo",
                 spoken_response="",
+                lang=cmd_lang,
             )
 
-        # User is asking a genuine new question: interrupt/duck any previous ongoing speech
+        # User is asking a genuine new question: duck/interrupt any ongoing speech
         if self.duck_callback:
             self.duck_callback()
 
         if not cmd:
-            resp = "Sono in ascolto, dimmi pure."
+            resp = "I'm listening, go ahead." if cmd_lang == "en" else "Sono in ascolto, dimmi pure."
             self.record_spoken_output(resp)
             return VoiceRouteResult(
                 route="system1_reflex",
                 spoken_response=resp,
+                lang=cmd_lang,
             )
 
         # 1. Voice approval/rejection for Adaptive Permission Gate
         if self.pending_permission and any(
-            w in cmd for w in ("approva", "consenti", "autorizza", "rifiuta", "blocca", "nega")
+            w in cmd for w in ("approva", "consenti", "autorizza", "rifiuta", "blocca", "nega", "approve", "allow", "authorize", "reject", "deny", "block")
         ):
             tool_name, args = self.pending_permission
-            approved = any(w in cmd for w in ("approva", "consenti", "autorizza"))
-            remember = "ricorda" in cmd or "sempre" in cmd
+            approved = any(w in cmd for w in ("approva", "consenti", "autorizza", "approve", "allow", "authorize"))
+            remember = any(w in cmd for w in ("ricorda", "sempre", "remember", "always"))
             self.pending_permission = None
             if self.permission_gate:
                 dec = self.permission_gate.record_user_feedback(
                     tool_name, args, approved=approved, remember_always=remember
                 )
-                spoken = (
-                    f"Permesso accordato per {dec.normalized_pattern}."
-                    if approved
-                    else f"Operazione {dec.normalized_pattern} bloccata."
-                )
+                if cmd_lang == "en":
+                    spoken = (
+                        f"Permission granted for {dec.normalized_pattern}."
+                        if approved
+                        else f"Operation {dec.normalized_pattern} blocked."
+                    )
+                else:
+                    spoken = (
+                        f"Permesso accordato per {dec.normalized_pattern}."
+                        if approved
+                        else f"Operazione {dec.normalized_pattern} bloccata."
+                    )
                 self.record_spoken_output(spoken)
                 return VoiceRouteResult(
                     route="permission_feedback",
                     spoken_response=spoken,
                     permission_updated=dec.verdict,
+                    lang=cmd_lang,
                 )
 
         # 2. Subagent / Episode status check
-        if any(p in cmd for p in ("a che punto", "stato dei lavori", "stato agenti", "progressi")):
+        if any(p in cmd for p in ("a che punto", "stato dei lavori", "stato agenti", "progressi", "status update", "agent status", "how is it going", "active tasks")):
             if self.active_background_tasks:
                 summary = ", ".join(f"{tid}: {st}" for tid, st in self.active_background_tasks.items())
-                spoken = f"Ho {len(self.active_background_tasks)} task attivi: {summary}."
+                spoken = (
+                    f"I have {len(self.active_background_tasks)} active tasks: {summary}."
+                    if cmd_lang == "en"
+                    else f"Ho {len(self.active_background_tasks)} task attivi: {summary}."
+                )
                 self.record_spoken_output(spoken)
                 return VoiceRouteResult(
                     route="status_report",
                     spoken_response=spoken,
+                    lang=cmd_lang,
                 )
             if self.wiki_db:
                 macro = self.wiki_db.query_macro_graph(AccessContext(), limit=1)
                 if macro["episodes"]:
                     last = macro["episodes"][0]
-                    spoken = f"Ultimo task registrato: {last['title']} con stato {last['outcome_status']}."
+                    spoken = (
+                        f"Last recorded task: {last['title']} with status {last['outcome_status']}."
+                        if cmd_lang == "en"
+                        else f"Ultimo task registrato: {last['title']} con stato {last['outcome_status']}."
+                    )
                     self.record_spoken_output(spoken)
                     return VoiceRouteResult(
                         route="status_report",
                         spoken_response=spoken,
+                        lang=cmd_lang,
                     )
-            spoken = "Non ci sono task attivi al momento."
+            spoken = "There are no active tasks right now." if cmd_lang == "en" else "Non ci sono task attivi al momento."
             self.record_spoken_output(spoken)
             return VoiceRouteResult(
                 route="status_report",
                 spoken_response=spoken,
+                lang=cmd_lang,
             )
 
         # 3. System 2: Explicit-Only Task Creation!
-        # Everyday conversations NEVER create tasks unless explicitly requested.
         if force_task or is_explicit_task_request(cmd):
             task_id = self.agentic_dispatch_fn(cmd)
             self.active_background_tasks[task_id] = "in_progress"
-            spoken = f"Ho creato il task esplicito {task_id}. Puoi seguirlo e archiviarlo quando vuoi."
+            spoken = (
+                f"I created explicit task {task_id}. You can track and archive it anytime."
+                if cmd_lang == "en"
+                else f"Ho creato il task esplicito {task_id}. Puoi seguirlo e archiviarlo quando vuoi."
+            )
             self.record_spoken_output(spoken)
             return VoiceRouteResult(
                 route="system2_agentic",
                 spoken_response=spoken,
                 dispatched_task_goal=cmd,
+                lang=cmd_lang,
             )
 
         # 4. System 1: Conversational & Grounded Response (with Smart Memory Curation)
-        # Preserve original capitalization & URL punctuation for browser queries when calling grounding/LLM
         effective_prompt = transcript if extract_browser_intent(transcript) is not None else cmd
         if self.reflex_llm_fn is not None:
             answer = self.reflex_llm_fn(effective_prompt)
         else:
-            builtin = self._instant_builtin_reflex(effective_prompt)
-            answer = builtin if builtin is not None else f"Risposta rapida System 1: {cmd}"
+            builtin = self._instant_builtin_reflex(effective_prompt, lang=cmd_lang)
+            if builtin is not None:
+                answer = builtin
+            elif cmd_lang == "en":
+                answer = f"System 1 quick reply: {cmd}"
+            else:
+                answer = f"Risposta rapida System 1: {cmd}"
 
         curation_info = None
         if self.curator:
@@ -401,4 +518,5 @@ class CorticalVoiceEngine:
             route="system1_reflex",
             spoken_response=answer,
             memory_curation=curation_info,
+            lang=cmd_lang,
         )

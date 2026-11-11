@@ -701,6 +701,104 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertIn("chrome_search", enh.recommended_tools)
         self.assertIn("chrome_read_page", enh.recommended_tools)
 
+    def test_16_bilingual_guides_voices_and_acoustic_ducking_priority(self) -> None:
+        """Tests IT/EN bilingual grounding, voices, guides, Web Audio GainNode ducking, and acoustic user priority."""
+        from cortical.grounding import detect_language
+        from cortical.server import DASHBOARD_HTML, NEURAL_VOICES, shape_expressive_text
+        from cortical.voice.engine import CorticalVoiceEngine
+
+        # 1. Language detection & English browser/weather/read grounding
+        self.assertEqual(detect_language("what's the weather in London tomorrow"), "en")
+        self.assertEqual(detect_language("che ore sono adesso"), "it")
+
+        en_w = extract_weather_intent("what is the weather forecast in London tomorrow")
+        self.assertIsNotNone(en_w)
+        assert en_w is not None
+        self.assertEqual(en_w["city"], "London")
+        self.assertEqual(en_w["day_offset"], 1)
+        self.assertEqual(en_w["lang"], "en")
+
+        en_case = self.fixtures["bilingual_voice_cases"]["en_search"]
+        en_browser = extract_browser_intent(en_case["utterance"])
+        self.assertIsNotNone(en_browser)
+        assert en_browser is not None
+        self.assertEqual(en_browser["site"], "wikipedia")
+        self.assertEqual(en_browser["query"], "Albert Einstein")
+        self.assertEqual(en_browser["lang"], "en")
+
+        en_page = self.fixtures["chrome_pages"]["wikipedia_einstein_en"]
+        en_summary = format_page_reading_response(
+            en_page,
+            mode="summarize",
+            summarize_llm_fn=lambda _: "Albert Einstein developed special and general relativity and won the 1921 Nobel Prize.",
+            lang="en",
+        )
+        self.assertIn("relativity", en_summary)
+        en_read = format_page_reading_response(en_page, mode="read", lang="en")
+        self.assertIn("Reading page Albert Einstein - Wikipedia", en_read)
+
+        # 2. English + Italian neural voices & text shaping
+        self.assertIn("JennyNeural", NEURAL_VOICES)
+        self.assertIn("IsabellaNeural", NEURAL_VOICES)
+        shaped_en = shape_expressive_text("Temperature 20°C and 50% humidity", lang="en")
+        self.assertIn("20 degrees Celsius", shaped_en)
+        self.assertIn("50 percent", shaped_en)
+
+        # 3. Acoustic Ducking & User Voice Priority vs Speaker Bleed
+        duck_events: list[str] = []
+        stop_events: list[str] = []
+        engine = CorticalVoiceEngine(
+            duck_callback=lambda: duck_events.append("ducked"),
+            stop_callback=lambda: stop_events.append("stopped"),
+        )
+        engine.record_spoken_output("Le previsioni meteo per Roma indicano cielo sereno tutto il giorno.")
+
+        # Bare speaker bleed while TTS is playing without user acoustic priority -> ignored_echo
+        bleed_case = self.fixtures["bilingual_voice_cases"]["speaker_bleed"]
+        bleed_res = engine.handle_utterance(
+            bleed_case["utterance"],
+            from_mic=True,
+            tts_currently_speaking=True,
+        )
+        self.assertEqual(bleed_res.route, "ignored_echo")
+
+        # Genuine human question spoken while assistant is playing & ducking -> accepted and ducked!
+        prio_res = engine.handle_utterance(
+            "Hey Cortical, what time is it?",
+            from_mic=True,
+            tts_currently_speaking=True,
+            discourse_hints=en_case["discourse_hints"],
+        )
+        self.assertEqual(prio_res.route, "system1_reflex")
+        self.assertEqual(prio_res.lang, "en")
+        self.assertIn("It's ", prio_res.spoken_response)
+        self.assertEqual(len(duck_events), 1)
+
+        # English barge-in stop word
+        stop_res = engine.handle_utterance("Hey Cortical quiet", from_mic=True)
+        self.assertEqual(stop_res.route, "stop")
+        self.assertEqual(len(stop_events), 1)
+
+        # English explicit task trigger
+        task_res = engine.handle_utterance("create a task to review pull request")
+        self.assertEqual(task_res.route, "system2_agentic")
+        self.assertEqual(task_res.lang, "en")
+
+        # 4. Bilingual Guides, UI Language Toggle & Web Audio GainNode Ducking + AEC in DASHBOARD_HTML
+        self.assertIn("btn-ui-lang", DASHBOARD_HTML)
+        self.assertIn("GUIDE_DOCS", DASHBOARD_HTML)
+        self.assertIn("duckAssistantAudio", DASHBOARD_HTML)
+        self.assertIn("createMediaElementSource", DASHBOARD_HTML)
+        self.assertIn("echoCancellation: true", DASHBOARD_HTML)
+        self.assertIn("JennyNeural", DASHBOARD_HTML)
+        self.assertIn("Cortical v0.4 Interactive Guide (EN / IT)", DASHBOARD_HTML)
+
+        # 5. Bilingual Skill Enhancement Output
+        hub = CorticalSkillHub(CorticalWikiDB(self.wiki_db_path), self.root / ".pi" / "skills")
+        enh_en = hub.enhance_prompt(en_case["utterance"])
+        self.assertEqual(enh_en.selected_skills[0]["skill_id"], "visual-chrome-navigation")
+        self.assertIn("Always reply in clear, technically rigorous English", enh_en.enhanced_system_instructions)
+
 
 if __name__ == "__main__":
     unittest.main()
