@@ -48,6 +48,20 @@ ITALIAN_CONCEPT_BRIDGE = {
     "architetturale": "architecture",
     "browser": "browser",
     "navigazione": "browser",
+    "chrome": "chrome",
+    "wikipedia": "wikipedia",
+    "cerca": "search",
+    "ricerca": "search",
+    "apri": "open",
+    "form": "form",
+    "compila": "fill",
+    "invia": "submit",
+    "focus": "focus",
+    "leggi": "read",
+    "leggimi": "read",
+    "concetti": "concepts",
+    "articolo": "article",
+    "scheda": "tab",
     "pagina": "web",
     "sito": "web",
     "siti": "web",
@@ -106,8 +120,8 @@ MULTIAGENT_ROLES: dict[str, dict[str, Any]] = {
     "web_researcher": {
         "name": "Web & Browser Grounding Specialist",
         "wiki_depth": "light",
-        "tools": ["meteo_forecast", "chrome-devtools", "bash"],
-        "mission": "Esegue azioni reali sul browser / API esterne (Open-Meteo, Chrome DevTools) senza allucinare dati.",
+        "tools": ["chrome_search", "chrome_read_page", "meteo_forecast", "chrome-devtools", "bash"],
+        "mission": "Esegue navigazione visiva su Chrome in focus (apertura siti, compilazione form, invio ricerche), lettura/riassunto delle schede aperte e query Open-Meteo reali.",
     },
 }
 
@@ -343,6 +357,19 @@ class CorticalSkillHub:
                 "## 2. File Esterni Condivisi (AGENTS.md)\n"
                 "Standardizza ciò che l'AI sa sulle norme del team tra diverse sessioni di chat, prevenendo prompt ripetitivi.\n"
             ),
+            "visual-chrome-navigation": (
+                "---\n"
+                "name: visual-chrome-navigation\n"
+                "description: Navigazione visiva interattiva su Google Chrome in primo piano (focus) con apertura siti (Wikipedia, Google, YouTube, GitHub), compilazione DOM dei form di ricerca, invio della query e lettura/riassunto concettuale della pagina aperta.\n"
+                "---\n\n"
+                "# Visual Chrome Navigation, Form Filling & Page Reader\n\n"
+                "## Quando usarla\n"
+                "- Quando l'utente chiede esplicitamente di aprire il browser/Chrome, andare su un sito (es. Wikipedia), compilare la ricerca e mostrare il risultato in primo piano (`focus`).\n"
+                "- Quando in un turno successivo l'utente chiede di leggere o riassumere i concetti della pagina aperta.\n\n"
+                "## Procedura Operativa\n"
+                "1. Usa `chrome_search(site='wikipedia', query='<termine>', focus=True)` per portare Google Chrome in primo piano, aprire la scheda del sito, compilare il campo di ricerca nel DOM e inviare il form.\n"
+                "2. In un turno successivo, se l'utente chiede 'leggi' o 'riassumi i concetti della pagina aperta', invoca `chrome_read_page(mode='summarize'|'read')` per estrarre titolo, sezioni e testo pulito dalla scheda attiva di Chrome e sintetizzarli in italiano.\n"
+            ),
         }
         for slug, content in builtin_skills.items():
             sdir = self.skills_root / slug
@@ -402,6 +429,7 @@ class CorticalSkillHub:
                 "agent-instructions-alignment": ["wiki_navigate", "wiki_search", "submit_report"],
                 "modern-web-guidance": ["meteo_forecast", "chrome-devtools"],
                 "browser-use-playwright": ["meteo_forecast", "chrome-devtools", "bash"],
+                "visual-chrome-navigation": ["chrome_search", "chrome_read_page", "chrome-devtools", "bash"],
             }
             descriptors.append(
                 SkillDescriptor(
@@ -444,6 +472,11 @@ class CorticalSkillHub:
             score += 1200 * len(name_hits) + 250 * len(desc_hits) + 40 * len(body_hits)
 
             # Domain intent boosts
+            if any(
+                w in norm_p
+                for w in ("browser", "chrome", "wikipedia", "apri", "cerca", "ricerca", "pagina aperta", "scheda aperta", "leggi")
+            ) and sk.skill_id == "visual-chrome-navigation":
+                score += 2200
             if any(w in norm_p for w in ("meteo", "chrome", "browser", "web", "cerca")) and sk.skill_id in {
                 "modern-web-guidance",
                 "browser-use-playwright",

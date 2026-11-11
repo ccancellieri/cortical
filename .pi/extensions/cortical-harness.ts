@@ -91,6 +91,38 @@ function isWeatherQuery(text: string): boolean {
   );
 }
 
+function isPageReadQuery(text: string): boolean {
+  const norm = text.toLowerCase();
+  const hasPage =
+    norm.includes("pagina") ||
+    norm.includes("scheda") ||
+    norm.includes("articolo") ||
+    norm.includes("aperta") ||
+    norm.includes("aperto");
+  if (!hasPage) return false;
+  return (
+    norm.includes("leggi") ||
+    norm.includes("leggimi") ||
+    norm.includes("riassumi") ||
+    norm.includes("sintetizza") ||
+    norm.includes("concetti") ||
+    norm.includes("spiega")
+  );
+}
+
+function isBrowserSearchQuery(text: string): boolean {
+  const norm = text.toLowerCase();
+  return (
+    norm.includes("apri il browser") ||
+    norm.includes("apri chrome") ||
+    norm.includes("vai in wikipedia") ||
+    norm.includes("vai su wikipedia") ||
+    norm.includes("cerca su wikipedia") ||
+    norm.includes("cerca su google") ||
+    norm.includes("fai una ricerca")
+  );
+}
+
 function isExplicitTaskStart(text: string): boolean {
   const norm = text.toLowerCase();
   return (
@@ -278,7 +310,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
       if (!userPrompt) return undefined;
 
-      // A. Deterministic Weather & Chrome Grounding
+      // A. Deterministic Weather & Visual Chrome Grounding
       if (isWeatherQuery(userPrompt)) {
         const res = invokeCorticalCLI([
           "weather",
@@ -289,6 +321,19 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
         ctx.ui?.notify?.(`[Cortical Grounding] ${groundedSummary}`, "info");
+      } else if (isPageReadQuery(userPrompt)) {
+        const mode = userPrompt.toLowerCase().includes("leggi") && !userPrompt.toLowerCase().includes("riassumi")
+          ? "read"
+          : "summarize";
+        const res = invokeCorticalCLI(["chrome-read", "--mode", mode]);
+        const groundedSummary = String(res.summary_it || JSON.stringify(res));
+        pendingGroundedAnswer = groundedSummary;
+        ctx.ui?.notify?.(`[Cortical Chrome Reader] ${groundedSummary}`, "info");
+      } else if (isBrowserSearchQuery(userPrompt)) {
+        const res = invokeCorticalCLI(["chrome-search", "--prompt", userPrompt]);
+        const groundedSummary = String(res.summary_it || JSON.stringify(res));
+        pendingGroundedAnswer = groundedSummary;
+        ctx.ui?.notify?.(`[Cortical Visual Chrome] ${groundedSummary}`, "info");
       }
 
       // B. Auto-start explicit task if user asks in natural language ("crea un task per...")
@@ -542,6 +587,61 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         String(args.day_offset ?? 1),
         ...(args.open_chrome !== false ? ["--open-chrome"] : []),
       ]);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // 3b. Visual Chrome Navigation, Form Filling & Search Submission Tool for `pi`
+  pi.registerTool?.({
+    name: "chrome_search",
+    label: "Visual Chrome Navigate & Search (Focus)",
+    description:
+      "Porta Google Chrome in primo piano, apre un sito (es. Wikipedia, Google), compila il form di ricerca nel DOM e invia la ricerca.",
+    parameters: {
+      type: "object",
+      properties: {
+        site: { type: "string", default: "wikipedia" },
+        query: { type: "string" },
+        url: { type: "string" },
+        focus: { type: "boolean", default: true },
+      },
+      required: [],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const cliArgs = ["chrome-search"];
+      if (args.site) cliArgs.push("--site", String(args.site));
+      if (args.query) cliArgs.push("--query", String(args.query));
+      if (args.url) cliArgs.push("--url", String(args.url));
+      if (args.focus === false) cliArgs.push("--background");
+      const res = invokeCorticalCLI(cliArgs);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // 3c. Active Chrome Page Reader & Concept Summarizer Tool for `pi`
+  pi.registerTool?.({
+    name: "chrome_read_page",
+    label: "Read / Summarize Open Chrome Tab",
+    description:
+      "Legge o riassume i concetti principali della scheda attualmente aperta e attiva su Google Chrome.",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["read", "summarize"], default: "summarize" },
+      },
+      required: [],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const mode = args.mode === "read" ? "read" : "summarize";
+      const res = invokeCorticalCLI(["chrome-read", "--mode", mode]);
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         details: res,

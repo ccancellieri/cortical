@@ -49,5 +49,18 @@
         "chrome-devtools-mcp": "/opt/homebrew/bin/chrome-devtools-mcp"
       }
     }
+  },
+  "chrome_pages": {
+    "wikipedia_einstein": {
+      "url": "https://it.wikipedia.org/wiki/Albert_Einstein",
+      "title": "Albert Einstein - Wikipedia",
+      "headings": [
+        "Biografia",
+        "La relatività ristretta",
+        "La relatività generale",
+        "Premio Nobel per la fisica"
+      ],
+      "text": "Albert Einstein (Ulma, 14 marzo 1879 – Princeton, 18 aprile 1955) è stato un fisico e filosofo della scienza tedesco naturalizzato statunitense.\n\nNel 1905 pubblicò quattro articoli rivoluzionari sull'effetto fotoelettrico, il moto browniano, la relatività ristretta e l'equivalenza massa-energia (E=mc²).\n\nNel 1915 formulò la teoria della relatività generale descrivendo la gravità come curvatura dello spaziotempo. Nel 1921 ricevette il Premio Nobel per la fisica."
+    }
   }
 }

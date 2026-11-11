@@ -29,7 +29,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 
-from .grounding import extract_weather_intent, fetch_weather_forecast
+from .grounding import (
+    extract_browser_intent,
+    extract_page_read_intent,
+    extract_weather_intent,
+    fetch_weather_forecast,
+    format_page_reading_response,
+    read_active_chrome_page,
+    visual_chrome_navigate_and_search,
+)
 from .hardware.profiler import HardwareProfiler
 from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
@@ -111,18 +119,18 @@ def is_tts_speaking() -> bool:
         return alive
 
 
-def is_tts_speaking_or_cooling_down(cooldown_sec: float = 2.2) -> bool:
+def is_tts_speaking_or_cooling_down(cooldown_sec: float = 1.2) -> bool:
     """Returns True while TTS is actively playing OR within `cooldown_sec` after playback ends."""
+    if _TTS_DUCKED:
+        return False
     if is_tts_speaking():
         return True
     now_m = time.monotonic()
-    if _LAST_TTS_ENDED_AT > 0 and (now_m - _LAST_TTS_ENDED_AT) <= cooldown_sec:
-        return True
-    # Also estimate speech duration (~13 chars/sec + 1.4s synthesis buffer) as safety net
+    if _LAST_TTS_ENDED_AT > 0:
+        return (now_m - _LAST_TTS_ENDED_AT) <= cooldown_sec
     if _LAST_SPOKEN_AT > 0 and _LAST_SPOKEN_TEXT:
-        est_duration = max(3.2, len(_LAST_SPOKEN_TEXT) / 13.5 + 1.8)
-        if (now_m - _LAST_SPOKEN_AT) <= est_duration:
-            return True
+        est_duration = min(5.0, max(2.0, len(_LAST_SPOKEN_TEXT) / 15.0 + 0.8))
+        return (now_m - _LAST_SPOKEN_AT) <= est_duration
     return False
 
 
@@ -165,7 +173,7 @@ def speak_native_tts(
         return False
     stop_native_tts()
     spoken_natural = shape_expressive_italian_text(text)
-    _LAST_SPOKEN_TEXT = f"{text.strip()} {spoken_natural}".strip()
+    _LAST_SPOKEN_TEXT = spoken_natural
     _LAST_SPOKEN_AT = time.monotonic()
     _TTS_DUCKED = False
     vol_clamp = max(0.15, min(1.0, float(volume)))
@@ -254,6 +262,55 @@ def speak_native_tts(
     return False
 
 
+def _query_llm_endpoints(
+    system_prompt: str,
+    user_prompt: str,
+    base_url: str,
+    timeout: float = 8.0,
+) -> Optional[str]:
+    """Queries available local/LAN OpenAI-compatible servers in priority order."""
+    candidates = [
+        (base_url, "qwen2.5:1.5b" if ":11434" in base_url else "local-model"),
+        ("http://127.0.0.1:8080/v1", "local-model"),
+        ("http://127.0.0.1:11434/v1", "qwen2.5:1.5b"),
+        ("http://192.168.8.142:8080/v1", "local-model"),
+    ]
+    seen: set[str] = set()
+    for endpoint, model_name in candidates:
+        if not endpoint or endpoint in seen or ":20128" in endpoint:
+            continue
+        seen.add(endpoint)
+        url = endpoint.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": 350,
+            "temperature": 0.2,
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data["choices"][0]["message"]["content"].strip()
+                if "</think>" in content:
+                    content = content.split("</think>", 1)[1].strip()
+                if "no longer supported" in content.lower() or "antigravity.google" in content.lower():
+                    continue
+                if content:
+                    return content
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0) -> str:
     """Queries deterministic grounding first, then available local/LAN OpenAI-compatible servers in Italian."""
     now = datetime.datetime.now()
@@ -298,53 +355,40 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0) -> 
         )
         return str(forecast["summary_it"])
 
-    # 3. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN laptop :8080)
-    candidates = [
-        (base_url, "qwen2.5:1.5b" if ":11434" in base_url else "local-model"),
-        ("http://127.0.0.1:8080/v1", "local-model"),
-        ("http://127.0.0.1:11434/v1", "qwen2.5:1.5b"),
-        ("http://192.168.8.142:8080/v1", "local-model"),
-    ]
-    seen = set()
-    for endpoint, model_name in candidates:
-        if not endpoint or endpoint in seen or ":20128" in endpoint:
-            continue
-        seen.add(endpoint)
-        url = endpoint.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
-                        f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
-                        "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": 350,
-            "temperature": 0.2,
-        }
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                data = json.loads(resp.read().decode("utf-8"))
-                content = data["choices"][0]["message"]["content"].strip()
-                if "</think>" in content:
-                    content = content.split("</think>", 1)[1].strip()
-                if "no longer supported" in content.lower() or "antigravity.google" in content.lower():
-                    continue
-                if content:
-                    return content
-        except Exception:  # noqa: BLE001
-            continue
+    # 3. Active Chrome Tab Reading & Concept Summarization ("leggi la pagina" / "riassumi i concetti della pagina aperta")
+    read_intent = extract_page_read_intent(prompt)
+    if read_intent is not None:
+        page = read_active_chrome_page()
+        sys_sum = (
+            f"Sei Cortical, assistente vocale italiano creato da Carlo Cancellieri. "
+            f"Ora locale: {now.strftime('%H:%M')}. Riassumi i concetti chiave in italiano chiaro e scorrevole."
+        )
+        return format_page_reading_response(
+            page,
+            mode=read_intent["mode"],
+            summarize_llm_fn=lambda lp: _query_llm_endpoints(sys_sum, lp, base_url, timeout=timeout) or "",
+        )
+
+    # 4. Visual Chrome Navigation, Form Filling & Search Submission (in focus!)
+    browser_intent = extract_browser_intent(prompt)
+    if browser_intent is not None:
+        nav = visual_chrome_navigate_and_search(
+            site=browser_intent.get("site"),
+            query=browser_intent.get("query"),
+            url=browser_intent.get("url"),
+            focus=bool(browser_intent.get("focus", True)),
+        )
+        return str(nav["summary_it"])
+
+    # 5. Candidate LLM endpoints (Local llama-server :8080, Local Ollama :11434, LAN laptop :8080)
+    sys_chat = (
+        f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
+        f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
+        "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
+    )
+    llm_out = _query_llm_endpoints(sys_chat, prompt, base_url, timeout=timeout)
+    if llm_out:
+        return llm_out
 
     return f"Ho ricevuto la richiesta: '{prompt}'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per {prompt}'."
 
@@ -720,7 +764,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .live-transcript {
       font-size: 0.78rem; color: var(--accent); font-family: var(--mono);
-      min-width: 170px; max-width: 240px; white-space: nowrap;
+      min-width: 170px; max-width: 320px; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
     }
     .btn {
@@ -1713,17 +1757,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function isSelfEchoClient(candidate) {
       if (!candidate) return false;
       if (hasWakeOrBargeInWord(candidate)) return false;
-      if (isTtsShieldActive()) return true;
+      const candWords = normalizeTokens(candidate);
+      const spokenWords = new Set(normalizeTokens(lastSpokenResponseText || ''));
+      const overlap = (candWords.length && spokenWords.size)
+        ? (candWords.filter(w => spokenWords.has(w)).length / candWords.length)
+        : 0;
+      // During short TTS acoustic shield, ignore short 1-3 word bleeds or phrases overlapping with TTS,
+      // but NEVER drop clear multi-word human commands (>=4 distinct non-overlapping words).
+      if (isTtsShieldActive()) {
+        if (candWords.length < 4 || overlap >= 0.35) return true;
+        return false;
+      }
       if (!lastSpokenResponseText) return false;
       const elapsedSec = (Date.now() - lastSpokenAtMs) / 1000.0;
       if (elapsedSec > 25.0) return false;
-      const candWords = normalizeTokens(candidate);
-      const spokenWords = new Set(normalizeTokens(lastSpokenResponseText));
       if (!candWords.length || !spokenWords.size) return false;
       const candJoined = candWords.join(' ');
       const spokenJoined = normalizeTokens(lastSpokenResponseText).join(' ');
       if (candJoined.length >= 5 && spokenJoined.includes(candJoined)) return true;
-      const overlap = candWords.filter(w => spokenWords.has(w)).length / candWords.length;
       return overlap >= 0.45;
     }
 
@@ -1767,7 +1818,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (activeAbortController) {
         activeAbortController.abort();
       }
-      if (!fromMic || hasWakeOrBargeInWord(text)) {
+      const wordCount = normalizeTokens(text).length;
+      if (!fromMic || hasWakeOrBargeInWord(text) || (wordCount >= 4 && !isSelfEchoClient(text))) {
+        localTtsShieldUntilMs = 0;
         await fetch('/api/voice/duck', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -1784,10 +1837,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         switchMainStage('stream');
         await spawnAgentSession(text, depth, speak);
         return;
-      }
-
-      if (speak) {
-        localTtsShieldUntilMs = Date.now() + 4500;
       }
 
       activeAbortController = new AbortController();
@@ -1809,10 +1858,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           lastSpokenResponseText = d.spoken_response;
           lastSpokenAtMs = Date.now();
           if (speak && d.route !== 'stop') {
-            const estMs = Math.max(4800, d.spoken_response.length * 82 + 2400);
+            const estMs = Math.min(7500, Math.max(2500, d.spoken_response.length * 55 + 1100));
             localTtsShieldUntilMs = Date.now() + estMs;
           } else {
-            localTtsShieldUntilMs = Date.now() + 1200;
+            localTtsShieldUntilMs = Date.now() + 900;
           }
         }
 
@@ -1990,6 +2039,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       appendStreamCard('subagent', 'TERMINAL LAUNCHER', d.platform || 'CLI', 'Apertura sessione interattiva `pi`', JSON.stringify(d, null, 2));
     }
 
+    let micFinalBuffer = '';
+    let micInterimBuffer = '';
+    let micCommitTimer = null;
+    let micRestartTimer = null;
+    let micIsRecognizing = false;
+
+    function flushMicTranscriptBuffer() {
+      if (micCommitTimer) {
+        clearTimeout(micCommitTimer);
+        micCommitTimer = null;
+      }
+      const combined = `${micFinalBuffer} ${micInterimBuffer}`.replace(/\\s+/g, ' ').trim();
+      micFinalBuffer = '';
+      micInterimBuffer = '';
+      const promptInput = document.getElementById('prompt-input');
+      if (promptInput) {
+        promptInput.placeholder = "Chiedi a Cortical (con i file/skill allegati qui sopra) o di' 'Ehi Cortical...'";
+      }
+      if (!combined) return;
+      if (isSelfEchoClient(combined)) {
+        const lt = document.getElementById('live-transcript');
+        if (lt) lt.textContent = '🔇 [Eco altoparlante ignorato]';
+        return;
+      }
+      const lt = document.getElementById('live-transcript');
+      if (lt) {
+        lt.textContent = `🗣️ "${combined}"`;
+        lt.title = combined;
+      }
+      submitComposer(combined);
+    }
+
+    function scheduleMicCommit(delayMs) {
+      if (micCommitTimer) clearTimeout(micCommitTimer);
+      micCommitTimer = setTimeout(flushMicTranscriptBuffer, delayMs);
+    }
+
+    function startMicRecognizer() {
+      if (!alwaysOnActive || !recognition || micIsRecognizing) return;
+      try {
+        recognition.start();
+      } catch (_) {}
+    }
+
     function toggleAlwaysOnMic() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SR) {
@@ -1998,7 +2091,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
       if (alwaysOnActive) {
         alwaysOnActive = false;
-        if (recognition) recognition.stop();
+        if (micCommitTimer) clearTimeout(micCommitTimer);
+        if (micRestartTimer) clearTimeout(micRestartTimer);
+        micFinalBuffer = '';
+        micInterimBuffer = '';
+        if (recognition) {
+          try { recognition.stop(); } catch (_) {}
+        }
+        micIsRecognizing = false;
         document.getElementById('mic-dot').classList.remove('listening');
         document.getElementById('btn-always-on').textContent = '🎤 Mic: OFF';
         document.getElementById('live-transcript').textContent = 'Microfono in pausa.';
@@ -2006,29 +2106,55 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       alwaysOnActive = true;
+      micFinalBuffer = '';
+      micInterimBuffer = '';
       document.getElementById('mic-dot').classList.add('listening');
       document.getElementById('btn-always-on').textContent = '🟢 Mic Attivo';
-      document.getElementById('live-transcript').textContent = 'In ascolto (Scudo Anti-Eco attivo)...';
+      document.getElementById('live-transcript').textContent = 'In ascolto (parla pure, anche frasi lunghe)...';
 
       recognition = new SR();
       recognition.lang = 'it-IT';
       recognition.continuous = true;
       recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        micIsRecognizing = true;
+        if (!micFinalBuffer && !micInterimBuffer) {
+          document.getElementById('live-transcript').textContent = '🎙️ In ascolto...';
+        }
+      };
+
+      recognition.onspeechstart = () => {
+        document.getElementById('mic-dot').classList.add('listening');
+        if (!micFinalBuffer && !micInterimBuffer) {
+          document.getElementById('live-transcript').textContent = '🎙️ Voce rilevata...';
+        }
+      };
 
       recognition.onresult = (event) => {
-        let interim = '';
+        let currentInterim = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const transcript = event.results[i][0].transcript.trim();
-          if (isSelfEchoClient(transcript)) {
-            document.getElementById('live-transcript').textContent = `🔇 [Scudo Anti-Eco: ignoro la mia voce]`;
+          const chunk = (event.results[i][0]?.transcript || '').trim();
+          if (!chunk) continue;
+          if (isSelfEchoClient(chunk) && !micFinalBuffer) {
+            const lt = document.getElementById('live-transcript');
+            if (lt) lt.textContent = '🔇 [Scudo Anti-Eco: ignoro la mia voce]';
             continue;
           }
           if (event.results[i].isFinal) {
-            document.getElementById('live-transcript').textContent = `🗣️ "${transcript}"`;
-            submitComposer(transcript);
+            micFinalBuffer = `${micFinalBuffer} ${chunk}`.replace(/\\s+/g, ' ').trim();
+            micInterimBuffer = '';
+            // If user explicitly issued a stop/barge-in word, flush immediately without waiting!
+            if (hasWakeOrBargeInWord(micFinalBuffer) && micFinalBuffer.split(/\\s+/).length <= 4) {
+              flushMicTranscriptBuffer();
+              return;
+            }
+            scheduleMicCommit(1250);
           } else {
-            interim += transcript + ' ';
-            if (hasWakeOrBargeInWord(interim)) {
+            currentInterim += chunk + ' ';
+            if (hasWakeOrBargeInWord(currentInterim)) {
+              localTtsShieldUntilMs = 0;
               fetch('/api/voice/duck', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -2037,18 +2163,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
           }
         }
-        if (interim && !isTtsShieldActive()) {
-          document.getElementById('live-transcript').textContent = `🎙️ … ${interim}`;
+        if (currentInterim.trim()) {
+          micInterimBuffer = currentInterim.trim();
+          // Fallback silence commit if Chromium delays emitting isFinal on long sentences
+          scheduleMicCommit(2200);
+        }
+        const livePreview = `${micFinalBuffer} ${micInterimBuffer}`.replace(/\\s+/g, ' ').trim();
+        if (livePreview) {
+          const lt = document.getElementById('live-transcript');
+          if (lt) {
+            lt.textContent = `🎙️ ${livePreview}`;
+            lt.title = livePreview;
+          }
+          const pi = document.getElementById('prompt-input');
+          if (pi && !pi.value) {
+            pi.placeholder = `🎙️ Trascrizione live: "${livePreview}"`;
+          }
         }
       };
 
-      recognition.onerror = () => {};
-      recognition.onend = () => {
-        if (alwaysOnActive) {
-          try { recognition.start(); } catch (_) {}
+      recognition.onerror = (ev) => {
+        const errCode = ev?.error || 'unknown';
+        const lt = document.getElementById('live-transcript');
+        if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
+          alwaysOnActive = false;
+          micIsRecognizing = false;
+          document.getElementById('mic-dot').classList.remove('listening');
+          document.getElementById('btn-always-on').textContent = '🎤 Mic: Negato';
+          if (lt) lt.textContent = '🚫 Permesso microfono negato dal browser.';
+          appendStreamCard('permission', 'MICROFONO BLOCCATO', errCode, 'Consenti accesso al microfono nel browser (lucchetto URL).', '');
+          return;
+        }
+        if (errCode === 'audio-capture') {
+          if (lt) lt.textContent = '⚠️ Nessun microfono audio rilevato.';
+          return;
+        }
+        if (errCode === 'network' && lt) {
+          lt.textContent = '⚠️ Rete Web Speech momentaneamente instabile, riconnessione...';
         }
       };
-      recognition.start();
+
+      recognition.onend = () => {
+        micIsRecognizing = false;
+        // Flush any accumulated long-phrase transcript before restarting
+        if (micFinalBuffer || micInterimBuffer) {
+          flushMicTranscriptBuffer();
+        }
+        if (alwaysOnActive) {
+          if (micRestartTimer) clearTimeout(micRestartTimer);
+          micRestartTimer = setTimeout(startMicRecognizer, 220);
+        }
+      };
+
+      startMicRecognizer();
     }
 
     // =========================================================================

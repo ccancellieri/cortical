@@ -8,7 +8,15 @@ import unittest
 from pathlib import Path
 
 from cortical.cli import main as cli_main
-from cortical.grounding import extract_weather_intent, fetch_weather_forecast
+from cortical.grounding import (
+    extract_browser_intent,
+    extract_page_read_intent,
+    extract_weather_intent,
+    fetch_weather_forecast,
+    format_page_reading_response,
+    read_active_chrome_page,
+    visual_chrome_navigate_and_search,
+)
 from cortical.hardware.profiler import HardwareProfiler
 from cortical.memory import MemoryCurator, is_ephemeral_utterance, is_explicit_task_request
 from cortical.permissions.gate import AdaptivePermissionGate
@@ -618,6 +626,80 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertIn("ai-reviewer-mandate-and-complexity", skill_ids)
         self.assertIn("pr-contract-and-diff-constrainer", skill_ids)
         self.assertIn("agent-instructions-alignment", skill_ids)
+
+    def test_15_visual_chrome_navigation_form_fill_and_page_reading(self) -> None:
+        """Tests long Italian voice phrase parsing, visual Chrome focus navigation/form-filling, skill routing, and active tab reading/summarizing."""
+        phrase = "fai una ricerca per me, apri il browser e vai in wikipedia e cerca Albert Einstain"
+        intent = extract_browser_intent(phrase)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent["site"], "wikipedia")
+        self.assertEqual(intent["query"], "Albert Einstain")
+        self.assertTrue(intent["focus"])
+
+        # Follow-up read & summarize intent extraction
+        sum_intent = extract_page_read_intent("riassumi i concetti della pagina aperta")
+        self.assertEqual(sum_intent, {"mode": "summarize"})
+        read_intent = extract_page_read_intent("leggi la pagina aperta")
+        self.assertEqual(read_intent, {"mode": "read"})
+
+        # Mocked visual Chrome AppleScript execution using fixture data
+        wiki_fix = self.fixtures["chrome_pages"]["wikipedia_einstein"]
+        executed_scripts: list[str] = []
+
+        def fake_osascript(script: str, timeout: float = 10.0) -> tuple[bool, str]:
+            executed_scripts.append(script)
+            if "get loading" in script:
+                return (True, "false")
+            if "dispatchEvent" in script:
+                return (True, json.dumps({"filled": True, "submitted": True}))
+            if "headings" in script:
+                return (True, json.dumps(wiki_fix))
+            if "excerpt" in script:
+                return (
+                    True,
+                    json.dumps(
+                        {
+                            "url": wiki_fix["url"],
+                            "title": wiki_fix["title"],
+                            "excerpt": wiki_fix["text"][:160],
+                        }
+                    ),
+                )
+            return (True, "")
+
+        nav_res = visual_chrome_navigate_and_search(
+            site=intent["site"],
+            query=intent["query"],
+            focus=True,
+            runner=fake_osascript,
+        )
+        self.assertTrue(nav_res["ok"])
+        self.assertEqual(nav_res["method"], "chrome_applescript_form_fill")
+        self.assertEqual(nav_res["page_title"], "Albert Einstein - Wikipedia")
+        self.assertTrue(any("activate" in s for s in executed_scripts))
+        self.assertTrue(any("#searchInput" in s for s in executed_scripts))
+
+        # Verify reading & concept summarization on the active tab
+        page = read_active_chrome_page(runner=fake_osascript)
+        self.assertTrue(page["ok"])
+        self.assertEqual(page["title"], "Albert Einstein - Wikipedia")
+        read_out = format_page_reading_response(page, mode="read")
+        self.assertIn("Lettura della pagina Albert Einstein - Wikipedia", read_out)
+        sum_out = format_page_reading_response(
+            page,
+            mode="summarize",
+            summarize_llm_fn=lambda p: "Albert Einstein formulò la relatività ristretta nel 1905 e quella generale nel 1915.",
+        )
+        self.assertIn("relatività", sum_out)
+
+        # Verify Skill Router binds `visual-chrome-navigation` & `chrome_search` / `chrome_read_page`
+        db = CorticalWikiDB(self.wiki_db_path)
+        hub = CorticalSkillHub(db, self.root / ".pi" / "skills")
+        enh = hub.enhance_prompt(phrase)
+        self.assertEqual(enh.selected_skills[0]["skill_id"], "visual-chrome-navigation")
+        self.assertIn("chrome_search", enh.recommended_tools)
+        self.assertIn("chrome_read_page", enh.recommended_tools)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from ..grounding import extract_weather_intent, fetch_weather_forecast
+from ..grounding import (
+    extract_browser_intent,
+    extract_page_read_intent,
+    extract_weather_intent,
+    fetch_weather_forecast,
+    format_page_reading_response,
+    read_active_chrome_page,
+    visual_chrome_navigate_and_search,
+)
 from ..memory import MemoryCurator, is_explicit_task_request
 from ..permissions.gate import AdaptivePermissionGate
 from ..wiki.db import AccessContext, CorticalWikiDB
@@ -247,6 +255,21 @@ class CorticalVoiceEngine:
                 open_chrome=open_chrome,
             )
             return str(w["summary_it"])
+
+        read_intent = extract_page_read_intent(cmd)
+        if read_intent:
+            page = read_active_chrome_page()
+            return format_page_reading_response(page, mode=read_intent["mode"], summarize_llm_fn=self.reflex_llm_fn)
+
+        browser_intent = extract_browser_intent(cmd)
+        if browser_intent:
+            nav_res = visual_chrome_navigate_and_search(
+                site=browser_intent.get("site"),
+                query=browser_intent.get("query"),
+                url=browser_intent.get("url"),
+                focus=bool(browser_intent.get("focus", True)),
+            )
+            return str(nav_res["summary_it"])
         return None
 
     def handle_utterance(
@@ -361,10 +384,12 @@ class CorticalVoiceEngine:
             )
 
         # 4. System 1: Conversational & Grounded Response (with Smart Memory Curation)
+        # Preserve original capitalization & URL punctuation for browser queries when calling grounding/LLM
+        effective_prompt = transcript if extract_browser_intent(transcript) is not None else cmd
         if self.reflex_llm_fn is not None:
-            answer = self.reflex_llm_fn(cmd)
+            answer = self.reflex_llm_fn(effective_prompt)
         else:
-            builtin = self._instant_builtin_reflex(cmd)
+            builtin = self._instant_builtin_reflex(effective_prompt)
             answer = builtin if builtin is not None else f"Risposta rapida System 1: {cmd}"
 
         curation_info = None

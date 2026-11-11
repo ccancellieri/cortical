@@ -9,7 +9,15 @@ import sys
 import time
 from pathlib import Path
 
-from .grounding import extract_weather_intent, fetch_weather_forecast
+from .grounding import (
+    extract_browser_intent,
+    extract_page_read_intent,
+    extract_weather_intent,
+    fetch_weather_forecast,
+    format_page_reading_response,
+    read_active_chrome_page,
+    visual_chrome_navigate_and_search,
+)
 from .hardware.profiler import HardwareProfiler
 from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
@@ -136,7 +144,19 @@ def main(argv: list[str] | None = None) -> int:
     p_cdel = sub.add_parser("concept-delete", help="Delete a user-developed concept from memory")
     p_cdel.add_argument("--node-id", required=True)
 
-    # 19. serve (Live HTTP + Voice + Second Brain Daemon)
+    # 19. chrome-search (Visual Chrome Navigation & DOM Form Submission)
+    p_csearch = sub.add_parser("chrome-search", help="Open Google Chrome in focus, fill search form and submit")
+    p_csearch.add_argument("--site", default="")
+    p_csearch.add_argument("--query", default="")
+    p_csearch.add_argument("--url", default="")
+    p_csearch.add_argument("--prompt", default="")
+    p_csearch.add_argument("--background", action="store_true")
+
+    # 20. chrome-read (Read or Summarize Open Active Chrome Tab)
+    p_cread = sub.add_parser("chrome-read", help="Read and optionally summarize the active Chrome tab")
+    p_cread.add_argument("--mode", choices=["read", "summarize"], default="summarize")
+
+    # 21. serve (Live HTTP + Voice + Second Brain Daemon)
     p_serve = sub.add_parser("serve", help="Run the live Cortical HTTP, Voice & Second Brain service")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
@@ -335,6 +355,28 @@ def main(argv: list[str] | None = None) -> int:
         db = CorticalWikiDB(args.db)
         res = db.delete_concept_node(AccessContext(), args.node_id)
         print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "chrome-search":
+        site = args.site or None
+        query = args.query or None
+        url = args.url or None
+        focus = not bool(args.background)
+        if args.prompt:
+            intent = extract_browser_intent(args.prompt)
+            if intent:
+                site = site or intent.get("site")
+                query = query or intent.get("query")
+                url = url or intent.get("url")
+                focus = bool(intent.get("focus", focus))
+        res = visual_chrome_navigate_and_search(site=site, query=query, url=url, focus=focus)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "chrome-read":
+        page = read_active_chrome_page()
+        summary = format_page_reading_response(page, mode=args.mode)
+        print(json.dumps({**page, "mode": args.mode, "summary_it": summary}, indent=2))
         return 0
 
     if args.cmd == "serve":
