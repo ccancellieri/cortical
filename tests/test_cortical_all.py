@@ -1914,6 +1914,88 @@ class TestCorticalSystem(unittest.TestCase):
         )
         self.assertEqual(fitted["telemetry"]["strategy"], "paragraph_compaction")
 
+    def test_30_claude_style_approval_broker_streaming_and_status_protocol(self) -> None:
+        import sys
+        import threading
+        from cortical.agent_runtime import (
+            ApprovalBroker,
+            build_agent_prompt,
+            parse_agent_status,
+            run_streaming_process,
+        )
+        from cortical.permissions.gate import AdaptivePermissionGate
+        from cortical.server import CorticalLiveService
+        from cortical.wiki.db import AccessContext, CorticalWikiDB
+
+        gate = AdaptivePermissionGate(self.perm_db_path)
+        self.assertEqual(gate.evaluate("grep", {"pattern": "foo", "path": "."}).verdict, "allow")
+        self.assertEqual(gate.evaluate("find", {"pattern": "*.py"}).verdict, "allow")
+        self.assertEqual(gate.evaluate("ls", {"path": "."}).verdict, "allow")
+
+        broker = ApprovalBroker(gate, default_timeout_sec=5.0)
+        # 1. ask mode prompts on medium/high bash cmd, then allow_session remembers for session
+        req1 = broker.request("pi-s1", "bash", {"command": "pytest tests/"}, role="Implementer")
+        self.assertEqual(req1["decision"], "pending")
+        aid = req1["approval_id"]
+
+        def _approve_later() -> None:
+            time.sleep(0.05)
+            broker.resolve(aid, "allow_session", feedback="ok")
+
+        threading.Thread(target=_approve_later, daemon=True).start()
+        res_wait = broker.wait(aid, timeout_sec=2.0)
+        self.assertEqual(res_wait["decision"], "allow")
+        req2 = broker.request("pi-s1", "bash", {"command": "pytest tests/test_a.py"})
+        self.assertEqual(req2["decision"], "allow")
+
+        # 2. auto_edit allows edit/write + dev/test bash without prompting
+        broker.set_mode("pi-s2", "auto_edit")
+        self.assertEqual(broker.request("pi-s2", "edit", {"path": "src/a.py"})["decision"], "allow")
+        self.assertEqual(broker.request("pi-s2", "bash", {"command": "git status"})["decision"], "allow")
+
+        # 3. Streaming watchdog terminates stalled subprocess cleanly
+        stall_res = run_streaming_process(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            cwd=str(self.root),
+            env=os.environ.copy(),
+            on_line=lambda _l: None,
+            idle_timeout_sec=0.25,
+            hard_timeout_sec=2.0,
+            poll_interval=0.05,
+        )
+        self.assertEqual(stall_res["exit_reason"], "idle_timeout")
+
+        # 4. Prompt & completion status protocol
+        p = build_agent_prompt("Fix bug", workspace=str(self.root), is_follow_up=True)
+        self.assertIn("Follow-up from the user", p)
+        self.assertIn("STATUS: DONE", p)
+        self.assertEqual(parse_agent_status("All fixed.\nSTATUS: DONE", tool_count=3)["status"], "completed")
+        self.assertEqual(parse_agent_status("Which port?\nSTATUS: NEEDS_INPUT")["status"], "needs_input")
+        self.assertEqual(parse_agent_status("Missing key\nSTATUS: BLOCKED")["status"], "blocked")
+        self.assertEqual(parse_agent_status("", exit_reason="idle_timeout")["status"], "stalled")
+
+        # 5. Live HTTP approval endpoints
+        db = CorticalWikiDB(self.wiki_db_path)
+        db.ensure_workspace(AccessContext(), root_path="/", can_write=True)
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        svc.repo_root = self.root
+
+        st_m, res_m = svc.handle_api("POST", "/api/agents/approval-mode", {}, {"session_id": "pi-api-1", "mode": "ask"})
+        self.assertEqual(st_m, 200)
+        self.assertEqual(res_m["approval_mode"], "ask")
+
+        st_r, res_r = svc.handle_api("POST", "/api/approvals/request", {}, {"session_id": "pi-api-1", "tool": "bash", "args": {"command": "docker ps"}})
+        self.assertEqual(st_r, 200)
+        self.assertEqual(res_r["decision"], "pending")
+        st_l, res_l = svc.handle_api("GET", "/api/approvals", {"session_id": ["pi-api-1"]}, {})
+        self.assertEqual(st_l, 200)
+        self.assertEqual(len(res_l["pending"]), 1)
+
+        st_d, res_d = svc.handle_api("POST", "/api/approvals/resolve", {}, {"approval_id": res_r["approval_id"], "decision": "deny", "feedback": "Usa unittest"})
+        self.assertEqual(st_d, 200)
+        self.assertEqual(res_d["decision"], "deny")
+        self.assertEqual(res_d["feedback"], "Usa unittest")
+
 
 if __name__ == "__main__":
     unittest.main()

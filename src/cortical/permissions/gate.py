@@ -198,7 +198,7 @@ class AdaptivePermissionGate:
     def normalize_pattern(self, tool_name: str, args: dict[str, Any]) -> tuple[str, float]:
         """Extracts a reusable canonical pattern and initial base risk score."""
         tool = tool_name.lower()
-        if tool in {"read", "read_file"}:
+        if tool in {"read", "read_file", "grep", "find", "ls", "glob"}:
             target_path = str(args.get("path") or args.get("file_path") or "")
             if SENSITIVE_PATH_RE.search(target_path):
                 return (f"{tool}:HARD_BLOCK:sensitive:{target_path}", 1.0)

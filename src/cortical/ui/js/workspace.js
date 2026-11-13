@@ -625,6 +625,24 @@ function renderContextAgentsBar(activeSess, sessions, globalTokenSummary, contex
   }
 }
 
+function taskStatusMeta(active) {
+  if (!active) return { text: 'CARICAMENTO', cls: 'open' };
+  const st = active.status || 'open';
+  const isArch = active.lifecycle_state === 'archived' || st === 'archived';
+  if (isArch) return { text: 'ARCHIVIATO', cls: 'archived' };
+  const map = {
+    working: { text: 'IN ESECUZIONE', cls: 'working' },
+    awaiting_approval: { text: 'ATTESA APPROVAZIONE', cls: 'working' },
+    needs_input: { text: 'ATTENDE RISPOSTA', cls: 'open' },
+    blocked: { text: 'BLOCCATO', cls: 'error' },
+    stalled: { text: 'TIMEOUT', cls: 'error' },
+    stopped: { text: 'INTERROTTO', cls: 'open' },
+    error: { text: 'ERRORE', cls: 'error' },
+    completed: { text: 'COMPLETATO', cls: 'open' },
+  };
+  return map[st] || { text: 'APERTO', cls: 'open' };
+}
+
 export function renderTaskBanner(active) {
   const banner = document.getElementById('active-task-banner');
   if (!banner) return;
@@ -635,11 +653,14 @@ export function renderTaskBanner(active) {
   }
   const sid = active ? active.session_id : store.selectedSessionId;
   const isArch = active ? (active.lifecycle_state === 'archived' || active.status === 'archived') : false;
-  const badgeText = active ? (active.status === 'working' ? 'WORKING' : (isArch ? 'ARCHIVIATO' : 'APERTO')) : 'CARICAMENTO';
-  const badgeCls = active ? (active.status === 'working' ? 'working' : (isArch ? 'archived' : 'open')) : 'open';
+  const meta = taskStatusMeta(active);
+  const badgeText = meta.text;
+  const badgeCls = meta.cls;
   const goalTxt = active?.goal ? String(active.goal).split('\n')[0].slice(0, 120) : 'Caricamento dettagli task...';
   const titleTxt = active?.title || sid;
   const effBadge = active?.effort ? `<span class="status-pill">${escapeHtml(String(active.effort).toUpperCase())}</span>` : '';
+  const aprMode = active?.approval_mode || 'ask';
+  const isRunning = active && (active.status === 'working' || active.status === 'awaiting_approval');
   banner.style.display = 'flex';
   banner.innerHTML = `
     <div style="min-width:0; flex:1; display:flex; align-items:center; gap:8px;">
@@ -650,8 +671,13 @@ export function renderTaskBanner(active) {
       <button type="button" class="mini-action-btn" data-banner-action="rename" data-sid="${escapeHtml(sid)}" data-title="${escapeHtml(titleTxt)}" title="Rinomina task">✏️</button>
       <span style="color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(active?.goal || '')}">${escapeHtml(goalTxt)}</span>
     </div>
-    <div style="display:flex; gap:6px; flex-shrink:0;">
-      ${active && active.status === 'working'
+    <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
+      <select id="task-approval-mode" data-sid="${escapeHtml(sid)}" title="Modalità approvazione comandi" style="font-size:0.72rem;">
+        <option value="ask" ${aprMode === 'ask' ? 'selected' : ''}>🔐 Chiedi conferme</option>
+        <option value="auto_edit" ${aprMode === 'auto_edit' ? 'selected' : ''}>⚡ Auto-edit &amp; test</option>
+        <option value="full_auto" ${aprMode === 'full_auto' ? 'selected' : ''}>🚀 Full Auto</option>
+      </select>
+      ${isRunning
         ? `<button type="button" class="btn btn-danger btn-sm" data-banner-action="stop">⏹ Ferma</button>`
         : ''}
       <button type="button" class="btn btn-ghost btn-sm" data-banner-action="chat">💬 Torna alla Chat</button>
@@ -729,7 +755,33 @@ export async function fetchFilteredAgentRuns(episodeId, reset = true) {
   }
 }
 
-function renderTaskStreamHtml(active) {
+function renderApprovalCardHtml(pa) {
+  if (!pa) return '';
+  const isPending = pa.status === 'pending';
+  const riskPct = Math.round(Number(pa.risk || 0) * 100);
+  const borderCol = isPending ? 'rgba(251,191,36,0.75)' : (pa.status === 'allowed' ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)');
+  return `
+    <div class="step-card" style="border:1.5px solid ${borderCol}; background:rgba(15,23,42,0.85); margin:8px 0; padding:10px 12px; border-radius:10px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+        <span style="font-weight:700; font-size:0.82rem;">🔐 Approvazione Tool: <code>${escapeHtml(pa.tool || 'bash')}</code></span>
+        <span class="status-pill">${escapeHtml(pa.pattern || '')} · rischio ${riskPct}%</span>
+      </div>
+      <pre class="step-detail" style="margin:0 0 8px 0; padding:8px; background:rgba(2,6,23,0.65); border-radius:6px; white-space:pre-wrap;">${escapeHtml(pa.summary || '')}</pre>
+      ${pa.reason ? `<div style="font-size:0.72rem; color:var(--muted); margin-bottom:8px;">${escapeHtml(pa.reason)}</div>` : ''}
+      ${isPending ? `
+        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+          <button type="button" class="btn btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_once">✓ Consenti</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_session">✓ Questa sessione</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_always">★ Sempre</button>
+          <button type="button" class="btn btn-danger btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="deny">✕ Nega</button>
+          <input type="text" id="apr-fb-${escapeHtml(pa.approval_id)}" placeholder="Feedback opzionale se neghi..." style="flex:1; min-width:170px; font-size:0.74rem;" />
+        </div>
+      ` : `<div style="font-size:0.74rem; color:var(--muted);">Esito: <b>${escapeHtml(pa.decision || pa.status)}</b>${pa.feedback ? ` · ${escapeHtml(pa.feedback)}` : ''}</div>`}
+    </div>
+  `;
+}
+
+function renderTaskStreamHtml(active, pendingApprovals = []) {
   const runs = active.runs || [];
   const tok = active.token_summary || {};
   const effortLabel = String(active.effort || 'medium').toUpperCase();
@@ -791,6 +843,12 @@ function renderTaskStreamHtml(active) {
             </div>
           `;
         }
+        if (typ === 'approval') {
+          return renderApprovalCardHtml(st.meta?.approval);
+        }
+        if (typ === 'approval_result') {
+          return `<div style="font-size:0.74rem; color:var(--muted); padding:2px 6px;">${escapeHtml(st.title)}</div>`;
+        }
         if (typ === 'output') {
           return `
             <div class="final-report-card">
@@ -812,11 +870,23 @@ function renderTaskStreamHtml(active) {
       }).join('')
     : `<div class="step-card"><div class="step-title">🤖 Task ${escapeHtml(active.session_id)} aperto — scrivi qui sotto per inviare istruzioni.</div></div>`;
 
-  const workingFooter = active.status === 'working'
-    ? `<div class="tool-trace" open style="border-color:rgba(251,191,36,0.45);"><div class="tool-trace-summary"><span>⏳ Agente locale in esecuzione (${escapeHtml(effortLabel)})...</span><span>🛑 Stop per interrompere</span></div></div>`
-    : '';
+  const shownIds = new Set(steps.map((s) => s.meta?.approval?.approval_id).filter(Boolean));
+  const extraPendingHtml = (pendingApprovals || [])
+    .filter((p) => p.session_id === active.session_id && !shownIds.has(p.approval_id))
+    .map((p) => renderApprovalCardHtml(p))
+    .join('');
 
-  return reportPanel + stepsHtml + workingFooter;
+  const act = active.current_activity;
+  const actTxt = act ? `<b>${escapeHtml(act.tool || 'working')}</b> ${escapeHtml(act.summary || '')}` : `Agente locale in esecuzione (${escapeHtml(effortLabel)})...`;
+  const workingFooter = active.status === 'working'
+    ? `<div class="tool-trace" style="border-color:rgba(251,191,36,0.45); padding:8px 12px; display:flex; justify-content:space-between; align-items:center; gap:8px;"><span>⏳ ${actTxt}</span><button type="button" class="btn btn-danger btn-sm" data-banner-action="stop">⏹ Ferma</button></div>`
+    : (active.status === 'needs_input'
+      ? `<div class="step-card" style="border:1px solid rgba(56,189,248,0.5); padding:10px 12px; margin-top:8px;">💬 <b>Serve una tua risposta</b> — scrivi qui sotto per far continuare l'agente con il contesto attuale.</div>`
+      : (active.status === 'stalled' || active.status === 'blocked'
+        ? `<div class="step-card" style="border:1px solid rgba(239,68,68,0.5); padding:10px 12px; margin-top:8px;">⚠️ <b>Task ${active.status === 'stalled' ? 'interrotto per timeout' : 'bloccato'}</b> — invia nuove istruzioni qui sotto o cambia la modalità approvazioni in alto.</div>`
+        : ''));
+
+  return reportPanel + stepsHtml + extraPendingHtml + workingFooter;
 }
 
 export async function refreshAgents() {
@@ -930,13 +1000,15 @@ export async function refreshAgents() {
       if (badgeEl) {
         badgeEl.textContent = `🤖 ${active.title || active.session_id} · ${active.session_id} (${active.status === 'working' ? 'WORKING' : (isArch ? 'ARCHIVIATO' : 'APERTO')})`;
       }
-      const streamSig = `${active.session_id}:${active.status}:${active.lifecycle_state}:${(active.steps || []).length}:${(active.runs || []).length}:${active.token_summary?.total_tokens || 0}:${active.updated_at || ''}`;
+      const actSig = active.current_activity ? `${active.current_activity.tool}:${active.current_activity.summary}` : '';
+      const aprSig = (data.pending_approvals || []).map((p) => `${p.approval_id}:${p.status}`).join(',');
+      const streamSig = `${active.session_id}:${active.status}:${active.lifecycle_state}:${(active.steps || []).length}:${(active.runs || []).length}:${active.token_summary?.total_tokens || 0}:${actSig}:${aprSig}:${active.updated_at || ''}`;
       if (store.forceStreamRender || streamSig !== store.lastStreamSig) {
         store.lastStreamSig = streamSig;
         store.forceStreamRender = false;
         const stream = document.getElementById('agent-stream');
         if (stream) {
-          stream.innerHTML = renderTaskStreamHtml(active);
+          stream.innerHTML = renderTaskStreamHtml(active, data.pending_approvals || []);
           scrollStreamBottom();
         }
       }
@@ -959,6 +1031,14 @@ export async function updateScopePreferences(scopeId, patch) {
   await refreshAgents();
 }
 
+export async function resolveApprovalAction(approvalId, decision) {
+  if (!approvalId) return;
+  const fb = (document.getElementById(`apr-fb-${approvalId}`)?.value || '').trim();
+  await apiPost('/api/approvals/resolve', { approval_id: approvalId, decision, feedback: fb });
+  store.forceStreamRender = true;
+  await refreshAgents();
+}
+
 export function bindAgentRunsControls() {
   const main = document.getElementById('stage-chat');
   if (main && !main.dataset.runsBound) {
@@ -967,6 +1047,11 @@ export function bindAgentRunsControls() {
       const stopBtn = e.target.closest('[data-stop-run]');
       if (stopBtn) {
         stopSingleAgentRun(stopBtn.getAttribute('data-stop-run'), stopBtn.getAttribute('data-sid'));
+        return;
+      }
+      const aprBtn = e.target.closest('[data-apr-decision]');
+      if (aprBtn) {
+        resolveApprovalAction(aprBtn.getAttribute('data-apr-id'), aprBtn.getAttribute('data-apr-decision'));
       }
     });
     main.addEventListener('change', (e) => {
@@ -974,6 +1059,11 @@ export function bindAgentRunsControls() {
         agentRunsUiState.status = e.target.value || 'all';
         const sid = e.target.closest('[data-runs-sid]')?.getAttribute('data-runs-sid');
         if (sid) fetchFilteredAgentRuns(sid, true);
+      } else if (e.target?.id === 'task-approval-mode') {
+        const sid = e.target.getAttribute('data-sid');
+        if (sid) {
+          apiPost('/api/agents/approval-mode', { session_id: sid, mode: e.target.value }).catch(() => {});
+        }
       }
     });
     main.addEventListener('input', (e) => {

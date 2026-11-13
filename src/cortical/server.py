@@ -33,6 +33,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .context_window import clamp_context_window, fit_context_to_window, get_model_context_window
+from .agent_runtime import (
+    ApprovalBroker,
+    build_agent_prompt,
+    extract_question,
+    parse_agent_status,
+    run_streaming_process,
+)
 from .grounding import (
     detect_language,
     discover_chrome_profiles,
@@ -861,7 +868,8 @@ def _wants_parallel_swarm(
         return True
     if has_custom_runner:
         return False
-    return bool(orch_cfg.get("parallel_agents", True))
+    # Claude Code / Codex style: one persistent agent by default; swarm only on explicit opt-in.
+    return bool(orch_cfg.get("parallel_agents_default", False))
 
 
 def _wants_continuous_loop(goal: str, auto_loop_flag: Optional[bool]) -> bool:
@@ -997,7 +1005,50 @@ class PiAgentManager:
         self._pending_coordinator_speeches: list[str] = []
         self.egress_proxy = _EgressGuardProxy(perm_gate)
         self.egress_proxy_port: int = 0
+        self.approvals = ApprovalBroker(perm_gate, on_change=self._on_approval_change)
+        self.pi_sessions_dir = Path.home() / ".cortical_data" / "pi_sessions"
         self._hydrate_from_db()
+
+    def _on_approval_change(self, session_id: str, pa: dict[str, Any]) -> None:
+        """Reflects approval lifecycle into the task stream (Claude-Code-style inline card)."""
+        with self._lock:
+            sess = self.sessions.get(session_id)
+            if sess is None:
+                return
+            if pa["status"] == "pending":
+                sess["status"] = "awaiting_approval"
+                self._append_step(
+                    session_id,
+                    "approval",
+                    f"🔐 Richiesta approvazione: {pa['tool']}",
+                    pa["summary"],
+                    {"approval": pa},
+                )
+            else:
+                if sess.get("status") == "awaiting_approval" and not self.approvals.has_pending(session_id):
+                    sess["status"] = "working"
+                for st in reversed(sess.get("steps", [])):
+                    meta_ap = (st.get("meta") or {}).get("approval")
+                    if meta_ap and meta_ap.get("approval_id") == pa["approval_id"]:
+                        st["meta"]["approval"] = pa
+                        break
+                icon = "✅" if pa["status"] == "allowed" else ("⏱️" if pa["status"] == "expired" else "⛔")
+                fb = f" · feedback: {pa['feedback']}" if pa.get("feedback") else ""
+                self._append_step(
+                    session_id,
+                    "approval_result",
+                    f"{icon} {pa['tool']}: {pa['decision'] or pa['status']}{fb}",
+                    pa["summary"],
+                    {"approval_id": pa["approval_id"], "status": pa["status"]},
+                )
+            sess["updated_at"] = time.time()
+
+    def set_activity(self, session_id: str, activity: Optional[dict[str, Any]]) -> None:
+        with self._lock:
+            sess = self.sessions.get(session_id)
+            if sess is not None:
+                sess["current_activity"] = activity
+                sess["updated_at"] = time.time()
 
     def _ensure_egress_proxy(self) -> int:
         if self.egress_proxy_port <= 0:
@@ -1231,6 +1282,8 @@ class PiAgentManager:
                     stopped_sids.add(sid)
             for sid in stopped_sids:
                 self.sessions[sid]["status"] = "stopped"
+                self.sessions[sid]["current_activity"] = None
+                self.approvals.cancel_session(sid)
                 self._append_step(
                     sid,
                     "system",
@@ -1287,6 +1340,9 @@ class PiAgentManager:
             "lifecycle_state": "open",
             "wiki_depth": wiki_depth,
             "effort": eff,
+            "approval_mode": self.approvals.get_mode(session_id),
+            "current_activity": None,
+            "is_follow_up": False,
             "skills": skills_list,
             "created_at": time.time(),
             "updated_at": time.time(),
@@ -1346,6 +1402,8 @@ class PiAgentManager:
             s["status"] = "working"
             s["wiki_depth"] = eff_depth
             s["effort"] = eff
+            s["is_follow_up"] = True
+            s["current_activity"] = {"tool": "thinking", "summary": "Ripresa task con contesto precedente", "started_at": time.time()}
             s["updated_at"] = time.time()
             stop_ev = threading.Event()
             self.stop_events[session_id] = stop_ev
@@ -1379,11 +1437,14 @@ class PiAgentManager:
             tname = str(evt.get("toolName") or "tool")
             targs = evt.get("args") if isinstance(evt.get("args"), dict) else {}
             state["pending_args"][str(evt.get("toolCallId") or tname)] = (tname, targs)
+            summary = str(targs.get("command") or targs.get("path") or targs.get("pattern") or "")[:120]
+            self.set_activity(session_id, {"tool": tname, "summary": summary, "started_at": time.time()})
             self._append_step(session_id, "tool_call", f"pi:{tname}", json.dumps(targs)[:200], {"tool": tname})
             return
         if etype == "tool_execution_end":
             cid = str(evt.get("toolCallId") or evt.get("toolName") or "")
             tname, targs = state["pending_args"].pop(cid, (str(evt.get("toolName") or "tool"), {}))
+            self.set_activity(session_id, {"tool": "thinking", "summary": f"Elaborazione risultato {tname}...", "started_at": time.time()})
             res_obj = evt.get("result") if isinstance(evt.get("result"), dict) else {}
             out_txt = _extract_pi_content_text(res_obj.get("content"))
             is_err = bool(evt.get("isError"))
@@ -1474,8 +1535,15 @@ class PiAgentManager:
         prompt_low = prompt.lower()
         needs_mcp = any(k in prompt_low for k in ("chrome", "browser", "wiki_create_research_doc", "wiki_upsert_concept", "wiki_get_egress_audit", "second brain"))
         eff_tools = "read,grep,bash" if is_tiny_model else tools
+        self.pi_sessions_dir.mkdir(parents=True, exist_ok=True)
+        use_persistent_session = proc_key is None or proc_key.startswith(f"{session_id}:run-{session_id}-")
+        session_flags = (
+            ["--session-dir", str(self.pi_sessions_dir), "--session-id", session_id]
+            if use_persistent_session
+            else ["--no-session"]
+        )
         cmd = [
-            pi_bin, "-p", "--mode", "json", "--no-session", "--approve",
+            pi_bin, "-p", "--mode", "json", *session_flags, "--approve",
             "--no-skills", "--no-prompt-templates", "--no-themes",
             "--tools", eff_tools, "--thinking", thinking_flag,
             "--provider", "ollama", "--model", resolved_model,
@@ -1498,12 +1566,20 @@ class PiAgentManager:
         cmd.append(prompt)
 
         key = proc_key or session_id
-        proc = subprocess.Popen(
+        max_tools = max(max_loops * 5, 16)
+
+        def _on_pi_line(raw_ln: str) -> None:
+            evt = _parse_pi_json_event(raw_ln)
+            if evt:
+                self._consume_pi_event(session_id, evt, base_state)
+
+        def _on_pi_start(p: subprocess.Popen[str]) -> None:
+            with self._lock:
+                self.processes[key] = p
+
+        run_meta = run_streaming_process(
             cmd,
             cwd=str(self.repo_root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
             env=_build_pi_subprocess_env(
                 self.repo_root,
                 effort=eff,
@@ -1512,31 +1588,28 @@ class PiAgentManager:
                 role=role,
                 model=resolved_model,
             ),
+            on_line=_on_pi_line,
+            stop_event=stop_event,
+            idle_timeout_sec=180.0,
+            hard_timeout_sec=max(eff_timeout * 2.5, 420.0),
+            is_paused=lambda: self.approvals.has_pending(session_id),
+            should_abort=lambda: base_state["tool_count"] >= max_tools,
+            on_start=_on_pi_start,
         )
         with self._lock:
-            self.processes[key] = proc
-        deadline = time.time() + eff_timeout
-        try:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if (stop_event is not None and stop_event.is_set()) or time.time() > deadline or base_state["tool_count"] >= max(max_loops * 5, 12):
-                    proc.terminate()
-                    break
-                evt = _parse_pi_json_event(line)
-                if evt:
-                    self._consume_pi_event(session_id, evt, base_state)
-            proc.wait(timeout=3)
-        except Exception:  # noqa: BLE001
-            proc.terminate()
-        finally:
-            with self._lock:
-                self.processes.pop(key, None)
+            self.processes.pop(key, None)
+        base_state["exit_reason"] = run_meta["exit_reason"]
 
-        if not (base_state["final_text"] or base_state["executed_steps"]) and proc.stderr is not None:
-            err_txt = (proc.stderr.read() or "").strip()
-            if err_txt:
-                self._append_step(session_id, "system", "⚠️ Output diagnostico stderr `pi`", err_txt[:400])
-        return base_state if (base_state["final_text"] or base_state["executed_steps"]) else None
+        if run_meta["exit_reason"] in {"idle_timeout", "hard_timeout"}:
+            self._append_step(
+                session_id,
+                "system",
+                f"⏱️ Comando/Agente bloccato ({run_meta['exit_reason']})",
+                "Nessun output ricevuto entro il timeout; processo terminato per evitare blocchi infiniti.",
+            )
+        elif not (base_state["final_text"] or base_state["executed_steps"]) and run_meta.get("stderr"):
+            self._append_step(session_id, "system", "⚠️ Output diagnostico stderr `pi`", str(run_meta["stderr"])[:400])
+        return base_state if (base_state["final_text"] or base_state["executed_steps"] or run_meta["exit_reason"] in {"idle_timeout", "hard_timeout"}) else None
 
     def _record_run_start(
         self,
@@ -2007,12 +2080,15 @@ class PiAgentManager:
                     reserve_output_tokens=2048,
                 )
                 compact_ctx = fitted_local["fitted_context"]
-                local_prompt = (
-                    f"Obiettivo Task ({session_id}): {goal}\n"
-                    "CHIAMA I TOOL REALI (`read`, `edit`, `write`, `bash`) in sequenza, NON fingere modifiche non eseguite, verifica con un comando reale e riporta solo i fatti osservati.\n\n"
-                    + (f"[ALLEGATI CONTESTO]\n{att_block}\n\n" if att_block else "")
-                    + (f"[CONTESTO WIKI]\n{compact_ctx}" if compact_ctx else "")
-                ).strip()
+                is_fu = bool((self.sessions.get(session_id) or {}).get("is_follow_up"))
+                local_prompt = build_agent_prompt(
+                    goal,
+                    workspace=str(self.repo_root),
+                    is_follow_up=is_fu,
+                    attachments=att_block,
+                    wiki_context=compact_ctx,
+                    lang=detect_language(goal),
+                )
                 pi_res = self._run_pi_local_loop(
                     session_id=session_id,
                     prompt=local_prompt,
@@ -2023,6 +2099,7 @@ class PiAgentManager:
                     effort=eff,
                     role=run_role,
                 )
+                exit_reason = str((pi_res or {}).get("exit_reason") or "completed")
                 executed_steps.extend(list(pi_res.get("executed_steps") or []) if pi_res else [])
                 used_tool_names = {str((st.get("meta") or {}).get("tool") or "").lower() for st in executed_steps}
                 goal_low = goal.lower()
@@ -2132,21 +2209,32 @@ class PiAgentManager:
                 )
                 questions = []
             tot_all_tokens = int(tok_summary.get("total_tokens") or tot_tok)
+            parsed_st = parse_agent_status(
+                pi_output_text,
+                tool_count=len(executed_steps),
+                exit_reason="stopped" if stop_ev.is_set() else locals().get("exit_reason", "completed"),
+            )
+            final_sess_status = parsed_st["status"]
+            if final_sess_status == "needs_input":
+                q_line = extract_question(pi_output_text)
+                if q_line and q_line not in questions:
+                    questions = [q_line, *questions]
             self._append_step(
                 session_id,
                 "output",
-                f"Agente `{run_role}` {'interrotto' if stop_ev.is_set() else 'completato'} ({resolved_model} · {tot_all_tokens} tok · {elapsed_sec}s) — Task ancora aperto",
+                f"Agente `{run_role}` — {parsed_st['label']} ({resolved_model} · {tot_all_tokens} tok · {elapsed_sec}s)",
                 pi_output_text,
-                {"run_id": run_id, "model": resolved_model, "total_tokens": tot_all_tokens},
+                {"run_id": run_id, "model": resolved_model, "total_tokens": tot_all_tokens, "status": final_sess_status},
             )
 
+            self.set_activity(session_id, None)
             with self._lock:
                 sess = self.sessions.get(session_id)
                 if sess is not None:
                     sess["token_summary"] = tok_summary
                     sess["updated_at"] = time.time()
-                    if sess["status"] in {"working", "stopped"}:
-                        sess["status"] = "stopped" if stop_ev.is_set() else "completed"
+                    if sess["status"] in {"working", "awaiting_approval", "stopped"}:
+                        sess["status"] = final_sess_status
                         sess["lifecycle_state"] = "open"
                         sess["final_report"] = pi_output_text
                         sess["closing_questions"] = questions
@@ -2157,6 +2245,7 @@ class PiAgentManager:
                 self._handle_agent_speech_on_finish(run_role, pi_output_text, speak_on_finish)
 
         except Exception as exc:  # noqa: BLE001
+            self.set_activity(session_id, None)
             self._record_run_finish(
                 ctx, run_id=run_id, session_id=session_id, role=run_role,
                 model=resolved_model, status="error", goal=goal,
@@ -3023,6 +3112,7 @@ class CorticalLiveService:
             page["context_telemetry"] = mcfg["context_telemetry"]
             page["scope_preferences"] = mcfg["scope_preferences"]
             page["role_models"] = mcfg["role_models"]
+            page["pending_approvals"] = self.agent_mgr.approvals.list_pending(ep_filter)
             if ep_filter:
                 page["selected_session"] = self.agent_mgr.get_session(ep_filter)
             return (HTTPStatus.OK, page)
@@ -3169,6 +3259,42 @@ class CorticalLiveService:
                 remember_always=bool(body.get("remember", True)),
             )
             return (HTTPStatus.OK, dataclasses.asdict(dec))
+
+        # Claude Code / Codex style interactive headless approvals
+        if method == "GET" and path == "/api/approvals":
+            sid = (query.get("session_id") or [None])[0] or None
+            return (HTTPStatus.OK, {"pending": self.agent_mgr.approvals.list_pending(sid)})
+
+        if method == "POST" and path == "/api/approvals/request":
+            res = self.agent_mgr.approvals.request(
+                session_id=str(body.get("session_id") or "chat"),
+                tool=str(body.get("tool") or "bash"),
+                args=dict(body.get("args") or {}),
+                role=str(body.get("role") or ""),
+                model=str(body.get("model") or ""),
+            )
+            return (HTTPStatus.OK, res)
+
+        if method == "GET" and path == "/api/approvals/wait":
+            aid = (query.get("id") or [""])[0]
+            tout = min(30.0, max(0.1, float((query.get("timeout") or ["25"])[0] or 25.0)))
+            return (HTTPStatus.OK, self.agent_mgr.approvals.wait(aid, timeout_sec=tout))
+
+        if method == "POST" and path == "/api/approvals/resolve":
+            res = self.agent_mgr.approvals.resolve(
+                approval_id=str(body.get("approval_id") or ""),
+                decision=str(body.get("decision") or "deny"),
+                feedback=str(body.get("feedback") or ""),
+            )
+            return (HTTPStatus.OK if res.get("ok") else HTTPStatus.NOT_FOUND, res)
+
+        if method == "POST" and path == "/api/agents/approval-mode":
+            sid = str(body.get("session_id") or "").strip()
+            mode = self.agent_mgr.approvals.set_mode(sid, str(body.get("mode") or "ask"))
+            with self.agent_mgr._lock:
+                if sid in self.agent_mgr.sessions:
+                    self.agent_mgr.sessions[sid]["approval_mode"] = mode
+            return (HTTPStatus.OK, {"ok": True, "session_id": sid, "approval_mode": mode})
 
         if method == "GET" and path == "/api/security/egress":
             sid = (query.get("session_id") or [""])[0]

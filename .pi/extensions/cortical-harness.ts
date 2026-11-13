@@ -757,11 +757,60 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
               reason: `User declined tool pattern: ${decision.normalized_pattern}`,
             };
           }
-        } else if (decision.risk_score >= 0.75) {
-          return {
-            block: true,
-            reason: `High-risk pattern requires interactive confirmation: ${decision.normalized_pattern}`,
-          };
+        } else {
+          // Headless worker: route through ApprovalBroker so user can approve/deny inline in UI
+          const base = process.env.CORTICAL_BASE_URL || "http://127.0.0.1:8765";
+          const sid = process.env.PI_ACTIVE_SESSION_ID || activeTask?.episodeId || "chat";
+          try {
+            const reqResp = await fetch(`${base}/api/approvals/request`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                session_id: sid,
+                tool: toolName,
+                args: toolArgs,
+                role: process.env.PI_ACTIVE_ROLE || "agent",
+                model: process.env.PI_ACTIVE_MODEL || "",
+              }),
+            });
+            if (reqResp.ok) {
+              const reqData = (await reqResp.json()) as Record<string, unknown>;
+              if (reqData.decision === "deny") {
+                return { block: true, reason: String(reqData.reason || "Blocked by Cortical Gate") };
+              }
+              if (reqData.decision === "pending" && reqData.approval_id) {
+                const aid = String(reqData.approval_id);
+                const deadline = Date.now() + 600_000;
+                while (Date.now() < deadline) {
+                  const waitResp = await fetch(
+                    `${base}/api/approvals/wait?id=${encodeURIComponent(aid)}&timeout=25`
+                  );
+                  if (!waitResp.ok) break;
+                  const waitData = (await waitResp.json()) as Record<string, unknown>;
+                  if (waitData.status !== "pending") {
+                    if (waitData.decision === "allow") return undefined;
+                    return {
+                      block: true,
+                      reason: `User denied ${decision.normalized_pattern}${waitData.feedback ? `: ${waitData.feedback}` : ""}`,
+                    };
+                  }
+                }
+                return {
+                  block: true,
+                  reason: `Approval timeout for ${decision.normalized_pattern}`,
+                };
+              }
+              if (reqData.decision === "allow") return undefined;
+            }
+          } catch {
+            // Fallback if live HTTP server is unreachable
+          }
+          if (decision.risk_score >= 0.75) {
+            return {
+              block: true,
+              reason: `High-risk pattern requires interactive confirmation: ${decision.normalized_pattern}`,
+            };
+          }
         }
       }
     } catch {
