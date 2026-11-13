@@ -242,7 +242,9 @@ def synthesize_tts_audio_bytes(
     global _LAST_SPOKEN_TEXT, _LAST_SPOKEN_AT, _TTS_DUCKED
     if not text or not text.strip():
         return (None, "audio/mpeg", voice)
-    eff_lang = detect_language(text) if lang == "auto" else lang
+    # Detect language from the actual spoken response text when voice is 'auto'
+    # so Italian responses to mixed IT/EN prompts never get anglicized.
+    eff_lang = detect_language(text) if (lang == "auto" or (voice or "auto").strip() == "auto") else lang
     spoken_natural = shape_expressive_text(text, lang=eff_lang)
     neural_voice, resolved_lang = resolve_neural_voice(voice, lang=eff_lang)
     _LAST_SPOKEN_TEXT = spoken_natural
@@ -271,7 +273,7 @@ def synthesize_tts_audio_bytes(
 
     # Offline fallback on macOS returning browser-playable MP4/AAC or WAV via say + afconvert
     if platform.system() == "Darwin" and shutil.which("say") and shutil.which("afconvert"):
-        offline_voice = "Samantha" if resolved_lang == "en" else (voice if voice in {"Alice", "Federica", "Luca"} else "Alice")
+        offline_voice = "Samantha" if resolved_lang == "en" else (voice if voice in {"Alice", "Eddy", "Flo"} else "Alice")
         tmp_aiff = Path(f"/tmp/cortical_web_say_{os.getpid()}_{int(time.time() * 1000)}.aiff")
         tmp_wav = tmp_aiff.with_suffix(".wav")
         try:

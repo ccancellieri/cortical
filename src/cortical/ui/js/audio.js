@@ -176,7 +176,12 @@ export async function playAssistantAudioUrl(url, fallbackText = '') {
     try {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(fallbackText);
-      u.lang = store.uiLang === 'en' ? 'en-US' : 'it-IT';
+      const textLang = detectLangClient(fallbackText);
+      u.lang = textLang === 'en' ? 'en-US' : 'it-IT';
+      const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+      const prefix = textLang === 'en' ? 'en' : 'it';
+      const matched = voices.find((v) => String(v.lang || '').toLowerCase().startsWith(prefix));
+      if (matched) u.voice = matched;
       window.speechSynthesis.speak(u);
     } catch (_) {}
   }

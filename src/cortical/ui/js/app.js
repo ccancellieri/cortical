@@ -184,6 +184,16 @@ function wireEvents() {
     document.getElementById('settings-popover')?.classList.toggle('open');
   });
   document.getElementById('btn-ui-lang')?.addEventListener('click', toggleUiLanguage);
+  const ttsSel = document.getElementById('tts-voice');
+  if (ttsSel) {
+    const savedVoice = localStorage.getItem('cortical_tts_voice');
+    if (savedVoice && Array.from(ttsSel.options).some((o) => o.value === savedVoice)) {
+      ttsSel.value = savedVoice;
+    }
+    ttsSel.addEventListener('change', () => {
+      localStorage.setItem('cortical_tts_voice', ttsSel.value || 'auto');
+    });
+  }
   document.getElementById('btn-drawer-lang')?.addEventListener('click', toggleUiLanguage);
   document.getElementById('btn-guide-top')?.addEventListener('click', (e) => {
     document.getElementById('settings-popover')?.classList.remove('open');
