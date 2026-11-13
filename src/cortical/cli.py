@@ -10,11 +10,13 @@ import time
 from pathlib import Path
 
 from .grounding import (
+    ensure_chrome_debug_instance,
     extract_browser_intent,
     extract_page_read_intent,
     extract_weather_intent,
     fetch_weather_forecast,
     format_page_reading_response,
+    open_url_via_cdp_http,
     read_active_chrome_page,
     visual_chrome_navigate_and_search,
 )
@@ -44,9 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         default=str(Path.home() / ".cortical_data" / "permissions.db"),
         help="Path to Adaptive Permission Gate SQLite database.",
     )
+    repo_root = Path(__file__).resolve().parents[2]
+    default_skills = repo_root / ".agents" / "skills"
+    if not default_skills.exists() and (repo_root / ".pi" / "skills").exists():
+        default_skills = repo_root / ".pi" / "skills"
     parser.add_argument(
         "--skills-dir",
-        default=str(Path(__file__).resolve().parents[2] / ".pi" / "skills"),
+        default=str(default_skills),
         help="Path to Cortical skills directory.",
     )
 
@@ -156,7 +162,13 @@ def main(argv: list[str] | None = None) -> int:
     p_cread = sub.add_parser("chrome-read", help="Read and optionally summarize the active Chrome tab")
     p_cread.add_argument("--mode", choices=["read", "summarize"], default="summarize")
 
-    # 21. serve (Live HTTP + Voice + Second Brain Daemon)
+    # 21. chrome-ensure (Ensure Unified Chrome Remote Debug Instance)
+    p_cens = sub.add_parser("chrome-ensure", help="Reuse or launch an isolated Chrome Remote Debugging instance")
+    p_cens.add_argument("--port", type=int, default=None)
+    p_cens.add_argument("--url", default="")
+    p_cens.add_argument("--background", action="store_true")
+
+    # 22. serve (Live HTTP + Voice + Second Brain Daemon)
     p_serve = sub.add_parser("serve", help="Run the live Cortical HTTP, Voice & Second Brain service")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
@@ -378,6 +390,14 @@ def main(argv: list[str] | None = None) -> int:
         summary = format_page_reading_response(page, mode=args.mode)
         print(json.dumps({**page, "mode": args.mode, "summary_it": summary}, indent=2))
         return 0
+
+    if args.cmd == "chrome-ensure":
+        res = ensure_chrome_debug_instance(port=args.port, background=bool(args.background))
+        if res.get("active") and args.url:
+            tab = open_url_via_cdp_http(args.url, port=res.get("port"))
+            res["opened_tab"] = tab
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("active") else 1
 
     if args.cmd == "serve":
         run_live_server(

@@ -9,6 +9,7 @@ WIKI_DB="$ROOT_DIR/.cortical_data/wiki.db"
 PERM_DB="$ROOT_DIR/.cortical_data/permissions.db"
 LOG_DIR="$ROOT_DIR/.cortical_data/logs"
 PORT="${CORTICAL_PORT:-8765}"
+SERVICE_PATH="$ROOT_DIR/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 mkdir -p "$LOG_DIR"
 
@@ -43,6 +44,10 @@ if [ "$OS_NAME" = "Darwin" ]; then
   <dict>
     <key>PYTHONPATH</key>
     <string>$ROOT_DIR/src</string>
+    <key>PATH</key>
+    <string>$SERVICE_PATH</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
   </dict>
   <key>WorkingDirectory</key>
   <string>$ROOT_DIR</string>
@@ -73,6 +78,8 @@ After=network.target
 Type=simple
 WorkingDirectory=$ROOT_DIR
 Environment=PYTHONPATH=$ROOT_DIR/src
+Environment=PATH=$SERVICE_PATH
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$PYTHON_BIN -m cortical.cli --db $WIKI_DB --perm-db $PERM_DB serve --host 127.0.0.1 --port $PORT
 Restart=always
 RestartSec=3

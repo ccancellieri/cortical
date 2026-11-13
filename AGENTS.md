@@ -35,3 +35,9 @@ Ogni funzione aggiunta o modificata deve rispettare le seguenti soglie:
 - **Sintesi Memoria:** 3+1 Livelli (L1 Light ~50t, L2 Medium ~250t, L3 High ~1000t, +1 Max integrale).
 - **Voce & Audio:** Isolamento Half-Duplex acustico (`is_tts_speaking_or_cooling_down`), audio ducking immediato e barge-in con wake-word. I caratteri accentati devono sempre essere formattati in UTF-8 nativo senza escaping numerico (`\u00...`).
 - **Test:** Esecuzione single-shot da ambiente virtuale locale `.venv`.
+
+---
+
+## 5. Chrome Remote Debugging (`:9222`) & Portabilità `pi` + `OpenCode`
+- **Browser Debug Unificato:** Prima di invocare strumenti Chrome / `chrome-devtools` MCP (sia in Cortical che in Antigravity), verificare se `http://127.0.0.1:9222/json/version` è già attivo; in caso contrario avviare una nuova istanza isolata (`--remote-debugging-port=9222 --user-data-dir=~/.cortical_data/chrome_debug_profile`) tramite `cortical chrome-ensure` o `chrome_ensure_debug`. Se già attiva sulla porta `9222`, riusarla sempre senza lanciare duplicati.
+- **Standard Condivisi (Zero Nuove Dipendenze):** Le skill risiedono in `.agents/skills/` (scoperte nativamente sia da **`pi`** che da **`OpenCode`**). Gli strumenti Cortical + Grounding sono esposti tramite server MCP stdio (`cortical-wiki-mcp`, configurato in `.pi/mcp.json` e `opencode.json`).

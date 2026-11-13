@@ -87,12 +87,23 @@ EXPLICIT_TASK_TRIGGERS = (
     "avvia un task",
     "apri un task",
     "orchestra un sottoagente",
+    "in parallelo",
+    "agenti in parallelo",
+    "avvia agenti",
+    "lancia agenti",
+    "multi-agente",
+    "multi agente",
+    "coordina agenti",
+    "esegui in loop",
+    "in loop",
     "create a task",
     "create task",
     "new task",
     "start a task",
     "open a task",
     "orchestrate a subagent",
+    "parallel agents",
+    "run in loop",
     "delega a un agente",
 )
 
@@ -112,6 +123,55 @@ def is_explicit_task_request(text: str) -> bool:
     """Returns True ONLY when the user explicitly requests creating/starting a task."""
     norm = text.lower().strip()
     return any(trigger in norm for trigger in EXPLICIT_TASK_TRIGGERS)
+
+
+OPERATIONAL_INSTALL_TRIGGERS = (
+    "installa",
+    "fallo tu",
+    "fammelo tu",
+    "eseguilo",
+    "esegui tu",
+    "install the",
+    "install tools",
+    "do it yourself",
+    "run it",
+)
+
+ATTACHMENT_ACTION_TRIGGERS = (
+    "studia questo",
+    "studia il documento",
+    "analizza questo",
+    "analizza il documento",
+    "analizza il file",
+    "analizza gli allegati",
+    "esamina questo",
+    "controlla questo",
+    "verifica questo",
+    "trova errori",
+    "ci sono problemi",
+    "riassumi questo",
+    "spiega questo",
+    "correggi",
+    "study this",
+    "analyze this",
+    "inspect the attached",
+    "review this",
+    "check this file",
+)
+
+
+def is_operational_escalation_request(text: str, has_attachments: bool = False) -> bool:
+    """Detects operational install/execute or attached-document analysis intents requiring `pi` tools."""
+    norm = re.sub(r"\s+", " ", (text or "").lower().strip())
+    if not norm:
+        return False
+    if any(t in norm for t in OPERATIONAL_INSTALL_TRIGGERS):
+        return True
+    if has_attachments and any(t in norm for t in ATTACHMENT_ACTION_TRIGGERS):
+        return True
+    if is_ephemeral_utterance(norm):
+        return False
+    return False
 
 
 @dataclass
@@ -146,10 +206,20 @@ class MemoryCurator:
                     turn_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     tenant_id TEXT NOT NULL,
                     workspace_id TEXT NOT NULL,
+                    scope_id TEXT NOT NULL DEFAULT 'chat',
                     user_text TEXT NOT NULL,
                     assistant_text TEXT NOT NULL,
                     is_ephemeral INTEGER NOT NULL DEFAULT 1,
                     created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS chat_threads (
+                    chat_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS memory_insights (
@@ -189,6 +259,14 @@ class MemoryCurator:
             if "closing_questions_json" not in cols:
                 conn.execute(
                     "ALTER TABLE task_episodes ADD COLUMN closing_questions_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            cb_cols = {
+                r["name"]
+                for r in conn.execute("PRAGMA table_info(chat_buffer)").fetchall()
+            }
+            if "scope_id" not in cb_cols:
+                conn.execute(
+                    "ALTER TABLE chat_buffer ADD COLUMN scope_id TEXT NOT NULL DEFAULT 'chat'"
                 )
 
     def evaluate_turn(self, user_text: str, assistant_text: str) -> CurationDecision:
@@ -235,8 +313,9 @@ class MemoryCurator:
         ctx_or_user: AccessContext | str,
         user_or_assistant: str,
         assistant_optional: Optional[str] = None,
+        scope_id: str = "chat",
     ) -> dict[str, Any]:
-        """Stores turn in bounded rolling buffer (`max_chat_turns`) and curates durable insights."""
+        """Stores turn in per-chat rolling buffer (`max_chat_turns`) and curates durable insights."""
         if isinstance(ctx_or_user, AccessContext):
             ctx = ctx_or_user
             user_text = user_or_assistant
@@ -246,16 +325,31 @@ class MemoryCurator:
             user_text = ctx_or_user
             assistant_text = user_or_assistant
 
+        eff_scope = (scope_id or "chat").strip() or "chat"
         decision = self.evaluate_turn(user_text, assistant_text)
         now = time.time()
         with self.db._connect() as conn:
             conn.execute(
+                """INSERT INTO chat_threads(chat_id, tenant_id, workspace_id, title, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET updated_at = excluded.updated_at""",
+                (
+                    eff_scope,
+                    ctx.tenant_id,
+                    ctx.workspace_id,
+                    "Chat Generale" if eff_scope == "chat" else (re.sub(r"\s+", " ", user_text).strip()[:42] or eff_scope),
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
                 """INSERT INTO chat_buffer(
-                       tenant_id, workspace_id, user_text, assistant_text, is_ephemeral, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                       tenant_id, workspace_id, scope_id, user_text, assistant_text, is_ephemeral, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     ctx.tenant_id,
                     ctx.workspace_id,
+                    eff_scope,
                     user_text[:600],
                     assistant_text[:800],
                     0 if decision.worth_saving else 1,
@@ -264,17 +358,19 @@ class MemoryCurator:
             )
             conn.execute(
                 """DELETE FROM chat_buffer
-                   WHERE tenant_id = ? AND workspace_id = ?
+                   WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?
                      AND turn_id NOT IN (
                          SELECT turn_id FROM chat_buffer
-                         WHERE tenant_id = ? AND workspace_id = ?
+                         WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?
                          ORDER BY turn_id DESC LIMIT ?
                      )""",
                 (
                     ctx.tenant_id,
                     ctx.workspace_id,
+                    eff_scope,
                     ctx.tenant_id,
                     ctx.workspace_id,
+                    eff_scope,
                     self.max_chat_turns,
                 ),
             )
@@ -323,17 +419,85 @@ class MemoryCurator:
             "distilled_insight": decision.distilled_insight,
         }
 
-    def get_recent_chat(self, limit: int = 20, ctx: Optional[AccessContext] = None) -> list[dict[str, Any]]:
+    def get_recent_chat(
+        self,
+        limit: int = 20,
+        ctx: Optional[AccessContext] = None,
+        scope_id: str = "chat",
+    ) -> list[dict[str, Any]]:
         c = ctx or AccessContext()
+        eff_scope = (scope_id or "chat").strip() or "chat"
         with self.db._connect() as conn:
             rows = conn.execute(
-                """SELECT turn_id, user_text, assistant_text, is_ephemeral, created_at
+                """SELECT turn_id, scope_id, user_text, assistant_text, is_ephemeral, created_at
                    FROM chat_buffer
-                   WHERE tenant_id = ? AND workspace_id = ?
+                   WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?
                    ORDER BY turn_id DESC LIMIT ?""",
-                (c.tenant_id, c.workspace_id, limit),
+                (c.tenant_id, c.workspace_id, eff_scope, limit),
             ).fetchall()
             return [dict(r) for r in reversed(rows)]
+
+    def create_chat(self, title: str = "", ctx: Optional[AccessContext] = None) -> dict[str, Any]:
+        """Creates a new isolated chat conversation thread with its own attachment scope."""
+        c = ctx or AccessContext()
+        now = time.time()
+        chat_id = f"chat-{hashlib.sha1(f'{now}:{title}'.encode('utf-8')).hexdigest()[:6]}"
+        clean_title = re.sub(r"\s+", " ", title).strip()[:60] or f"Chat {chat_id[-4:]}"
+        with self.db._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO chat_threads(
+                       chat_id, tenant_id, workspace_id, title, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (chat_id, c.tenant_id, c.workspace_id, clean_title, now, now),
+            )
+        return {"chat_id": chat_id, "title": clean_title, "created_at": now, "updated_at": now, "message_count": 0}
+
+    def list_chats(self, ctx: Optional[AccessContext] = None) -> list[dict[str, Any]]:
+        """Lists persistent chat threads including the default 'chat' (Chat Generale)."""
+        c = ctx or AccessContext()
+        now = time.time()
+        with self.db._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO chat_threads(
+                       chat_id, tenant_id, workspace_id, title, created_at, updated_at
+                   ) VALUES ('chat', ?, ?, 'Chat Generale', ?, ?)""",
+                (c.tenant_id, c.workspace_id, now, now),
+            )
+            rows = conn.execute(
+                """SELECT ct.chat_id, ct.title, ct.created_at, ct.updated_at,
+                          (SELECT COUNT(*) FROM chat_buffer cb
+                           WHERE cb.tenant_id = ct.tenant_id
+                             AND cb.workspace_id = ct.workspace_id
+                             AND cb.scope_id = ct.chat_id) AS message_count
+                   FROM chat_threads ct
+                   WHERE ct.tenant_id = ? AND ct.workspace_id = ?
+                   ORDER BY CASE WHEN ct.chat_id = 'chat' THEN 0 ELSE 1 END, ct.updated_at DESC""",
+                (c.tenant_id, c.workspace_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_chat(self, chat_id: str, ctx: Optional[AccessContext] = None) -> dict[str, Any]:
+        """Deletes a chat thread's messages and scoped attachments."""
+        c = ctx or AccessContext()
+        cid = (chat_id or "chat").strip() or "chat"
+        with self.db._connect() as conn:
+            del_msgs = conn.execute(
+                "DELETE FROM chat_buffer WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?",
+                (c.tenant_id, c.workspace_id, cid),
+            ).rowcount
+            for extra_sql in (
+                "DELETE FROM scoped_context_attachments WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?",
+            ):
+                try:
+                    conn.execute(extra_sql, (c.tenant_id, c.workspace_id, cid))
+                except Exception:  # noqa: BLE001
+                    pass
+            if cid != "chat":
+                conn.execute(
+                    "DELETE FROM chat_threads WHERE tenant_id = ? AND workspace_id = ? AND chat_id = ?",
+                    (c.tenant_id, c.workspace_id, cid),
+                )
+        return {"deleted": True, "chat_id": cid, "deleted_messages": int(del_msgs)}
 
     def list_insights(self, limit: int = 25, ctx: Optional[AccessContext] = None) -> list[dict[str, Any]]:
         c = ctx or AccessContext()
@@ -542,6 +706,15 @@ class MemoryCurator:
                        WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
                     (ctx.tenant_id, ctx.workspace_id, episode_id),
                 )
+            for extra_sql in (
+                "DELETE FROM task_episodes_fts WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                "DELETE FROM agent_runs WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                "DELETE FROM scoped_context_attachments WHERE tenant_id = ? AND workspace_id = ? AND scope_id = ?",
+            ):
+                try:
+                    conn.execute(extra_sql, (ctx.tenant_id, ctx.workspace_id, episode_id))
+                except Exception:  # noqa: BLE001
+                    pass
 
         return {
             "status": "deleted",
@@ -550,6 +723,20 @@ class MemoryCurator:
             "deleted_working_notes": int(deleted_notes),
             "deleted_macro_edges": int(deleted_edges),
         }
+
+    def reopen_task(
+        self,
+        ctx_or_ep: AccessContext | str,
+        episode_id_optional: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Reopens an archived or completed task episode without losing its context."""
+        if isinstance(ctx_or_ep, AccessContext):
+            ctx = ctx_or_ep
+            episode_id = episode_id_optional or ""
+        else:
+            ctx = AccessContext()
+            episode_id = ctx_or_ep
+        return self.db.reopen_episode(ctx, episode_id)
 
     def clear_archived_tasks(self, ctx: Optional[AccessContext] = None) -> dict[str, Any]:
         """Removes all archived task episodes and their edges to keep the workspace clean."""

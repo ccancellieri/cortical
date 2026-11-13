@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import html.parser
 import json
+import os
 import platform
 import re
 import shutil
@@ -21,6 +22,7 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 _LAST_OPENED_BROWSER_PAGE: dict[str, Any] = {}
@@ -193,8 +195,323 @@ def detect_language(text: str, default: str = "it") -> str:
     return default
 
 
-def open_url_in_chrome(url: str, background: bool = True) -> bool:
-    """Opens a URL in Google Chrome (background by default to respect zero focus-stealing)."""
+DEFAULT_CHROME_DEBUG_PORT = 9222
+
+
+def get_chrome_debug_port(port: Optional[int] = None) -> int:
+    """Resolves the deterministic Chrome Remote Debugging port (default 9222)."""
+    if port is not None and int(port) > 0:
+        return int(port)
+    env_val = os.environ.get("CORTICAL_CHROME_DEBUG_PORT", "").strip()
+    if env_val.isdigit() and int(env_val) > 0:
+        return int(env_val)
+    return DEFAULT_CHROME_DEBUG_PORT
+
+
+def get_system_chrome_user_data_dir() -> Path:
+    """Returns the OS default Google Chrome User Data directory."""
+    if platform.system() == "Darwin":
+        return (Path.home() / "Library" / "Application Support" / "Google" / "Chrome").expanduser()
+    return (Path.home() / ".config" / "google-chrome").expanduser()
+
+
+def get_chrome_profile_config_path() -> Path:
+    return (Path.home() / ".cortical_data" / "chrome_profile.json").resolve()
+
+
+def load_chrome_profile_preference() -> dict[str, Any]:
+    """Loads persisted Chrome profile preference (mode, profile_directory, user_data_dir, email)."""
+    cfg_path = get_chrome_profile_config_path()
+    default = {
+        "mode": "cortical_isolated",
+        "profile_directory": "Default",
+        "user_data_dir": str(get_chrome_debug_profile_dir()),
+        "email": "",
+    }
+    if not cfg_path.exists():
+        return default
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            default.update({k: v for k, v in data.items() if v is not None})
+    except Exception:  # noqa: BLE001
+        pass
+    return default
+
+
+def save_chrome_profile_preference(pref: dict[str, Any]) -> dict[str, Any]:
+    """Persists Chrome profile preference to ~/.cortical_data/chrome_profile.json."""
+    cfg_path = get_chrome_profile_config_path()
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    current = load_chrome_profile_preference()
+    for key in ("mode", "profile_directory", "user_data_dir", "email"):
+        if key in pref and pref[key] is not None:
+            current[key] = str(pref[key]).strip()
+    if current.get("mode") == "cortical_isolated" and not pref.get("user_data_dir"):
+        current["user_data_dir"] = str(get_chrome_debug_profile_dir())
+    elif current.get("mode") == "system_chrome" and not pref.get("user_data_dir"):
+        current["user_data_dir"] = str(get_system_chrome_user_data_dir())
+    cfg_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+    return current
+
+
+def discover_chrome_profiles(system_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Discovers available Chrome profiles safely, handling macOS TCC PermissionError."""
+    sys_dir = Path(system_dir) if system_dir else get_system_chrome_user_data_dir()
+    profiles: list[dict[str, Any]] = [
+        {
+            "id": "cortical_isolated",
+            "mode": "cortical_isolated",
+            "label": "Cortical Isolated Chrome Profile (~/.cortical_data)",
+            "profile_directory": "Default",
+            "user_data_dir": str(get_chrome_debug_profile_dir()),
+            "email": "",
+        },
+        {
+            "id": "attach_existing",
+            "mode": "attach_existing",
+            "label": "Attach to Existing Chrome (:9222)",
+            "profile_directory": "",
+            "user_data_dir": "",
+            "email": "",
+        },
+    ]
+    tcc_restricted = False
+    error_detail = ""
+    local_state = sys_dir / "Local State"
+    try:
+        if local_state.exists():
+            raw = json.loads(local_state.read_text(encoding="utf-8"))
+            cache = ((raw.get("profile") or {}).get("info_cache")) or {}
+            for dir_name, info in cache.items():
+                if not isinstance(info, dict):
+                    continue
+                email = str(info.get("user_name") or "").strip()
+                pname = str(info.get("name") or dir_name).strip()
+                label = f"{pname} ({email})" if email else f"{pname} [{dir_name}]"
+                profiles.append(
+                    {
+                        "id": f"system:{dir_name}",
+                        "mode": "system_chrome",
+                        "label": label,
+                        "profile_directory": dir_name,
+                        "user_data_dir": str(sys_dir),
+                        "email": email,
+                    }
+                )
+    except PermissionError as exc:
+        tcc_restricted = True
+        error_detail = f"macOS TCC privacy restriction reading {local_state}: {exc}"
+    except OSError as exc:
+        tcc_restricted = getattr(exc, "errno", None) in (1, 13)
+        error_detail = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        error_detail = str(exc)
+
+    return {
+        "profiles": profiles,
+        "selected": load_chrome_profile_preference(),
+        "tcc_restricted": tcc_restricted,
+        "error": error_detail,
+        "debug_port_active": bool(probe_chrome_debug_port()),
+    }
+
+
+def get_chrome_debug_profile_dir(user_data_dir: Optional[str | Path] = None) -> Path:
+    """Returns the isolated non-TCC Chrome profile path used for deterministic remote debugging."""
+    if user_data_dir:
+        return Path(user_data_dir).expanduser().resolve()
+    env_dir = os.environ.get("CORTICAL_CHROME_PROFILE_DIR", "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+    return (Path.home() / ".cortical_data" / "chrome_debug_profile").resolve()
+
+
+def probe_chrome_debug_port(
+    port: Optional[int] = None,
+    timeout: float = 0.8,
+) -> Optional[dict[str, Any]]:
+    """Checks if Chrome Remote Debugging HTTP endpoint is active on 127.0.0.1:<port>."""
+    resolved = get_chrome_debug_port(port)
+    url = f"http://127.0.0.1:{resolved}/json/version"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            if getattr(resp, "status", 200) != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+            if isinstance(data, dict) and (data.get("webSocketDebuggerUrl") or data.get("Browser")):
+                return data
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _find_chrome_executable() -> Optional[str]:
+    sys_name = platform.system()
+    if sys_name == "Darwin":
+        mac_app = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        if Path(mac_app).exists():
+            return mac_app
+    for candidate in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
+
+
+def _default_chrome_spawn(cmd: list[str]) -> Any:
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def ensure_chrome_debug_instance(
+    port: Optional[int] = None,
+    user_data_dir: Optional[str | Path] = None,
+    profile_directory: Optional[str] = None,
+    background: bool = False,
+    probe_fn: Optional[Callable[[int], Optional[dict[str, Any]]]] = None,
+    spawn_fn: Optional[Callable[[list[str]], Any]] = None,
+    sleep_fn: Optional[Callable[[float], None]] = None,
+) -> dict[str, Any]:
+    """Reuses Chrome on the debug port if active, otherwise launches a new debug instance."""
+    resolved_port = get_chrome_debug_port(port)
+    pref = load_chrome_profile_preference()
+    resolved_dir = user_data_dir or (
+        pref.get("user_data_dir") if pref.get("mode") == "system_chrome" and pref.get("user_data_dir") else None
+    )
+    resolved_profile = (profile_directory or os.environ.get("CORTICAL_CHROME_PROFILE_NAME", "") or pref.get("profile_directory") or "").strip()
+    profile_dir = get_chrome_debug_profile_dir(resolved_dir)
+    probe = probe_fn or probe_chrome_debug_port
+
+    existing = probe(resolved_port)
+    if existing:
+        return {
+            "ok": True,
+            "active": True,
+            "reused": True,
+            "launched": False,
+            "port": resolved_port,
+            "browser_url": f"http://127.0.0.1:{resolved_port}",
+            "ws_endpoint": str(existing.get("webSocketDebuggerUrl") or ""),
+            "browser": str(existing.get("Browser") or "Chrome"),
+            "user_data_dir": str(profile_dir),
+            "profile_directory": resolved_profile,
+        }
+
+    exe = _find_chrome_executable() if spawn_fn is None else "google-chrome"
+    if not exe:
+        return {
+            "ok": False,
+            "active": False,
+            "reused": False,
+            "launched": False,
+            "port": resolved_port,
+            "error": "chrome_executable_not_found",
+        }
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        exe,
+        f"--remote-debugging-port={resolved_port}",
+        f"--user-data-dir={profile_dir}",
+    ]
+    if resolved_profile:
+        cmd.append(f"--profile-directory={resolved_profile}")
+    cmd.extend([
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ])
+    (spawn_fn or _default_chrome_spawn)(cmd)
+    sleeper = sleep_fn or time.sleep
+    for _ in range(20):
+        sleeper(0.25)
+        info = probe(resolved_port)
+        if info:
+            return {
+                "ok": True,
+                "active": True,
+                "reused": False,
+                "launched": True,
+                "port": resolved_port,
+                "browser_url": f"http://127.0.0.1:{resolved_port}",
+                "ws_endpoint": str(info.get("webSocketDebuggerUrl") or ""),
+                "browser": str(info.get("Browser") or "Chrome"),
+                "user_data_dir": str(profile_dir),
+                "background": background,
+            }
+
+    return {
+        "ok": False,
+        "active": False,
+        "reused": False,
+        "launched": True,
+        "port": resolved_port,
+        "browser_url": f"http://127.0.0.1:{resolved_port}",
+        "error": "chrome_debug_startup_timeout",
+        "user_data_dir": str(profile_dir),
+    }
+
+
+def open_url_via_cdp_http(
+    url: str,
+    port: Optional[int] = None,
+    timeout: float = 2.0,
+) -> Optional[dict[str, Any]]:
+    """Opens a new tab inside the active Chrome remote-debugging instance via HTTP."""
+    resolved = get_chrome_debug_port(port)
+    encoded = urllib.parse.quote(url, safe=":/?&=#%+~")
+    endpoint = f"http://127.0.0.1:{resolved}/json/new?{encoded}"
+    for method in ("PUT", "GET"):
+        try:
+            req = urllib.request.Request(endpoint, method=method)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                raw = resp.read().decode("utf-8", errors="ignore")
+                parsed = json.loads(raw) if raw else {}
+                if isinstance(parsed, dict) and parsed.get("id"):
+                    return parsed
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _get_active_cdp_tab_meta(port: Optional[int] = None, timeout: float = 0.8) -> Optional[dict[str, Any]]:
+    """Reads the top active page target metadata from 127.0.0.1:<port>/json/list."""
+    resolved = get_chrome_debug_port(port)
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{resolved}/json/list", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            targets = json.loads(resp.read().decode("utf-8", errors="ignore") or "[]")
+        for tgt in targets:
+            if isinstance(tgt, dict) and tgt.get("type") == "page":
+                u = str(tgt.get("url") or "")
+                if u.startswith(("http://", "https://")):
+                    return {"url": u, "title": str(tgt.get("title") or "")}
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def open_url_in_chrome(
+    url: str,
+    background: bool = True,
+    port: Optional[int] = None,
+    ensure_debug: bool = True,
+) -> bool:
+    """Opens a URL in Chrome, reusing an active remote-debugging session or spawning an isolated one."""
+    if ensure_debug:
+        dbg = ensure_chrome_debug_instance(port=port, background=background)
+        if dbg.get("active"):
+            tab = open_url_via_cdp_http(url, port=dbg["port"])
+            if tab is not None:
+                if not background and platform.system() == "Darwin":
+                    _default_osascript_runner('tell application "Google Chrome" to activate', 3.0)
+                return True
     try:
         sys_name = platform.system()
         if sys_name == "Darwin":
@@ -641,13 +958,33 @@ def visual_chrome_navigate_and_search(
     target_url = url or cfg.get("base_url") or "https://www.google.com"
     exec_apple = runner or _default_osascript_runner
     sys_name = platform.system() if runner is None else "Darwin"
+    debug_info: dict[str, Any] = {}
+    if runner is None:
+        debug_info = ensure_chrome_debug_instance(background=not focus)
 
     method = "url_fallback"
     final_url = target_url
     page_title = site.capitalize() if site else target_url
     snippet = ""
 
-    if sys_name == "Darwin":
+    if runner is None and debug_info.get("active"):
+        tmpl = cfg.get("search_url") if query else None
+        final_url = (
+            tmpl.format(query=urllib.parse.quote_plus(query))
+            if (tmpl and query)
+            else (
+                f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+                if query
+                else target_url
+            )
+        )
+        tab = open_url_via_cdp_http(final_url, port=debug_info.get("port"))
+        if focus and sys_name == "Darwin":
+            _default_osascript_runner('tell application "Google Chrome" to activate', 3.0)
+        if tab and tab.get("title"):
+            page_title = str(tab["title"])
+        method = "cdp_remote_debug_open"
+    elif sys_name == "Darwin":
         focus_line = "activate\n" if focus else ""
         open_script = (
             'tell application "Google Chrome"\n'
@@ -742,13 +1079,13 @@ def visual_chrome_navigate_and_search(
         elif ok_open:
             method = "chrome_applescript_open"
     else:
-        # Cross-platform Linux visual browser launch
+        # Cross-platform Linux visual browser launch on unified :9222 debug instance
         tmpl = cfg.get("search_url") if query else None
         final_url = tmpl.format(query=urllib.parse.quote_plus(query)) if (tmpl and query) else (
             f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}" if query else target_url
         )
-        open_url_in_chrome(final_url, background=not focus)
-        method = "linux_chrome_open"
+        open_url_in_chrome(final_url, background=not focus, port=debug_info.get("port"))
+        method = "cdp_chrome_open" if debug_info.get("active") else "linux_chrome_open"
 
     _LAST_OPENED_BROWSER_PAGE = {
         "url": final_url,
@@ -819,6 +1156,12 @@ def read_active_chrome_page(
     title = str(_LAST_OPENED_BROWSER_PAGE.get("title") or "")
     headings: list[str] = []
     text = ""
+
+    if runner is None and not url:
+        cdp_meta = _get_active_cdp_tab_meta()
+        if cdp_meta:
+            url = cdp_meta.get("url") or url
+            title = cdp_meta.get("title") or title
 
     if sys_name == "Darwin":
         extract_js = (

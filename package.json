@@ -4,6 +4,20 @@
   "description": "Cortical Agentic Harness, Second Brain MCP, Adaptive Permission Gate & Voice Engine for pi",
   "license": "Apache-2.0",
   "author": "Carlo Cancellieri <ccancellieri@hotmail.com> (https://github.com/ccancellieri)",
+  "keywords": [
+    "pi-package",
+    "opencode",
+    "mcp",
+    "agentskills"
+  ],
+  "pi": {
+    "extensions": [
+      "./.pi/extensions"
+    ],
+    "skills": [
+      "./.agents/skills"
+    ]
+  },
   "type": "module",
   "scripts": {
     "setup": "bash ./scripts/setup.sh",

@@ -161,7 +161,7 @@ CREATE TABLE IF NOT EXISTS scoped_context_attachments (
     tenant_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     scope_id TEXT NOT NULL DEFAULT 'chat',
-    item_type TEXT NOT NULL CHECK(item_type IN ('file', 'folder', 'skill', 'plugin')),
+    item_type TEXT NOT NULL CHECK(item_type IN ('file', 'folder', 'skill', 'plugin', 'mcp')),
     item_ref TEXT NOT NULL,
     label TEXT NOT NULL,
     depth_tier TEXT NOT NULL DEFAULT 'medium',
@@ -169,6 +169,34 @@ CREATE TABLE IF NOT EXISTS scoped_context_attachments (
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
     UNIQUE(tenant_id, workspace_id, scope_id, item_type, item_ref)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS task_episodes_fts USING fts5(
+    tenant_id UNINDEXED,
+    workspace_id UNINDEXED,
+    episode_id UNINDEXED,
+    title,
+    goal,
+    learned_summary,
+    skills_used
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    model TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'ollama',
+    status TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    elapsed_sec REAL NOT NULL DEFAULT 0.0,
+    started_at REAL NOT NULL,
+    finished_at REAL
 );
 """
 
@@ -201,17 +229,24 @@ DEFAULT_FRAMEWORK_CONCEPTS: dict[str, dict[str, Any]] = {
         "summary_medium": "Gestisce il ciclo multi-agente su richiesta esplicita: permette di configurare quanti loop massimi gli agenti eseguono e quali modelli LLM usare per Analyst, Implementer e Reviewer.",
         "default_config": {
             "max_agent_loops": 6,
-            "analyst_model": "qwen2.5:1.5b",
-            "implementer_model": "qwen2.5:1.5b",
-            "reviewer_model": "qwen2.5:1.5b",
+            "coordinator_model": "qwen3.8:27b-iq2_xs",
+            "analyst_model": "qwen3.8:27b-iq2_xs",
+            "implementer_model": "qwen3.8:27b-iq2_xs",
+            "reviewer_model": "qwen3.8:27b-iq2_xs",
+            "chat_model": "qwen3.8:27b-iq2_xs",
+            "model_context_windows": {
+                "qwen3.8:27b-iq2_xs": 32768,
+            },
             "llm_base_url": "http://127.0.0.1:11434/v1",
             "auto_compile_skills_on_close": True,
         },
         "config_schema": [
             {"key": "max_agent_loops", "label": "Loop Massimi Agenti (Max Iterations)", "type": "number", "min": 1, "max": 30},
+            {"key": "coordinator_model", "label": "Modello Ruolo Coordinator", "type": "text"},
             {"key": "analyst_model", "label": "Modello Ruolo Analyst (Ricerca & Piano)", "type": "text"},
             {"key": "implementer_model", "label": "Modello Ruolo Implementer (Codice & Azione)", "type": "text"},
             {"key": "reviewer_model", "label": "Modello Ruolo Reviewer (Verifica & Test)", "type": "text"},
+            {"key": "chat_model", "label": "Modello Chat Generale", "type": "text"},
             {"key": "llm_base_url", "label": "Endpoint OpenAI/Ollama Locale", "type": "text"},
             {"key": "auto_compile_skills_on_close", "label": "Compila Skill Automatica a Chiusura Task", "type": "boolean"},
         ],
@@ -364,6 +399,54 @@ class CorticalWikiDB:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            self._migrate_context_attachments_check(conn)
+            self._backfill_episode_fts(conn)
+
+    @staticmethod
+    def _migrate_context_attachments_check(conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='scoped_context_attachments'"
+        ).fetchone()
+        if not row or "'mcp'" in str(row["sql"] or ""):
+            return
+        conn.executescript(
+            """
+            ALTER TABLE scoped_context_attachments RENAME TO _scoped_context_attachments_old;
+            CREATE TABLE scoped_context_attachments (
+                attachment_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL DEFAULT 'chat',
+                item_type TEXT NOT NULL CHECK(item_type IN ('file', 'folder', 'skill', 'plugin', 'mcp')),
+                item_ref TEXT NOT NULL,
+                label TEXT NOT NULL,
+                depth_tier TEXT NOT NULL DEFAULT 'medium',
+                summary_preview TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                UNIQUE(tenant_id, workspace_id, scope_id, item_type, item_ref)
+            );
+            INSERT INTO scoped_context_attachments
+                SELECT * FROM _scoped_context_attachments_old;
+            DROP TABLE _scoped_context_attachments_old;
+            """
+        )
+
+    @staticmethod
+    def _backfill_episode_fts(conn: sqlite3.Connection) -> None:
+        cnt = conn.execute("SELECT COUNT(*) FROM task_episodes_fts").fetchone()[0]
+        if cnt:
+            return
+        rows = conn.execute(
+            "SELECT tenant_id, workspace_id, episode_id, title, goal, learned_summary, skills_used FROM task_episodes"
+        ).fetchall()
+        for r in rows:
+            conn.execute(
+                """INSERT INTO task_episodes_fts(
+                       tenant_id, workspace_id, episode_id, title, goal, learned_summary, skills_used
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (r["tenant_id"], r["workspace_id"], r["episode_id"], r["title"], r["goal"], r["learned_summary"], r["skills_used"]),
+            )
 
     def ensure_workspace(
         self,
@@ -644,6 +727,16 @@ class CorticalWikiDB:
                     now,
                 ),
             )
+            conn.execute(
+                "DELETE FROM task_episodes_fts WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                (ctx.tenant_id, ctx.workspace_id, episode_id),
+            )
+            conn.execute(
+                """INSERT INTO task_episodes_fts(
+                       tenant_id, workspace_id, episode_id, title, goal, learned_summary, skills_used
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id, title, goal, learned_summary, json.dumps(skills_used or [])),
+            )
             edges_created = 0
             for rel in relations or []:
                 conn.execute(
@@ -666,6 +759,27 @@ class CorticalWikiDB:
                 )
                 edges_created += 1
         return {"episode_id": episode_id, "edges_created": edges_created}
+
+    def update_episode_title(
+        self,
+        ctx: AccessContext,
+        episode_id: str,
+        title: str,
+    ) -> dict[str, Any]:
+        """Updates the short human-readable L1 title of an existing task episode."""
+        clean_title = str(title or "").strip()[:120]
+        if not clean_title:
+            return {"updated": False, "episode_id": episode_id, "error": "Empty title"}
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE task_episodes SET title = ? WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                (clean_title, ctx.tenant_id, ctx.workspace_id, episode_id),
+            )
+            conn.execute(
+                "UPDATE task_episodes_fts SET title = ? WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                (clean_title, ctx.tenant_id, ctx.workspace_id, episode_id),
+            )
+            return {"updated": cur.rowcount > 0, "episode_id": episode_id, "title": clean_title}
 
     def query_macro_graph(
         self,
@@ -897,7 +1011,7 @@ class CorticalWikiDB:
         from .crawler import DEFAULT_IGNORE_DIRS, TEXT_EXTENSIONS, deterministic_extractive_summarizer
 
         item_type = item_type.lower().strip()
-        if item_type not in {"file", "folder", "skill", "plugin"}:
+        if item_type not in {"file", "folder", "skill", "plugin", "mcp"}:
             raise ValueError(f"Unsupported context item_type: {item_type}")
 
         scope_id = (scope_id or "chat").strip() or "chat"
@@ -988,7 +1102,11 @@ class CorticalWikiDB:
 
         elif item_type == "plugin":
             resolved_label = label or item_ref
-            summary_preview = f"Plugin / MCP attivo nel contesto '{scope_id}': {resolved_label}"
+            summary_preview = f"Plugin attivo nel contesto '{scope_id}': {resolved_label}"
+
+        elif item_type == "mcp":
+            resolved_label = label or item_ref
+            summary_preview = f"Server MCP attivo nel contesto '{scope_id}': {resolved_label}"
 
         now = time.time()
         att_id = f"att_{hashlib.sha1(f'{scope_id}:{item_type}:{item_ref}'.encode('utf-8')).hexdigest()[:10]}"
@@ -1449,4 +1567,256 @@ class CorticalWikiDB:
                 "framework_core_count": sum(1 for n in nodes if n.get("is_framework_core")),
                 "user_concept_count": sum(1 for n in nodes if not n.get("is_framework_core")),
             },
+        }
+
+    def upsert_agent_run(
+        self,
+        ctx: AccessContext,
+        *,
+        run_id: str,
+        episode_id: str,
+        role: str,
+        model: str,
+        provider: str,
+        status: str,
+        goal: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: int = 0,
+        elapsed_sec: float = 0.0,
+        started_at: Optional[float] = None,
+        finished_at: Optional[float] = None,
+    ) -> None:
+        """Persists or updates an individual agent run and its local LLM token telemetry."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO agent_runs(
+                       run_id, episode_id, tenant_id, workspace_id, role, model,
+                       provider, status, goal, input_tokens, output_tokens, total_tokens,
+                       elapsed_sec, started_at, finished_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                       model = excluded.model,
+                       provider = excluded.provider,
+                       status = excluded.status,
+                       input_tokens = excluded.input_tokens,
+                       output_tokens = excluded.output_tokens,
+                       total_tokens = excluded.total_tokens,
+                       elapsed_sec = excluded.elapsed_sec,
+                       finished_at = excluded.finished_at""",
+                (
+                    run_id, episode_id, ctx.tenant_id, ctx.workspace_id, role, model,
+                    provider, status, goal[:500], int(input_tokens), int(output_tokens),
+                    int(total_tokens or (input_tokens + output_tokens)),
+                    float(elapsed_sec), float(started_at or now), finished_at,
+                ),
+            )
+
+    def list_agent_runs(
+        self,
+        ctx: AccessContext,
+        episode_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        status_filter: Optional[str] = None,
+        search_query: str = "",
+    ) -> list[dict[str, Any]]:
+        """Lists persisted agent runs with optional episode, status, search, and pagination."""
+        clauses = ["tenant_id = ?", "workspace_id = ?"]
+        params: list[Any] = [ctx.tenant_id, ctx.workspace_id]
+        if episode_id:
+            clauses.append("episode_id = ?")
+            params.append(episode_id)
+        if status_filter and status_filter not in {"all", ""}:
+            clauses.append("status = ?")
+            params.append(status_filter)
+        q = (search_query or "").strip().lower()
+        if q:
+            clauses.append("(LOWER(role) LIKE ? OR LOWER(model) LIKE ? OR LOWER(goal) LIKE ?)")
+            like = f"%{q}%"
+            params.extend([like, like, like])
+        where_sql = " AND ".join(clauses)
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM agent_runs
+                    WHERE {where_sql}
+                    ORDER BY started_at DESC LIMIT ? OFFSET ?""",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_agent_runs(
+        self,
+        ctx: AccessContext,
+        episode_id: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        search_query: str = "",
+    ) -> int:
+        """Counts persisted agent runs matching the given filters."""
+        clauses = ["tenant_id = ?", "workspace_id = ?"]
+        params: list[Any] = [ctx.tenant_id, ctx.workspace_id]
+        if episode_id:
+            clauses.append("episode_id = ?")
+            params.append(episode_id)
+        if status_filter and status_filter not in {"all", ""}:
+            clauses.append("status = ?")
+            params.append(status_filter)
+        q = (search_query or "").strip().lower()
+        if q:
+            clauses.append("(LOWER(role) LIKE ? OR LOWER(model) LIKE ? OR LOWER(goal) LIKE ?)")
+            like = f"%{q}%"
+            params.extend([like, like, like])
+        where_sql = " AND ".join(clauses)
+        with self._connect() as conn:
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM agent_runs WHERE {where_sql}", params).fetchone()
+        return int(row["c"]) if row else 0
+
+    def mark_orphan_working_runs_stopped(self, ctx: AccessContext) -> int:
+        """Marks stale 'working' agent_runs from prior server lifetimes as 'stopped'."""
+        now = time.time()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE agent_runs
+                   SET status = 'stopped', finished_at = COALESCE(finished_at, ?)
+                   WHERE tenant_id = ? AND workspace_id = ? AND status = 'working'""",
+                (now, ctx.tenant_id, ctx.workspace_id),
+            )
+            return int(cur.rowcount or 0)
+
+    def stop_agent_run(self, ctx: AccessContext, run_id: str) -> bool:
+        """Marks a specific agent_run as 'stopped' in SQLite."""
+        now = time.time()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE agent_runs
+                   SET status = 'stopped', finished_at = COALESCE(finished_at, ?)
+                   WHERE tenant_id = ? AND workspace_id = ? AND run_id = ? AND status = 'working'""",
+                (now, ctx.tenant_id, ctx.workspace_id, run_id),
+            )
+            return int(cur.rowcount or 0) > 0
+
+    def get_token_usage_summary(
+        self,
+        ctx: AccessContext,
+        episode_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Aggregates local LLM token usage across agents and models."""
+        runs = self.list_agent_runs(ctx, episode_id=episode_id, limit=500)
+        by_model: dict[str, dict[str, Any]] = {}
+        total_in = 0
+        total_out = 0
+        for r in runs:
+            m = str(r.get("model") or "unknown")
+            i_tok = int(r.get("input_tokens") or 0)
+            o_tok = int(r.get("output_tokens") or 0)
+            t_tok = int(r.get("total_tokens") or (i_tok + o_tok))
+            total_in += i_tok
+            total_out += o_tok
+            slot = by_model.setdefault(m, {"model": m, "runs": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+            slot["runs"] += 1
+            slot["input_tokens"] += i_tok
+            slot["output_tokens"] += o_tok
+            slot["total_tokens"] += t_tok
+        return {
+            "episode_id": episode_id,
+            "run_count": len(runs),
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+            "total_tokens": sum(v["total_tokens"] for v in by_model.values()) or (total_in + total_out),
+            "by_model": list(by_model.values()),
+            "runs": runs[:50],
+        }
+
+    def reopen_episode(self, ctx: AccessContext, episode_id: str) -> dict[str, Any]:
+        """Reopens an archived or completed task episode so execution can continue."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM task_episodes
+                   WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id),
+            ).fetchone()
+            if not row:
+                return {"reopened": False, "episode_id": episode_id}
+            conn.execute(
+                """UPDATE task_episodes SET outcome_status = 'open'
+                   WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?""",
+                (ctx.tenant_id, ctx.workspace_id, episode_id),
+            )
+        return {"reopened": True, "episode_id": episode_id, "status": "open"}
+
+    def search_episodes_paginated(
+        self,
+        ctx: AccessContext,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 15,
+    ) -> dict[str, Any]:
+        """Full-text (FTS5) + semantic token search over task episodes with pagination."""
+        q_clean = (query or "").strip().lower()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT e.*, COALESCE(s.tier_l2_medium, '') AS synth_l2
+                   FROM task_episodes e
+                   LEFT JOIN task_discussion_synthesis s
+                     ON e.tenant_id = s.tenant_id
+                    AND e.workspace_id = s.workspace_id
+                    AND e.episode_id = s.episode_id
+                   WHERE e.tenant_id = ? AND e.workspace_id = ?
+                   ORDER BY e.created_at DESC""",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            fts_ids: set[str] = set()
+            if q_clean:
+                tokens = [re.sub(r"[^a-z0-9àèéìòù_-]", "", t) for t in q_clean.split() if len(t) >= 2]
+                if tokens:
+                    fts_expr = " OR ".join(f"{t}*" for t in tokens[:8])
+                    try:
+                        f_rows = conn.execute(
+                            """SELECT episode_id FROM task_episodes_fts
+                               WHERE tenant_id = ? AND workspace_id = ? AND task_episodes_fts MATCH ?""",
+                            (ctx.tenant_id, ctx.workspace_id, fts_expr),
+                        ).fetchall()
+                        fts_ids = {str(r["episode_id"]) for r in f_rows}
+                    except sqlite3.OperationalError:
+                        fts_ids = set()
+
+        sem_map = {
+            "install": "installa pip pacchetto tool",
+            "installa": "install pip package tool",
+            "skill": "competenza procedura workflow",
+            "doc": "documento file analisi studia",
+            "documento": "doc file read analyze studia",
+            "test": "unittest verifica controllo",
+            "voce": "voice audio mic tts",
+        }
+        items = [dict(r) for r in rows]
+        if q_clean:
+            q_terms = set(re.findall(r"[a-z0-9àèéìòù_-]{2,}", q_clean))
+            for t in list(q_terms):
+                if t in sem_map:
+                    q_terms.update(sem_map[t].split())
+            scored: list[tuple[float, dict[str, Any]]] = []
+            for it in items:
+                blob = f"{it['episode_id']} {it['title']} {it['goal']} {it['learned_summary']} {it.get('synth_l2', '')}".lower()
+                b_terms = set(re.findall(r"[a-z0-9àèéìòù_-]{2,}", blob))
+                overlap = len(q_terms & b_terms)
+                substr = 2.0 if q_clean in blob else 0.0
+                fts_boost = 3.0 if it["episode_id"] in fts_ids else 0.0
+                score = fts_boost + substr + (overlap / max(len(q_terms), 1)) * 2.0
+                if score > 0.25:
+                    it["search_score"] = round(score, 3)
+                    scored.append((score, it))
+            scored.sort(key=lambda pair: (pair[0], pair[1]["created_at"]), reverse=True)
+            items = [pair[1] for pair in scored]
+
+        total = len(items)
+        page = items[max(0, offset): max(0, offset) + max(1, limit)]
+        return {
+            "episodes": page,
+            "total": total,
+            "offset": max(0, offset),
+            "limit": max(1, limit),
+            "has_more": (max(0, offset) + len(page)) < total,
         }

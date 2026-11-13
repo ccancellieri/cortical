@@ -11,7 +11,7 @@ description: >
 When isolated headless navigation, form extraction, or screenshot verification is required outside the active Chrome session, run the bundled helper script:
 
 ```bash
-.venv/bin/python .pi/skills/browser-use-playwright/scripts/playwright_runner.py \
+.venv/bin/python .agents/skills/browser-use-playwright/scripts/playwright_runner.py \
   --url "https://example.com" \
   --action "snapshot"
 ```

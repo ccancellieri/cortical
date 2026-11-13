@@ -194,6 +194,40 @@ class PromptEnhancementResult:
         return self.to_dict().get(key, default)
 
 
+def _extract_skill_procedure_blocks(
+    discussion_steps: Optional[list[dict[str, Any]]],
+) -> tuple[str, list[str], list[str]]:
+    """Extracts structured procedure lines, touched paths, and verified commands from execution steps."""
+    steps = list(discussion_steps or [])
+    proc_lines: list[str] = []
+    touched_files: list[str] = []
+    verified_cmds: list[str] = []
+
+    for idx, st in enumerate(steps[:8], start=1):
+        title = str(st.get("title") or "Step").strip()
+        detail = re.sub(r"\s+", " ", str(st.get("detail") or "")).strip()
+        meta = st.get("meta") if isinstance(st.get("meta"), dict) else {}
+        cmd = str(meta.get("command") or "").strip()
+        fpath = str(meta.get("path") or "").strip()
+
+        if fpath and fpath not in touched_files:
+            touched_files.append(fpath)
+        if cmd and cmd not in verified_cmds and not meta.get("is_error"):
+            verified_cmds.append(cmd)
+
+        if detail and detail.lower() != title.lower():
+            proc_lines.append(f"{idx}. **{title}** — {detail[:180]}")
+        else:
+            proc_lines.append(f"{idx}. {title}")
+
+    proc_text = (
+        "\n".join(proc_lines)
+        if proc_lines
+        else "1. Consulta la Wiki MCP a livello `medium`.\n2. Applica il pattern verificato.\n3. Verifica con test single-shot."
+    )
+    return (proc_text, touched_files[:8], verified_cmds[:5])
+
+
 @dataclass
 class SkillEvaluationResult:
     episode_id: str
@@ -693,11 +727,11 @@ class CorticalSkillHub:
         lang_rule = (
             "Always reply in clear, technically rigorous English."
             if req_lang == "en"
-            else "Rispondi sempre in italiano chiaro e tecnicamente rigoroso."
+            else "Always reply in the EXACT same language as the user's prompt (e.g. Italian, Spanish, etc.) with technical rigor. Keep core tool/framework identifiers in English; learned discussion skills may use the conversation's language."
         )
         enhanced_instructions = (
-            f"=== CORTICAL HARNESS — Orchestratore Multi-Agent & 3+1 Second Brain ===\n"
-            f"{lang_rule}\n"
+            f"=== CORTICAL HARNESS — Multi-Agent Orchestrator & 3+1 Second Brain ===\n"
+            f"{lang_rule} (detected={req_lang})\n"
             f"Configurazione Orchestratore: Max Loop Agenti = {max_loops} | Modelli = Analyst({role_model_map['arch_analyst']}), Implementer({role_model_map['code_implementer']}), Reviewer({role_model_map['reviewer']}).\n\n"
             f"=== 1. CONTESTO SPECIFICO ALLEGATO & WIKI (Livello 3+1: {depth.value.upper()}) ===\n"
             f"{wiki_block}\n\n"
@@ -905,11 +939,19 @@ class CorticalSkillHub:
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_dir / "SKILL.md"
 
-        steps_summary = "\n".join(
-            f"{i+1}. {st.get('title', 'Step')}"
-            for i, st in enumerate((discussion_steps or [])[:5])
-            if st.get("title")
-        ) or "1. Consulta la Wiki MCP a livello `medium`.\n2. Applica il pattern verificato.\n3. Verifica con test single-shot."
+        steps_summary, touched_files, verified_cmds = _extract_skill_procedure_blocks(discussion_steps)
+        files_block = (
+            "\n## File & Moduli Coinvolti\n"
+            + "\n".join(f"- `{p}`" for p in touched_files)
+            + "\n"
+            if touched_files
+            else ""
+        )
+        verify_block = (
+            "\n".join(f"- Esegui: `{c}`" for c in verified_cmds)
+            if verified_cmds
+            else "- Controlla la coerenza con la Wiki 3+1 (`wiki_navigate` / `wiki_search`) ed esegui i test in un unico colpo."
+        )
 
         skill_md = (
             f"---\n"
@@ -923,9 +965,10 @@ class CorticalSkillHub:
             f"## Lezione Chiave Consolidata\n"
             f"{lessons_learned or goal}\n\n"
             f"## Procedura Riutilizzabile\n"
-            f"{steps_summary}\n\n"
+            f"{steps_summary}\n"
+            f"{files_block}\n"
             f"## Verifica\n"
-            f"- Controlla la coerenza con la Wiki 3+1 (`wiki_navigate` / `wiki_search`) ed esegui i test in un unico colpo.\n"
+            f"{verify_block}\n"
         )
         skill_path.write_text(skill_md, encoding="utf-8")
 

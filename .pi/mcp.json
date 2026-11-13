@@ -16,6 +16,7 @@
     "chrome": {
       "command": "/opt/homebrew/bin/chrome-devtools-mcp",
       "args": [
+        "--browserUrl=http://127.0.0.1:9222",
         "--no-usage-statistics",
         "--no-performance-crux",
         "--workspace=/Users/ccancellieri/work/code/cortical"

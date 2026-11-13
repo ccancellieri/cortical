@@ -32,6 +32,45 @@ HARD_BLOCK_PATTERNS = [
     r"\bAXRaise\b",
 ]
 
+SENSITIVE_PATH_RE = re.compile(
+    r"(?:~?/\.ssh/|~?/\.aws/|~?/\.netrc|\bid_rsa\b|\bid_ed25519\b|\bpass\.txt\b|\bsudo_pass\.txt\b|(?:^|[\s/\"'])\.env(?:\.local|\.prod)?(?:$|[\s\"']))",
+    re.IGNORECASE,
+)
+OUTBOUND_NET_CMD_RE = re.compile(
+    r"(?:^|[;&|\s])(?:curl|wget|nc|ncat|socat|ssh|scp|sftp|rsync|ftp|telnet|dig|nslookup|xh)\b",
+    re.IGNORECASE,
+)
+INLINE_NET_API_RE = re.compile(
+    r"(?:urllib\.request|requests\.(?:get|post|put|delete|request)|httpx\.|http\.client|socket\.connect|fetch\(|XMLHttpRequest)",
+    re.IGNORECASE,
+)
+URL_HOST_RE = re.compile(r"https?://([A-Za-z0-9.\-:]+)", re.IGNORECASE)
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}
+
+
+def detect_egress_or_secret_attempt(cmd: str) -> tuple[bool, str, str]:
+    """Detects outbound network calls to non-local hosts or sensitive secret access."""
+    text = str(cmd or "").strip()
+    if not text:
+        return (False, "", "")
+    if SENSITIVE_PATH_RE.search(text):
+        return (True, "sensitive-path", "Blocked access to sensitive credential/key path.")
+
+    urls = URL_HOST_RE.findall(text)
+    for host_port in urls:
+        host = host_port.split(":")[0].lower()
+        if host and host not in LOCAL_HOSTS:
+            return (True, host, f"Blocked outbound network target: {host_port}")
+
+    if OUTBOUND_NET_CMD_RE.search(text) or INLINE_NET_API_RE.search(text):
+        # Allow explicit loopback-only commands (e.g. curl http://127.0.0.1:8765/...)
+        if urls and all(h.split(":")[0].lower() in LOCAL_HOSTS for h in urls):
+            return (False, "", "")
+        if any(lh in text.lower() for lh in ("127.0.0.1", "localhost", "::1")) and not urls:
+            return (False, "", "")
+        return (True, "external-network", "Blocked outbound network/exfiltration command in strict isolation mode.")
+    return (False, "", "")
+
 SAFE_READONLY_COMMANDS = {
     "ls",
     "pwd",
@@ -105,33 +144,72 @@ class AdaptivePermissionGate:
                     raw_args_json TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS egress_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'egress_proxy',
+                    method TEXT NOT NULL DEFAULT '',
+                    target_host TEXT NOT NULL DEFAULT '',
+                    target_url TEXT NOT NULL DEFAULT '',
+                    payload_excerpt TEXT NOT NULL DEFAULT '',
+                    verdict TEXT NOT NULL DEFAULT 'blocked',
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
                 """
             )
+
+    @staticmethod
+    def _normalize_bash_pattern(cmd: str) -> tuple[str, float]:
+        for pat in HARD_BLOCK_PATTERNS:
+            if re.search(pat, cmd, flags=re.IGNORECASE):
+                return (f"bash:HARD_BLOCK:{pat}", 1.0)
+        egress_blocked, target, _why = detect_egress_or_secret_attempt(cmd)
+        if egress_blocked:
+            return (f"bash:HARD_BLOCK:egress:{target}", 1.0)
+
+        tokens = cmd.split()
+        idx = 0
+        while idx < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[idx]):
+            idx += 1
+        eff_tokens = tokens[idx:]
+        if not eff_tokens:
+            return ("bash:empty", 0.0)
+
+        exe_name = Path(eff_tokens[0]).name
+        head_two = f"{exe_name} {eff_tokens[1]}" if len(eff_tokens) > 1 else exe_name
+        if exe_name in SAFE_READONLY_COMMANDS or head_two in SAFE_READONLY_COMMANDS:
+            return (f"bash:readonly:{exe_name}", 0.1)
+
+        joined_tail = " ".join(eff_tokens[1:4])
+        if (exe_name in {"python", "python3"} and "unittest" in joined_tail) or (
+            exe_name == "node" and "--check" in joined_tail
+        ):
+            return (f"bash:test:{exe_name}", 0.12)
+
+        if exe_name in {"python", "python3", "npm", "node", "git"}:
+            sub = eff_tokens[1] if len(eff_tokens) > 1 and not eff_tokens[1].startswith("-") else "exec"
+            return (f"bash:dev:{exe_name}:{sub}", 0.45)
+
+        return (f"bash:cmd:{exe_name}", 0.65)
 
     def normalize_pattern(self, tool_name: str, args: dict[str, Any]) -> tuple[str, float]:
         """Extracts a reusable canonical pattern and initial base risk score."""
         tool = tool_name.lower()
-        if tool in {"read", "read_file", "wiki_navigate", "wiki_search", "list_pages"}:
+        if tool in {"read", "read_file"}:
+            target_path = str(args.get("path") or args.get("file_path") or "")
+            if SENSITIVE_PATH_RE.search(target_path):
+                return (f"{tool}:HARD_BLOCK:sensitive:{target_path}", 1.0)
+            return (f"{tool}:*", 0.05)
+
+        if tool in {"wiki_navigate", "wiki_search", "list_pages"}:
             return (f"{tool}:*", 0.05)
 
         if tool == "bash":
             cmd = str(args.get("command") or args.get("cmd") or "").strip()
-            for pat in HARD_BLOCK_PATTERNS:
-                if re.search(pat, cmd, flags=re.IGNORECASE):
-                    return (f"bash:HARD_BLOCK:{pat}", 1.0)
-
-            tokens = cmd.split()
-            if not tokens:
-                return ("bash:empty", 0.0)
-            head_two = " ".join(tokens[:2])
-            if tokens[0] in SAFE_READONLY_COMMANDS or head_two in SAFE_READONLY_COMMANDS:
-                return (f"bash:readonly:{tokens[0]}", 0.1)
-
-            if tokens[0] in {"pytest", "python", "python3", "npm", "node", "git"}:
-                sub = tokens[1] if len(tokens) > 1 and not tokens[1].startswith("-") else "exec"
-                return (f"bash:dev:{tokens[0]}:{sub}", 0.45)
-
-            return (f"bash:cmd:{tokens[0]}", 0.65)
+            return self._normalize_bash_pattern(cmd)
 
         if tool in {"write", "write_file", "edit", "edit_file"}:
             target_path = str(args.get("path") or args.get("file_path") or "")
@@ -264,3 +342,75 @@ class AdaptivePermissionGate:
                     time.time(),
                 ),
             )
+
+    def record_egress_event(
+        self,
+        *,
+        session_id: str = "",
+        role: str = "",
+        model: str = "",
+        source: str = "egress_proxy",
+        method: str = "",
+        target_host: str = "",
+        target_url: str = "",
+        payload_excerpt: str = "",
+        verdict: str = "blocked",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Persists an outbound egress or secret-access attempt for security audit."""
+        now = time.time()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO egress_audit_log(
+                       session_id, role, model, source, method, target_host,
+                       target_url, payload_excerpt, verdict, reason, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(session_id or "")[:80],
+                    str(role or "")[:60],
+                    str(model or "")[:120],
+                    str(source or "egress_proxy")[:40],
+                    str(method or "")[:20],
+                    str(target_host or "")[:180],
+                    str(target_url or "")[:400],
+                    str(payload_excerpt or "")[:600],
+                    str(verdict or "blocked")[:20],
+                    str(reason or "")[:240],
+                    now,
+                ),
+            )
+            ev_id = int(cur.lastrowid or 0)
+        return {
+            "id": ev_id,
+            "session_id": session_id,
+            "role": role,
+            "model": model,
+            "source": source,
+            "method": method,
+            "target_host": target_host,
+            "target_url": target_url,
+            "payload_excerpt": payload_excerpt[:600],
+            "verdict": verdict,
+            "reason": reason,
+            "created_at": now,
+        }
+
+    def list_egress_events(self, limit: int = 50, session_id: str = "") -> list[dict[str, Any]]:
+        """Lists recent blocked/audited outbound egress attempts."""
+        with self._connect() as conn:
+            if session_id:
+                rows = conn.execute(
+                    "SELECT * FROM egress_audit_log WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                    (session_id, max(1, min(limit, 200))),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM egress_audit_log ORDER BY id DESC LIMIT ?",
+                    (max(1, min(limit, 200)),),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_egress_events(self) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM egress_audit_log")
+            return int(cur.rowcount or 0)

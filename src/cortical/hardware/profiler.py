@@ -14,9 +14,54 @@ import platform
 import shutil
 import socket
 import subprocess
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+
+LOCAL_AGENT_MODEL_PRIORITY = (
+    "qwen3:14b",
+    "qwen3:8b",
+    "qwen2.5:14b",
+    "qwen2.5-coder:14b",
+    "qwen2.5:7b",
+    "qwen2.5-coder:7b",
+    "qwen3:4b",
+    "qwen2.5:3b",
+    "qwen2.5:1.5b",
+)
+
+
+def discover_ollama_models(
+    base_url: str = "http://127.0.0.1:11434",
+    timeout: float = 0.6,
+) -> list[str]:
+    """Lists locally available Ollama model IDs without spawning heavy processes."""
+    clean_base = base_url.rstrip("/")
+    if clean_base.endswith("/v1"):
+        clean_base = clean_base[:-3]
+    try:
+        req = urllib.request.Request(f"{clean_base}/api/tags", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+        return [str(m["name"]) for m in (payload.get("models") or []) if isinstance(m, dict) and m.get("name")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def pick_best_local_agent_model(
+    installed_models: list[str],
+    fallback: str = "qwen2.5:1.5b",
+) -> str:
+    """Selects the strongest tool-calling local model installed without forcing swap."""
+    if not installed_models:
+        return fallback
+    installed_set = {m.strip(): m.strip() for m in installed_models if m.strip()}
+    for candidate in LOCAL_AGENT_MODEL_PRIORITY:
+        if candidate in installed_set:
+            return installed_set[candidate]
+    return installed_models[0]
 
 
 PortProbeFn = Callable[[str, int], bool]
@@ -224,10 +269,21 @@ class HardwareProfiler:
         root_str = str(Path(repo_root).resolve())
 
         chrome_cmd = prof.installed_tools.get("chrome-devtools-mcp", "npx")
+        chrome_debug_url = "http://127.0.0.1:9222"
         chrome_args = (
-            ["--no-usage-statistics", "--no-performance-crux", f"--workspace={root_str}"]
+            [
+                f"--browserUrl={chrome_debug_url}",
+                "--no-usage-statistics",
+                "--no-performance-crux",
+                f"--workspace={root_str}",
+            ]
             if chrome_cmd != "npx"
-            else ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"]
+            else [
+                "-y",
+                "chrome-devtools-mcp@latest",
+                f"--browserUrl={chrome_debug_url}",
+                "--no-usage-statistics",
+            ]
         )
 
         python_bin = str(Path(root_str) / ".venv" / "bin" / "python")

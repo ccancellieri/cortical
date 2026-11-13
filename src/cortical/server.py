@@ -12,11 +12,14 @@ Provides:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
 import datetime
+import hashlib
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -29,19 +32,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 
+from .context_window import clamp_context_window, fit_context_to_window, get_model_context_window
 from .grounding import (
     detect_language,
+    discover_chrome_profiles,
     extract_browser_intent,
     extract_page_read_intent,
     extract_weather_intent,
     fetch_weather_forecast,
     format_page_reading_response,
     read_active_chrome_page,
+    save_chrome_profile_preference,
     visual_chrome_navigate_and_search,
 )
-from .hardware.profiler import HardwareProfiler
+from .hardware.profiler import HardwareProfiler, discover_ollama_models, pick_best_local_agent_model
 from .memory import MemoryCurator
+from .model_ops import (
+    RECOMMENDED_MODEL_PRESETS,
+    delete_ollama_model,
+    list_ollama_models_detailed,
+    pull_ollama_model,
+    sync_pi_models_json,
+)
 from .permissions.gate import AdaptivePermissionGate
+from .role_registry import (
+    add_custom_role,
+    delete_custom_role,
+    get_all_roles,
+    resolve_role_execution,
+)
 from .skills_hub import CorticalSkillHub
 from .voice.engine import CorticalVoiceEngine, is_human_discourse_or_question, is_self_echo
 from .wiki.db import AccessContext, CorticalWikiDB, DepthTier
@@ -378,34 +397,75 @@ def speak_native_tts(
     return False
 
 
+def _normalize_effort(val: Any) -> str:
+    raw = str(val or "medium").strip().lower()
+    if raw in {"low", "basso"}:
+        return "low"
+    if raw in {"high", "alto"}:
+        return "high"
+    return "medium"
+
+
 def _query_llm_endpoints(
     system_prompt: str,
     user_prompt: str,
     base_url: str,
-    timeout: float = 8.0,
+    timeout: float = 20.0,
+    extra_messages: Optional[list[dict[str, str]]] = None,
+    preferred_model: Optional[str] = None,
+    effort: str = "medium",
+    context_window: Optional[int] = None,
+    extra_context: str = "",
+    strategy_override: str = "auto",
+    thinking_mode: str = "auto",
 ) -> Optional[str]:
-    """Queries available local/LAN OpenAI-compatible servers in priority order."""
+    """Queries available local/LAN OpenAI-compatible servers with multi-message context fitting."""
+    default_ollama = preferred_model or "qwen2.5:1.5b"
     candidates = [
-        (base_url, "qwen2.5:1.5b" if ":11434" in base_url else "local-model"),
+        (base_url, default_ollama if ":11434" in base_url else "local-model"),
+        ("http://127.0.0.1:11434/v1", default_ollama),
         ("http://127.0.0.1:8080/v1", "local-model"),
-        ("http://127.0.0.1:11434/v1", "qwen2.5:1.5b"),
-        ("http://192.168.8.142:8080/v1", "local-model"),
     ]
-    seen: set[str] = set()
+    lan_url = os.environ.get("CORTICAL_LAN_LLM", "").strip()
+    if lan_url:
+        candidates.append((lan_url, "local-model"))
+    eff = _normalize_effort(effort)
+    max_tok = 700 if eff == "low" else (2000 if eff == "high" else 1200)
+    eff_win = get_model_context_window(default_ollama) if context_window is None else clamp_context_window(context_window)
+    fitted = fit_context_to_window(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        extra_context=extra_context,
+        history_messages=extra_messages,
+        context_window_tokens=eff_win,
+        reserve_output_tokens=max_tok,
+        strategy_override=strategy_override,
+    )
+    msgs = fitted["messages"]
+    t_mode = (thinking_mode or "auto").strip().lower()
+    if t_mode == "off":
+        reasoning_eff = "none"
+    elif t_mode in {"low", "medium", "high"}:
+        reasoning_eff = t_mode
+    else:
+        reasoning_eff = "low" if eff == "high" else "none"
+    seen: set[tuple[str, str]] = set()
     for endpoint, model_name in candidates:
-        if not endpoint or endpoint in seen or ":20128" in endpoint:
+        key = (endpoint or "", model_name)
+        if not endpoint or key in seen or ":20128" in endpoint:
             continue
-        seen.add(endpoint)
+        seen.add(key)
         url = endpoint.rstrip("/") + "/chat/completions"
-        payload = {
+        payload: dict[str, Any] = {
             "model": model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": 350,
+            "messages": msgs,
+            "max_tokens": max_tok,
             "temperature": 0.2,
         }
+        if ":11434" in endpoint or "qwen3" in model_name.lower():
+            payload["reasoning_effort"] = reasoning_eff
+        if ":11434" in endpoint:
+            payload["options"] = {"num_ctx": eff_win}
         try:
             req = urllib.request.Request(
                 url,
@@ -415,7 +475,8 @@ def _query_llm_endpoints(
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                 data = json.loads(resp.read().decode("utf-8"))
-                content = data["choices"][0]["message"]["content"].strip()
+                msg_obj = data["choices"][0]["message"]
+                content = _strip_think_blocks(str(msg_obj.get("content") or "")).strip()
                 if "</think>" in content:
                     content = content.split("</think>", 1)[1].strip()
                 if "no longer supported" in content.lower() or "antigravity.google" in content.lower():
@@ -427,7 +488,55 @@ def _query_llm_endpoints(
     return None
 
 
-def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0, lang: str = "auto") -> str:
+def build_chat_context(
+    wiki_db: CorticalWikiDB,
+    memory_curator: MemoryCurator,
+    prompt: str,
+    scope_id: str = "chat",
+) -> tuple[str, list[dict[str, str]]]:
+    """Builds compact attachment/wiki context and rolling chat history for stateless reflex calls."""
+    ctx = AccessContext()
+    blocks: list[str] = []
+    atts = wiki_db.list_context_attachments(ctx, scope_id=scope_id)
+    for att in atts[:5]:
+        line = f"[{att['item_type'].upper()}] {att['label']}: {att.get('summary_preview', '')[:220]}"
+        for wp in att.get("metadata", {}).get("wiki_paths", [])[:2]:
+            try:
+                node = wiki_db.navigate(ctx, path=wp, depth=DepthTier.HIGH)
+                line += f"\n  Contenuto ({wp}): {str(node.get('content', ''))[:900]}"
+            except KeyError:
+                pass
+        blocks.append(line)
+
+    hits = wiki_db.search(ctx, query=prompt, depth=DepthTier.MEDIUM, limit=2)
+    for h in hits:
+        blocks.append(f"[WIKI {h['path']}] {str(h.get('content', ''))[:320]}")
+
+    history_msgs: list[dict[str, str]] = []
+    for turn in reversed(memory_curator.get_recent_chat(limit=4, ctx=ctx, scope_id=scope_id)):
+        if turn.get("user_text"):
+            history_msgs.append({"role": "user", "content": str(turn["user_text"])})
+        if turn.get("assistant_text"):
+            history_msgs.append({"role": "assistant", "content": str(turn["assistant_text"])})
+
+    return ("\n\n".join(blocks), history_msgs)
+
+
+def query_local_reflex_llm(
+    prompt: str,
+    base_url: str,
+    timeout: float = 8.0,
+    lang: str = "auto",
+    extra_context: str = "",
+    chat_history: Optional[list[dict[str, str]]] = None,
+    preferred_model: Optional[str] = None,
+    context_window: Optional[int] = None,
+    effort: str = "medium",
+    browser_model: Optional[str] = None,
+    browser_context_window: Optional[int] = None,
+    strategy_override: str = "auto",
+    thinking_mode: str = "auto",
+) -> str:
     """Queries deterministic IT/EN grounding first, then available local/LAN OpenAI-compatible servers."""
     now = datetime.datetime.now()
     norm = prompt.lower().strip()
@@ -492,7 +601,15 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0, lan
         return format_page_reading_response(
             page,
             mode=read_intent["mode"],
-            summarize_llm_fn=lambda lp: _query_llm_endpoints(sys_sum, lp, base_url, timeout=timeout) or "",
+            summarize_llm_fn=lambda lp: _query_llm_endpoints(
+                sys_sum,
+                lp,
+                base_url,
+                timeout=timeout,
+                preferred_model=browser_model or preferred_model,
+                context_window=browser_context_window or context_window,
+                effort=effort,
+            ) or "",
             lang=eff_lang,
         )
 
@@ -521,7 +638,20 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0, lan
             f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
             "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
         )
-    llm_out = _query_llm_endpoints(sys_chat, prompt, base_url, timeout=timeout)
+    if extra_context.strip():
+        sys_chat += f"\n\n=== CONTESTO ATTIVO ALLEGATO / WIKI ===\n{extra_context.strip()}"
+    llm_out = _query_llm_endpoints(
+        sys_chat,
+        prompt,
+        base_url,
+        timeout=timeout,
+        extra_messages=chat_history,
+        preferred_model=preferred_model,
+        context_window=context_window,
+        effort=effort,
+        strategy_override=strategy_override,
+        thinking_mode=thinking_mode,
+    )
     if llm_out:
         return llm_out
 
@@ -530,8 +660,315 @@ def query_local_reflex_llm(prompt: str, base_url: str, timeout: float = 8.0, lan
     return f"Ho ricevuto la richiesta: '{prompt}'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per {prompt}'."
 
 
+def _strip_think_blocks(text: str) -> str:
+    """Removes leaked `<think>...</think>` blocks from local model outputs."""
+    clean = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL)
+    if "<think>" in clean:
+        clean = clean.split("<think>", 1)[0]
+    return clean.strip()
+
+
+def _extract_pi_content_text(content: Any) -> str:
+    """Extracts plain text from either string or structured `pi` message content blocks."""
+    if isinstance(content, str):
+        return _strip_think_blocks(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return _strip_think_blocks("\n".join(p for p in parts if p))
+    return ""
+
+
+def _parse_pi_json_event(raw_line: str) -> Optional[dict[str, Any]]:
+    """Parses one LF-terminated JSONL event emitted by `pi --mode json`."""
+    clean = (raw_line or "").strip()
+    if not clean or not clean.startswith("{"):
+        return None
+    try:
+        obj = json.loads(clean)
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_pi_binary() -> Optional[str]:
+    """Finds the `pi` executable even under minimal launchd/systemd PATH."""
+    found = shutil.which("pi")
+    if found:
+        return found
+    candidates = (
+        Path("/opt/homebrew/bin/pi"),
+        Path("/usr/local/bin/pi"),
+        Path.home() / ".local" / "bin" / "pi",
+        Path.home() / ".npm-global" / "bin" / "pi",
+    )
+    for cand in candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+class _EgressGuardProxy:
+    """Local HTTP/CONNECT proxy that blocks and logs all outbound non-loopback network attempts."""
+
+    def __init__(self, perm_gate: AdaptivePermissionGate) -> None:
+        self.perm_gate = perm_gate
+        self._context: dict[str, str] = {"session_id": "", "role": "", "model": ""}
+        self._lock = threading.Lock()
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self.port: int = 0
+
+    def set_context(self, *, session_id: str = "", role: str = "", model: str = "") -> None:
+        with self._lock:
+            self._context = {"session_id": session_id, "role": role, "model": model}
+
+    def start(self) -> int:
+        if self._httpd is not None:
+            return self.port
+        guard = self
+
+        class _ProxyHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                return
+
+            def _handle_egress(self) -> None:
+                target = str(self.path or "")
+                host_hdr = str(self.headers.get("Host") or "")
+                host = host_hdr.split(":")[0].lower() if host_hdr else ""
+                if "://" in target:
+                    host = urllib.parse.urlparse(target).hostname or host
+                elif ":" in target and self.command == "CONNECT":
+                    host = target.split(":")[0].lower()
+
+                with guard._lock:
+                    ctx_meta = dict(guard._context)
+                clen = int(self.headers.get("Content-Length") or 0)
+                body_excerpt = ""
+                if clen > 0:
+                    try:
+                        body_excerpt = self.rfile.read(min(clen, 400)).decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        body_excerpt = ""
+
+                guard.perm_gate.record_egress_event(
+                    session_id=ctx_meta.get("session_id", ""),
+                    role=ctx_meta.get("role", ""),
+                    model=ctx_meta.get("model", ""),
+                    source="egress_proxy",
+                    method=self.command,
+                    target_host=host or target[:120],
+                    target_url=target[:350],
+                    payload_excerpt=body_excerpt,
+                    verdict="blocked",
+                    reason=f"Blocked outbound {self.command} to {host or target} by Cortical strict isolation.",
+                )
+                msg = json.dumps({"error": "Blocked by Cortical Egress Isolation", "host": host}).encode("utf-8")
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("X-Cortical-Blocked", "egress-isolation")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+
+            do_GET = _handle_egress
+            do_POST = _handle_egress
+            do_PUT = _handle_egress
+            do_DELETE = _handle_egress
+            do_HEAD = _handle_egress
+            do_CONNECT = _handle_egress
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+        self.port = int(self._httpd.server_address[1])
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self.port
+
+    def stop(self) -> None:
+        if self._httpd is not None:
+            try:
+                self._httpd.shutdown()
+                self._httpd.server_close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._httpd = None
+            self.port = 0
+
+
+def _build_pi_subprocess_env(
+    repo_root: Path,
+    *,
+    effort: str = "medium",
+    egress_proxy_port: int = 0,
+    session_id: str = "",
+    role: str = "",
+    model: str = "",
+) -> dict[str, str]:
+    """Builds a subprocess environment with Homebrew/venv PATH and strict egress isolation."""
+    env = dict(os.environ)
+    extra_bins = [
+        str(repo_root / ".venv" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        str(Path.home() / ".local" / "bin"),
+    ]
+    cur_parts = [p for p in env.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").split(":") if p]
+    merged_parts = extra_bins + [p for p in cur_parts if p not in extra_bins]
+    env["PATH"] = ":".join(merged_parts)
+    env.setdefault("PYTHONPATH", str(repo_root / "src"))
+    env["CORTICAL_ROOT"] = str(repo_root)
+    env["PI_CORTICAL_WORKER"] = "1"
+    env["PI_CORTICAL_FAST"] = "1"
+    env["PI_EFFORT"] = _normalize_effort(effort)
+    env["PI_ISOLATION_MODE"] = "strict"
+    if session_id:
+        env["PI_ACTIVE_SESSION_ID"] = session_id
+    if role:
+        env["PI_ACTIVE_ROLE"] = role
+    if model:
+        env["PI_ACTIVE_MODEL"] = model
+    if egress_proxy_port > 0:
+        proxy_url = f"http://127.0.0.1:{egress_proxy_port}"
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env[k] = proxy_url
+        env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+        env["no_proxy"] = "127.0.0.1,localhost,::1"
+    return env
+
+
+def _wants_parallel_swarm(
+    goal: str,
+    has_custom_runner: bool,
+    parallel_flag: Optional[bool],
+    orch_cfg: dict[str, Any],
+) -> bool:
+    """Determines whether a task should orchestrate parallel specialized agents."""
+    if parallel_flag is not None:
+        return bool(parallel_flag)
+    norm = (goal or "").lower()
+    explicit = any(
+        k in norm
+        for k in (
+            "parallelo", "parallel", "swarm", "multi-agente", "multi agente",
+            "multiagent", "coordina agenti", "squadra", "più agenti", "diversi agenti",
+        )
+    )
+    if explicit:
+        return True
+    if has_custom_runner:
+        return False
+    return bool(orch_cfg.get("parallel_agents", True))
+
+
+def _wants_continuous_loop(goal: str, auto_loop_flag: Optional[bool]) -> bool:
+    """Determines whether a task should iterate autonomously until Reviewer convergence or Stop."""
+    if auto_loop_flag is not None:
+        return bool(auto_loop_flag)
+    norm = (goal or "").lower()
+    return any(
+        k in norm
+        for k in (
+            "in loop", "loop ", "finché", "finche", "until i stop",
+            "in automatico", "continua fin", "iterativ", "autonomous loop",
+        )
+    )
+
+
+def _clean_episode_title(raw_title: Any, session_id: str, goal: Any = "") -> str:
+    """Normalizes stored episode titles, stripping legacy [pi-xxx] prefixes and truncating cleanly."""
+    t = str(raw_title or "").strip()
+    prefix = f"[{session_id}]"
+    if t.startswith(prefix):
+        t = t[len(prefix):].strip()
+    if t and t != session_id and len(t) <= 60:
+        return t
+    return _synthesize_short_l1_title(str(goal or t or session_id))
+
+
+def _synthesize_short_l1_title(
+    goal: str,
+    base_url: str | None = None,
+    preferred_model: str | None = None,
+) -> str:
+    """Produces a crisp 2-4 word L1 synthesis title from a task goal, optionally using the local LLM."""
+    raw = re.sub(r"\s+", " ", str(goal or "").strip())
+    if not raw:
+        return "Nuovo Task"
+    if base_url:
+        try:
+            reply = _query_llm_endpoints(
+                "Generate a concise 2-3 word title in the SAME language as the user's goal. "
+                "Reply with ONLY the 2-3 word title, no quotes, no punctuation, no markdown.",
+                raw[:400],
+                base_url,
+                timeout=12.0,
+                preferred_model=preferred_model,
+                max_tokens=24,
+            )
+            cleaned = re.sub(r"[\"'`*#:\n\r]+", " ", str(reply or "")).strip()
+            words = [w for w in cleaned.split() if w][:4]
+            if 1 <= len(words) <= 4:
+                return " ".join(words)[:56]
+        except Exception:  # noqa: BLE001
+            pass
+    stop = {"a", "ad", "al", "all", "alla", "alle", "con", "da", "dal", "de", "dei", "del", "della", "di", "e", "ed", "i", "il", "in", "la", "le", "lo", "nel", "nella", "o", "per", "su", "sul", "sulla", "tra", "un", "una", "uno", "the", "a", "an", "and", "or", "to", "for", "of", "in", "on", "with"}
+    tokens = [re.sub(r"^[^\w]+|[^\w]+$", "", w) for w in raw.split()]
+    kept = [w for w in tokens if w and w.lower() not in stop]
+    chosen = (kept or tokens)[:3]
+    return (" ".join(chosen) or raw[:36])[:56]
+
+
+def _scan_external_platform_skills(target_skills_dir: Path) -> list[dict[str, Any]]:
+    """Scans Antigravity, Codex, and Claude local skill directories for importable SKILL.md bundles."""
+    home = Path.home()
+    roots = [
+        ("antigravity", home / ".gemini" / "config" / "skills"),
+        ("antigravity", home / ".gemini" / "antigravity" / "skills"),
+        ("codex", home / ".codex" / "skills"),
+        ("claude", home / ".claude" / "skills"),
+    ]
+    found: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for platform, root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            key = f"{platform}:{entry.name}"
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            desc = ""
+            try:
+                head = skill_md.read_text(encoding="utf-8", errors="ignore")[:900]
+                m = re.search(r"description:\s*(.+)", head)
+                if m:
+                    desc = m.group(1).strip().strip('"\'')[:180]
+            except OSError:
+                pass
+            imported = (target_skills_dir / entry.name / "SKILL.md").exists()
+            found.append({
+                "platform": platform,
+                "name": entry.name,
+                "path": str(skill_md),
+                "description": desc,
+                "imported": imported,
+            })
+    return found
+
+
 class PiAgentManager:
     """Manages explicit-only `pi` coding tasks with isolated working notes and compact archival."""
+
+    COORDINATOR_ROLES = {"coordinator", "orchestrator"}
 
     def __init__(
         self,
@@ -540,19 +977,167 @@ class PiAgentManager:
         memory_curator: MemoryCurator,
         perm_gate: AdaptivePermissionGate,
         base_url_fn: Any,
+        skill_hub: Optional[CorticalSkillHub] = None,
+        pi_runner: Optional[Any] = None,
+        audio_enabled_fn: Optional[Any] = None,
     ) -> None:
         self.repo_root = repo_root
         self.wiki_db = wiki_db
         self.memory_curator = memory_curator
         self.perm_gate = perm_gate
         self.base_url_fn = base_url_fn
+        self.skill_hub = skill_hub
+        self.pi_runner = pi_runner
+        self.audio_enabled_fn = audio_enabled_fn or (lambda: True)
         self.sessions: dict[str, dict[str, Any]] = {}
         self.processes: dict[str, subprocess.Popen[str]] = {}
+        self.stop_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._tts_lock = threading.Lock()
+        self._pending_coordinator_speeches: list[str] = []
+        self.egress_proxy = _EgressGuardProxy(perm_gate)
+        self.egress_proxy_port: int = 0
+        self._hydrate_from_db()
+
+    def _ensure_egress_proxy(self) -> int:
+        if self.egress_proxy_port <= 0:
+            self.egress_proxy_port = self.egress_proxy.start()
+        return self.egress_proxy_port
+
+    def clear_pending_speech(self) -> None:
+        with self._tts_lock:
+            self._pending_coordinator_speeches.clear()
+
+    def _handle_agent_speech_on_finish(
+        self,
+        role: str,
+        final_text: str,
+        speak_on_finish: bool,
+    ) -> bool:
+        """Speaks at most once, from Coordinator only, after ALL working agents have finished and only if audio is ON."""
+        if not self.audio_enabled_fn():
+            self.clear_pending_speech()
+            return False
+
+        is_coordinator = (role or "").strip().lower() in self.COORDINATOR_ROLES
+        clean_summary = re.sub(r"\s+", " ", final_text or "").strip()
+
+        with self._lock:
+            still_working = any(s.get("status") == "working" for s in self.sessions.values())
+
+        with self._tts_lock:
+            if is_coordinator and speak_on_finish and clean_summary:
+                self._pending_coordinator_speeches.append(clean_summary[:180])
+            if still_working or not self._pending_coordinator_speeches:
+                return False
+            if not self.audio_enabled_fn():
+                self._pending_coordinator_speeches.clear()
+                return False
+            parts = list(self._pending_coordinator_speeches)
+            self._pending_coordinator_speeches.clear()
+
+        if len(parts) == 1:
+            announcement = parts[0]
+        else:
+            announcement = "Tutti gli agenti hanno terminato. " + " ".join(parts[:3])
+        return speak_native_tts(announcement[:280])
+
+    def _hydrate_from_db(self) -> None:
+        """Loads persisted task episodes and cleans up any stale 'working' runs from prior server lifetimes."""
+        ctx = AccessContext()
+        self.wiki_db.mark_orphan_working_runs_stopped(ctx)
+        page = self.wiki_db.search_episodes_paginated(ctx, query="", offset=0, limit=80)
+        for ep in reversed(page.get("episodes", [])):
+            sid = str(ep["episode_id"])
+            runs = self.wiki_db.list_agent_runs(ctx, episode_id=sid, limit=30)
+            out_st = str(ep.get("outcome_status") or "open")
+            life = "archived" if out_st == "archived" else "open"
+            self.sessions[sid] = {
+                "session_id": sid,
+                "title": _clean_episode_title(ep.get("title"), sid, ep.get("goal")),
+                "role": runs[0]["role"] if runs else "Orchestrator",
+                "goal": str(ep.get("goal") or ep.get("title") or sid),
+                "status": "archived" if life == "archived" else ("completed" if out_st in {"active", "completed"} else out_st),
+                "lifecycle_state": life,
+                "wiki_depth": "medium",
+                "skills": json.loads(ep.get("skills_used") or "[]"),
+                "created_at": float(ep.get("created_at") or time.time()),
+                "updated_at": float(ep.get("created_at") or time.time()),
+                "steps": [
+                    {
+                        "index": 1,
+                        "timestamp": datetime.datetime.fromtimestamp(float(ep.get("created_at") or time.time())).strftime("%H:%M:%S"),
+                        "type": "output",
+                        "title": "📦 Task Archiviato" if life == "archived" else "🟢 Task Aperto (Persistito)",
+                        "detail": str(ep.get("learned_summary") or ep.get("synth_l2") or ""),
+                        "meta": {"persisted": True},
+                    }
+                ],
+                "runs": runs,
+                "token_summary": self.wiki_db.get_token_usage_summary(ctx, episode_id=sid),
+                "final_report": ep.get("learned_summary"),
+                "closing_questions": [],
+            }
 
     def list_sessions(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(reversed(list(self.sessions.values())))
+
+    def stop_run(self, run_id: str, session_id: Optional[str] = None) -> dict[str, Any]:
+        """Stops a single working agent run and updates both SQLite and in-memory state."""
+        ctx = AccessContext()
+        rid = str(run_id or "").strip()
+        if not rid:
+            return {"stopped": False, "error": "missing run_id"}
+        updated_db = self.wiki_db.stop_agent_run(ctx, rid)
+        stopped_sid = session_id
+        with self._lock:
+            for sid, sess in self.sessions.items():
+                if session_id and sid != session_id:
+                    continue
+                for r in sess.get("runs", []):
+                    if r.get("run_id") == rid and r.get("status") == "working":
+                        r["status"] = "stopped"
+                        stopped_sid = sid
+                        updated_db = True
+                if stopped_sid == sid and not any(r.get("status") == "working" for r in sess.get("runs", [])):
+                    if sess.get("status") == "working":
+                        sess["status"] = "stopped"
+                        ev = self.stop_events.get(sid)
+                        if ev:
+                            ev.set()
+                        proc = self.processes.get(sid)
+                        if proc and proc.poll() is None:
+                            try:
+                                proc.terminate()
+                            except Exception:  # noqa: BLE001
+                                pass
+        return {"stopped": updated_db, "run_id": rid, "session_id": stopped_sid}
+
+    def search_sessions(self, query: str = "", offset: int = 0, limit: int = 15) -> dict[str, Any]:
+        """Paginated FTS5 + semantic search combining live working tasks and persisted SQLite episodes."""
+        ctx = AccessContext()
+        q_clean = (query or "").strip().lower()
+        if not q_clean:
+            all_sess = self.list_sessions()
+            all_sess.sort(key=lambda s: (1 if s.get("status") == "working" else 0, float(s.get("updated_at") or 0.0)), reverse=True)
+            total = len(all_sess)
+            page = all_sess[max(0, offset): max(0, offset) + max(1, limit)]
+            return {"sessions": page, "total": total, "offset": max(0, offset), "limit": max(1, limit), "has_more": (max(0, offset) + len(page)) < total}
+
+        db_page = self.wiki_db.search_episodes_paginated(ctx, query=query, offset=0, limit=200)
+        matched_ids = [ep["episode_id"] for ep in db_page["episodes"]]
+        # Include any in-memory live session matching query not yet flushed to SQLite
+        with self._lock:
+            for sid, s in self.sessions.items():
+                if sid not in matched_ids:
+                    blob = f"{sid} {s.get('goal', '')} {s.get('final_report', '')}".lower()
+                    if any(tok in blob for tok in q_clean.split() if len(tok) >= 2):
+                        matched_ids.insert(0, sid)
+            ordered = [self.sessions[sid] for sid in matched_ids if sid in self.sessions]
+        total = len(ordered)
+        page = ordered[max(0, offset): max(0, offset) + max(1, limit)]
+        return {"sessions": page, "total": total, "offset": max(0, offset), "limit": max(1, limit), "has_more": (max(0, offset) + len(page)) < total}
 
     def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         with self._lock:
@@ -562,26 +1147,60 @@ class PiAgentManager:
         with self._lock:
             if session_id in self.sessions:
                 self.sessions[session_id]["status"] = "archived"
+                self.sessions[session_id]["lifecycle_state"] = "archived"
                 self.sessions[session_id]["archived_trace"] = archived_trace
-                self.sessions[session_id]["steps"] = [
-                    {
-                        "index": 1,
-                        "timestamp": datetime.datetime.now().strftime("%H:%M:%S"),
-                        "type": "output",
-                        "title": "📦 Task Archiviato (Memoria di lavoro isolata rimossa, sintesi 3+1 e traccia nel Macro-Grafo)",
-                        "detail": archived_trace,
-                        "meta": {"archived": True},
-                    }
-                ]
+                self.sessions[session_id]["updated_at"] = time.time()
+                self._append_step(
+                    session_id,
+                    "output",
+                    "📦 Task Archiviato (Memoria di lavoro isolata rimossa, sintesi 3+1 nel Macro-Grafo; puoi riprenderlo in qualsiasi momento)",
+                    archived_trace,
+                    {"archived": True},
+                )
+
+    def reopen_session(self, session_id: str) -> dict[str, Any]:
+        """Reopens an archived/completed task so the user can continue working in its scope."""
+        ctx = AccessContext()
+        self.wiki_db.reopen_episode(ctx, session_id)
+        with self._lock:
+            s = self.sessions.get(session_id)
+            if not s:
+                return {"reopened": False, "session_id": session_id}
+            s["lifecycle_state"] = "open"
+            if s.get("status") == "archived":
+                s["status"] = "completed"
+            s["updated_at"] = time.time()
+            self._append_step(
+                session_id,
+                "system",
+                "🔓 Task riaperto — Controllo e contesto ripristinati.",
+            )
+            return {"reopened": True, "session_id": session_id, "session": s}
+
+    def rename_session(self, session_id: str, title: str) -> dict[str, Any]:
+        clean_title = str(title or "").strip()[:120]
+        if not clean_title:
+            return {"updated": False, "session_id": session_id, "error": "Empty title"}
+        with self._lock:
+            s = self.sessions.get(session_id)
+            if s is not None:
+                s["title"] = clean_title
+                s["updated_at"] = time.time()
+        db_res = self.wiki_db.update_episode_title(AccessContext(), session_id, clean_title)
+        return {"updated": bool(db_res.get("updated") or s is not None), "session_id": session_id, "title": clean_title}
 
     def delete_session(self, session_id: str) -> bool:
         with self._lock:
-            proc = self.processes.pop(session_id, None)
-            if proc is not None:
-                try:
-                    proc.terminate()
-                except Exception:  # noqa: BLE001
-                    pass
+            ev = self.stop_events.pop(session_id, None)
+            if ev is not None:
+                ev.set()
+            for key in [k for k in self.processes if k == session_id or k.startswith(f"{session_id}:")]:
+                proc = self.processes.pop(key, None)
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except Exception:  # noqa: BLE001
+                        pass
             return self.sessions.pop(session_id, None) is not None
 
     def clear_archived_sessions(self) -> int:
@@ -594,20 +1213,30 @@ class PiAgentManager:
 
     def stop_all(self) -> int:
         stopped = 0
+        self.clear_pending_speech()
         with self._lock:
-            for sid, proc in list(self.processes.items()):
+            for ev in self.stop_events.values():
+                ev.set()
+            stopped_sids: set[str] = set()
+            for key, proc in list(self.processes.items()):
+                sid = key.split(":", 1)[0]
                 try:
                     proc.terminate()
                 except Exception:  # noqa: BLE001
                     pass
                 if sid in self.sessions and self.sessions[sid]["status"] == "working":
-                    self.sessions[sid]["status"] = "stopped"
-                    self._append_step(
-                        sid,
-                        "system",
-                        "🛑 Esecuzione interrotta dall'utente (Barge-in / Stop).",
-                    )
-                    stopped += 1
+                    stopped_sids.add(sid)
+            for sid, sess in self.sessions.items():
+                if sess.get("status") == "working":
+                    stopped_sids.add(sid)
+            for sid in stopped_sids:
+                self.sessions[sid]["status"] = "stopped"
+                self._append_step(
+                    sid,
+                    "system",
+                    "🛑 Esecuzione interrotta dall'utente (Barge-in / Stop).",
+                )
+                stopped += 1
             self.processes.clear()
         return stopped
 
@@ -637,36 +1266,584 @@ class PiAgentManager:
     def spawn_agent(
         self,
         goal: str,
-        role: str = "Orchestrator",
+        role: str = "Coordinator",
         wiki_depth: str = "medium",
         skills: Optional[list[str]] = None,
         speak_on_finish: bool = False,
+        parallel: Optional[bool] = None,
+        auto_loop: Optional[bool] = None,
+        effort: str = "medium",
     ) -> dict[str, Any]:
+        eff = _normalize_effort(effort)
         session_id = f"pi-{int(time.time() * 1000) % 1000000}"
         skills_list = skills or ["cortical-second-brain", "modern-web-guidance"]
+        initial_title = _synthesize_short_l1_title(goal)
         session_obj: dict[str, Any] = {
             "session_id": session_id,
+            "title": initial_title,
             "role": role,
             "goal": goal,
             "status": "working",
+            "lifecycle_state": "open",
             "wiki_depth": wiki_depth,
+            "effort": eff,
             "skills": skills_list,
             "created_at": time.time(),
             "updated_at": time.time(),
             "steps": [],
+            "runs": [],
+            "token_summary": {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "by_model": []},
             "final_report": None,
             "closing_questions": [],
         }
+        stop_ev = threading.Event()
         with self._lock:
             self.sessions[session_id] = session_obj
+            self.stop_events[session_id] = stop_ev
+        try:
+            self.wiki_db.record_episode(
+                AccessContext(),
+                episode_id=session_id,
+                title=initial_title,
+                goal=goal,
+                outcome_status="open",
+                learned_summary="",
+                skills_used=skills_list,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         t = threading.Thread(
             target=self._run_agent_worker,
-            args=(session_id, goal, wiki_depth, skills_list, speak_on_finish),
+            args=(session_id, goal, wiki_depth, skills_list, speak_on_finish, role, parallel, auto_loop, eff),
             daemon=True,
         )
         t.start()
         return session_obj
+
+    def continue_session(
+        self,
+        session_id: str,
+        follow_up_goal: str,
+        wiki_depth: Optional[str] = None,
+        speak_on_finish: bool = False,
+        role: str = "Coordinator",
+        parallel: Optional[bool] = None,
+        auto_loop: Optional[bool] = None,
+        effort: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Continues an existing open or archived task with a new user prompt in its own scope."""
+        ctx = AccessContext()
+        with self._lock:
+            s = self.sessions.get(session_id)
+            if not s:
+                return None
+            eff_depth = wiki_depth or s.get("wiki_depth", "medium")
+            eff = _normalize_effort(effort or s.get("effort", "medium"))
+            if s.get("lifecycle_state") == "archived" or s.get("status") == "archived":
+                self.wiki_db.reopen_episode(ctx, session_id)
+            s["lifecycle_state"] = "open"
+            s["status"] = "working"
+            s["wiki_depth"] = eff_depth
+            s["effort"] = eff
+            s["updated_at"] = time.time()
+            stop_ev = threading.Event()
+            self.stop_events[session_id] = stop_ev
+            self._append_step(session_id, "user_turn", "Richiesta utente nel task", follow_up_goal)
+            skills_list = list(s.get("skills") or ["cortical-second-brain"])
+
+        t = threading.Thread(
+            target=self._run_agent_worker,
+            args=(session_id, follow_up_goal, eff_depth, skills_list, speak_on_finish, role, parallel, auto_loop, eff),
+            daemon=True,
+        )
+        t.start()
+        return s
+
+    def _resolve_local_pi_model(self, configured_model: str) -> str:
+        installed = discover_ollama_models(self.base_url_fn()) or discover_ollama_models()
+        if not installed:
+            return configured_model
+        if not configured_model or configured_model not in installed:
+            return pick_best_local_agent_model(installed, fallback=configured_model or "qwen2.5:1.5b")
+        return configured_model
+
+    def _consume_pi_event(
+        self,
+        session_id: str,
+        evt: dict[str, Any],
+        state: dict[str, Any],
+    ) -> None:
+        etype = str(evt.get("type") or "")
+        if etype == "tool_execution_start":
+            tname = str(evt.get("toolName") or "tool")
+            targs = evt.get("args") if isinstance(evt.get("args"), dict) else {}
+            state["pending_args"][str(evt.get("toolCallId") or tname)] = (tname, targs)
+            self._append_step(session_id, "tool_call", f"pi:{tname}", json.dumps(targs)[:200], {"tool": tname})
+            return
+        if etype == "tool_execution_end":
+            cid = str(evt.get("toolCallId") or evt.get("toolName") or "")
+            tname, targs = state["pending_args"].pop(cid, (str(evt.get("toolName") or "tool"), {}))
+            res_obj = evt.get("result") if isinstance(evt.get("result"), dict) else {}
+            out_txt = _extract_pi_content_text(res_obj.get("content"))
+            is_err = bool(evt.get("isError"))
+            meta: dict[str, Any] = {"tool": tname, "is_error": is_err}
+            if targs.get("command"):
+                meta["command"] = str(targs["command"])
+            if targs.get("path"):
+                meta["path"] = str(targs["path"])
+            step = {
+                "type": "tool_result",
+                "title": f"{tname} ({'ERR' if is_err else 'OK'})",
+                "detail": out_txt[:360] or json.dumps(targs)[:180],
+                "meta": meta,
+            }
+            state["executed_steps"].append(step)
+            state["tool_count"] += 1
+            self.memory_curator.add_task_working_note(session_id, f"{step['title']}: {step['detail'][:160]}")
+            return
+        if etype == "error" or evt.get("error"):
+            err_msg = str(evt.get("errorMessage") or evt.get("error") or evt)[:300]
+            self._append_step(session_id, "system", "⚠️ Errore runtime `pi`", err_msg)
+            return
+        if etype in {"turn_end", "message_end"}:
+            msg = evt.get("message") if isinstance(evt.get("message"), dict) else {}
+            if msg.get("role") == "assistant":
+                if msg.get("stopReason") == "error" or msg.get("errorMessage"):
+                    err_msg = str(msg.get("errorMessage") or msg.get("stopReason") or "error")[:300]
+                    self._append_step(session_id, "system", f"⚠️ Errore modello ({state.get('model', 'local')})", err_msg)
+                txt = _extract_pi_content_text(msg.get("content"))
+                if txt:
+                    state["final_text"] = txt
+                usage = msg.get("usage")
+                if etype == "turn_end" and isinstance(usage, dict):
+                    state["usage"]["input_tokens"] += int(usage.get("input") or 0)
+                    state["usage"]["output_tokens"] += int(usage.get("output") or 0)
+                    state["usage"]["total_tokens"] += int(usage.get("totalTokens") or (int(usage.get("input") or 0) + int(usage.get("output") or 0)))
+                if msg.get("model"):
+                    state["model"] = str(msg["model"])
+
+    def _run_pi_local_loop(
+        self,
+        session_id: str,
+        prompt: str,
+        model_id: str,
+        max_loops: int,
+        timeout_sec: float = 180.0,
+        proc_key: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        tools: str = "read,bash,edit,write",
+        effort: str = "medium",
+        role: str = "Coordinator",
+    ) -> Optional[dict[str, Any]]:
+        """Executes a real local `pi -p --mode json` tool loop when available."""
+        base_state: dict[str, Any] = {
+            "pending_args": {},
+            "executed_steps": [],
+            "final_text": "",
+            "tool_count": 0,
+            "model": model_id,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        }
+        if self.pi_runner is not None:
+            lines = self.pi_runner(prompt=prompt, model=model_id, max_loops=max_loops)
+            for raw in lines or []:
+                evt = raw if isinstance(raw, dict) else _parse_pi_json_event(str(raw))
+                if evt:
+                    self._consume_pi_event(session_id, evt, base_state)
+            return base_state if (base_state["final_text"] or base_state["executed_steps"]) else None
+
+        if os.environ.get("CORTICAL_DISABLE_LIVE_PI") == "1":
+            return None
+        pi_bin = _resolve_pi_binary()
+        ollama_models = discover_ollama_models(self.base_url_fn()) or discover_ollama_models()
+        if not pi_bin or not ollama_models:
+            why = "binario `pi` non trovato" if not pi_bin else "nessun modello Ollama attivo su :11434"
+            self._append_step(session_id, "system", f"⚠️ Harness locale non avviato ({why})")
+            return None
+
+        eff = _normalize_effort(effort)
+        thinking_flag = "low" if eff == "high" else "off"
+        resolved_model = self._resolve_local_pi_model(model_id)
+        is_heavy_model = any(tag in resolved_model.lower() for tag in ("27b", "30b", "32b", "70b"))
+        eff_timeout = max(240.0, timeout_sec) if is_heavy_model else (240.0 if eff == "high" else timeout_sec)
+        base_state["model"] = resolved_model
+        proxy_port = self._ensure_egress_proxy()
+        self.egress_proxy.set_context(session_id=session_id, role=role, model=resolved_model)
+        is_tiny_model = any(tag in resolved_model.lower() for tag in ("0.5b", "1b", "1.5b", "3b"))
+        prompt_low = prompt.lower()
+        needs_mcp = any(k in prompt_low for k in ("chrome", "browser", "wiki_create_research_doc", "wiki_upsert_concept", "wiki_get_egress_audit", "second brain"))
+        eff_tools = "read,grep,bash" if is_tiny_model else tools
+        cmd = [
+            pi_bin, "-p", "--mode", "json", "--no-session", "--approve",
+            "--no-skills", "--no-prompt-templates", "--no-themes",
+            "--tools", eff_tools, "--thinking", thinking_flag,
+            "--provider", "ollama", "--model", resolved_model,
+        ]
+        if not is_tiny_model:
+            skill_list = ["pi-core-tools-mastery"] if eff == "low" else ["pi-core-tools-mastery", "autonomous-self-improvement"]
+            if needs_mcp:
+                skill_list.append("chrome-complex-workflows" if ("chrome" in prompt_low or "browser" in prompt_low) else "second-brain-3plus1-workflow")
+            for skill_name in skill_list:
+                skill_dir = self.repo_root / ".agents" / "skills" / skill_name
+                if (skill_dir / "SKILL.md").is_file():
+                    cmd.extend(["--skill", str(skill_dir)])
+        harness_path = self.repo_root / ".pi" / "extensions" / "cortical-harness.ts"
+        if harness_path.is_file():
+            ext_flags = ["--no-extensions"]
+            if not is_tiny_model and needs_mcp:
+                ext_flags.extend(["-e", "builtin:mcp", "-e", "builtin:tool-search"])
+            ext_flags.extend(["-e", str(harness_path)])
+            cmd.extend(ext_flags)
+        cmd.append(prompt)
+
+        key = proc_key or session_id
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(self.repo_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_build_pi_subprocess_env(
+                self.repo_root,
+                effort=eff,
+                egress_proxy_port=proxy_port,
+                session_id=session_id,
+                role=role,
+                model=resolved_model,
+            ),
+        )
+        with self._lock:
+            self.processes[key] = proc
+        deadline = time.time() + eff_timeout
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if (stop_event is not None and stop_event.is_set()) or time.time() > deadline or base_state["tool_count"] >= max(max_loops * 5, 12):
+                    proc.terminate()
+                    break
+                evt = _parse_pi_json_event(line)
+                if evt:
+                    self._consume_pi_event(session_id, evt, base_state)
+            proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            proc.terminate()
+        finally:
+            with self._lock:
+                self.processes.pop(key, None)
+
+        if not (base_state["final_text"] or base_state["executed_steps"]) and proc.stderr is not None:
+            err_txt = (proc.stderr.read() or "").strip()
+            if err_txt:
+                self._append_step(session_id, "system", "⚠️ Output diagnostico stderr `pi`", err_txt[:400])
+        return base_state if (base_state["final_text"] or base_state["executed_steps"]) else None
+
+    def _record_run_start(
+        self,
+        ctx: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        role: str,
+        model: str,
+        goal: str,
+        started_at: float,
+    ) -> None:
+        run_rec = {
+            "run_id": run_id,
+            "episode_id": session_id,
+            "role": role,
+            "model": model,
+            "provider": "ollama",
+            "status": "working",
+            "goal": goal[:200],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "elapsed_sec": 0.0,
+            "started_at": started_at,
+        }
+        with self._lock:
+            sess = self.sessions.get(session_id)
+            if sess is not None:
+                sess.setdefault("runs", []).insert(0, run_rec)
+        self.wiki_db.upsert_agent_run(
+            ctx, run_id=run_id, episode_id=session_id, role=role,
+            model=model, provider="ollama", status="working", goal=goal, started_at=started_at,
+        )
+
+    def _record_run_finish(
+        self,
+        ctx: AccessContext,
+        *,
+        run_id: str,
+        session_id: str,
+        role: str,
+        model: str,
+        status: str,
+        goal: str,
+        in_tok: int,
+        out_tok: int,
+        tot_tok: int,
+        started_at: float,
+    ) -> float:
+        elapsed_sec = round(time.time() - started_at, 2)
+        self.wiki_db.upsert_agent_run(
+            ctx, run_id=run_id, episode_id=session_id, role=role,
+            model=model, provider="ollama", status=status, goal=goal,
+            input_tokens=in_tok, output_tokens=out_tok, total_tokens=tot_tok,
+            elapsed_sec=elapsed_sec, started_at=started_at, finished_at=time.time(),
+        )
+        tok_summary = self.wiki_db.get_token_usage_summary(ctx, episode_id=session_id)
+        with self._lock:
+            sess = self.sessions.get(session_id)
+            if sess is not None:
+                for r in sess.get("runs", []):
+                    if r["run_id"] == run_id:
+                        r.update({
+                            "status": status,
+                            "model": model,
+                            "input_tokens": in_tok,
+                            "output_tokens": out_tok,
+                            "total_tokens": tot_tok,
+                            "elapsed_sec": elapsed_sec,
+                        })
+                sess["token_summary"] = tok_summary
+                sess["updated_at"] = time.time()
+        return elapsed_sec
+
+    def _execute_role_pi_run(
+        self,
+        ctx: AccessContext,
+        *,
+        session_id: str,
+        run_role: str,
+        model_id: str,
+        goal: str,
+        prompt: str,
+        max_loops: int,
+        stop_ev: threading.Event,
+        tools: str = "read,bash,edit,write",
+        effort: str = "medium",
+    ) -> dict[str, Any]:
+        run_id = f"run-{session_id}-{run_role.lower()}-{int(time.time() * 1000) % 100000}"
+        t_start = time.time()
+        resolved_model = self._resolve_local_pi_model(model_id)
+        self._record_run_start(
+            ctx, run_id=run_id, session_id=session_id, role=run_role,
+            model=resolved_model, goal=goal, started_at=t_start,
+        )
+        pi_res = self._run_pi_local_loop(
+            session_id=session_id,
+            prompt=prompt,
+            model_id=model_id,
+            max_loops=max_loops,
+            proc_key=f"{session_id}:{run_id}",
+            stop_event=stop_ev,
+            tools=tools,
+            effort=effort,
+            role=run_role,
+        )
+        executed_steps = list(pi_res.get("executed_steps") or []) if pi_res else []
+        usage = (pi_res or {}).get("usage") or {}
+        in_tok = int(usage.get("input_tokens") or 0)
+        out_tok = int(usage.get("output_tokens") or 0)
+        tot_tok = int(usage.get("total_tokens") or (in_tok + out_tok))
+        if pi_res and pi_res.get("model"):
+            resolved_model = str(pi_res["model"])
+        output_text = str((pi_res or {}).get("final_text") or "").strip()
+        run_status = "stopped" if stop_ev.is_set() else "completed"
+        elapsed = self._record_run_finish(
+            ctx, run_id=run_id, session_id=session_id, role=run_role,
+            model=resolved_model, status=run_status, goal=goal,
+            in_tok=in_tok, out_tok=out_tok, tot_tok=tot_tok, started_at=t_start,
+        )
+        return {
+            "run_id": run_id,
+            "role": run_role,
+            "model": resolved_model,
+            "pi_res": pi_res,
+            "executed_steps": executed_steps,
+            "output_text": output_text,
+            "in_tok": in_tok,
+            "out_tok": out_tok,
+            "tot_tok": tot_tok,
+            "elapsed_sec": elapsed,
+        }
+
+    def _run_parallel_swarm_iteration(
+        self,
+        ctx: AccessContext,
+        *,
+        session_id: str,
+        goal: str,
+        iteration: int,
+        att_block: str,
+        enh_block: str,
+        orch_cfg: dict[str, Any],
+        prior_notes: str,
+        stop_ev: threading.Event,
+        effort: str = "medium",
+    ) -> dict[str, Any]:
+        """Runs Analyst + Implementer in parallel, then Reviewer, returning steps and loop verdict."""
+        max_loops = int(orch_cfg.get("max_agent_loops", 6))
+        analyst_model = str(orch_cfg.get("analyst_model", "qwen3.8:27b-iq2_xs"))
+        impl_model = str(orch_cfg.get("implementer_model", "qwen3.8:27b-iq2_xs"))
+        rev_model = str(orch_cfg.get("reviewer_model", "qwen3.8:27b-iq2_xs"))
+
+        shared_ctx = (
+            (f"[ALLEGATI CONTESTO]\n{att_block}\n\n" if att_block else "")
+            + (f"[CONTESTO SKILL/WIKI]\n{enh_block}\n\n" if enh_block else "")
+            + (f"[ITERAZIONE PRECEDENTE]\n{prior_notes}\n\n" if prior_notes else "")
+        )
+        analyst_prompt = (
+            f"Ruolo: Analyst (Iterazione {iteration}) | Task ({session_id}): {goal}\n"
+            "CHIAMA SUBITO i tool `read` e `bash` (rg/ls/cat) per ispezionare file/directory reali. "
+            "NON fare domande all'utente e NON inventare. Riporta solo fatti, percorsi e numeri verificati.\n\n"
+            + shared_ctx
+        ).strip()
+        impl_prompt = (
+            f"Ruolo: Implementer (Iterazione {iteration}) | Task ({session_id}): {goal}\n"
+            "CHIAMA SUBITO i tool (`read`/`edit`/`write`/`bash`) per eseguire verifiche, navigazione Chrome/CDP, "
+            "modifiche al codice o test reali. NON fare domande all'utente. Riporta solo risultati reali eseguiti.\n\n"
+            + shared_ctx
+        ).strip()
+
+        self._append_step(
+            session_id,
+            "subagent",
+            f"🔀 Avvio squadra parallela · Iterazione {iteration} (Analyst + Implementer)",
+            f"Obiettivo: {goal[:180]}",
+            {"iteration": iteration, "roles": ["Analyst", "Implementer"]},
+        )
+
+        worker_specs = [
+            ("Analyst", analyst_model, analyst_prompt, "read,grep,find,ls,bash"),
+            ("Implementer", impl_model, impl_prompt, "read,bash,edit,write,grep,find,ls"),
+        ]
+        # Serialize heavy local Ollama workers (>=14B) on the single local GPU to prevent contention/timeouts
+        has_heavy_local = self.pi_runner is None and any(
+            tag in (analyst_model + " " + impl_model).lower()
+            for tag in ("14b", "27b", "30b", "32b", "70b")
+        )
+        worker_results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=1 if has_heavy_local else 2) as pool:
+            futs = [
+                pool.submit(
+                    self._execute_role_pi_run,
+                    ctx,
+                    session_id=session_id,
+                    run_role=r_name,
+                    model_id=r_model,
+                    goal=goal,
+                    prompt=r_prompt,
+                    max_loops=max_loops,
+                    stop_ev=stop_ev,
+                    tools=r_tools,
+                    effort=effort,
+                )
+                for r_name, r_model, r_prompt, r_tools in worker_specs
+            ]
+            for fut in as_completed(futs):
+                wres = fut.result()
+                worker_results.append(wres)
+                self._append_step(
+                    session_id,
+                    "subagent",
+                    f"Agente `{wres['role']}` ({wres['model']} · {len(wres['executed_steps'])} tool · {wres['tot_tok']} tok · {wres['elapsed_sec']}s)",
+                    wres["output_text"] or "Nessun output testuale restituito.",
+                    {"role": wres["role"], "run_id": wres["run_id"], "tools": len(wres["executed_steps"])},
+                )
+
+        all_steps = [st for w in worker_results for st in w["executed_steps"]]
+        if stop_ev.is_set():
+            return {"results": worker_results, "review": None, "steps": all_steps, "verdict": "STOPPED"}
+
+        digest = "\n\n".join(
+            f"[{w['role']} · {len(w['executed_steps'])} tool ({', '.join(st.get('meta', {}).get('tool', '?') for st in w['executed_steps'][:6]) or 'none'})]\n{w['output_text'][:600]}"
+            for w in worker_results
+        )
+        rev_prompt = (
+            f"Ruolo: Reviewer (Iterazione {iteration}) | Task ({session_id}): {goal}\n"
+            "Controlla ciò che Analyst e Implementer hanno eseguito realmente (usa `read` o `bash` solo se devi verificare un file/test).\n"
+            "Se manca ancora una verifica concreta o una modifica richiesta dall'obiettivo, chiudi con `VERDICT: CONTINUE` indicando il file e l'azione esatta per la prossima iterazione.\n"
+            "Altrimenti chiudi la risposta con `VERDICT: DONE`.\n\n"
+            f"{digest}"
+        ).strip()
+        rev_res = self._execute_role_pi_run(
+            ctx,
+            session_id=session_id,
+            run_role="Reviewer",
+            model_id=rev_model,
+            goal=goal,
+            prompt=rev_prompt,
+            max_loops=max_loops,
+            stop_ev=stop_ev,
+            tools="read,grep,find,ls,bash",
+            effort=effort,
+        )
+        all_steps.extend(rev_res["executed_steps"])
+        self._append_step(
+            session_id,
+            "subagent",
+            f"Agente `Reviewer` ({rev_res['model']} · {len(rev_res['executed_steps'])} tool · {rev_res['tot_tok']} tok · {rev_res['elapsed_sec']}s)",
+            rev_res["output_text"] or "Verifica completata.",
+            {"role": "Reviewer", "run_id": rev_res["run_id"]},
+        )
+        rev_up = rev_res["output_text"].upper()
+        impl_ok = any(
+            w["role"] == "Implementer" and (bool(w["output_text"].strip()) or bool(w["executed_steps"]))
+            for w in worker_results
+        )
+        verdict_matches = re.findall(r"VERDICT\s*:\s*(CONTINUE|DONE)", rev_up)
+        last_verdict = verdict_matches[-1] if verdict_matches else ""
+        if not impl_ok:
+            verdict = "CONTINUE"
+        elif last_verdict == "CONTINUE":
+            verdict = "CONTINUE"
+        elif last_verdict == "DONE" or rev_up.strip().endswith("DONE"):
+            verdict = "DONE"
+        else:
+            verdict = "CONTINUE" if "CONTINUE" in rev_up else "DONE"
+        return {"results": worker_results, "review": rev_res, "steps": all_steps, "verdict": verdict}
+
+    def _auto_answer_questions_locally(
+        self,
+        session_id: str,
+        goal: str,
+        questions: list[str],
+        context_text: str,
+        preferred_model: str,
+        effort: str = "medium",
+    ) -> list[dict[str, str]]:
+        """Autonomously answers loop/closing questions so continuous local tasks never stall."""
+        clean_qs = [str(q).strip() for q in questions if str(q).strip()]
+        if not clean_qs:
+            return []
+        q_block = "\n".join(f"{idx + 1}. {q}" for idx, q in enumerate(clean_qs[:4]))
+        llm_ans = _query_llm_endpoints(
+            "Sei il Coordinatore autonomo locale di Cortical. Rispondi alle domande operative in italiano sintetico e concreto usando solo i dati del contesto, senza chiedere conferme all'utente.",
+            f"Obiettivo: {goal}\n\nContesto/Risultati:\n{context_text[:900]}\n\nDomande da risolvere autonomamente:\n{q_block}",
+            self.base_url_fn(),
+            timeout=18.0,
+            preferred_model=preferred_model,
+            effort=effort,
+        )
+        answer_text = (llm_ans or "").strip()
+        if not answer_text:
+            answer_text = (
+                f"Decisione autonoma: mantieni l'obiettivo '{goal[:80]}' sulla traccia Wiki `/` e `/src`, "
+                "conservando i risultati verificati ed evitando passaggi esterni bloccati."
+            )
+        self.memory_curator.add_task_working_note(session_id, f"[AUTO-ANSWER] {answer_text[:280]}")
+        self._append_step(
+            session_id,
+            "thinking",
+            "🤖 Risposta autonoma alle domande del loop",
+            f"Domande:\n{q_block}\n\nDecisione autonoma:\n{answer_text}",
+            {"autonomous": True, "question_count": len(clean_qs)},
+        )
+        return [{"question": q, "answer": answer_text} for q in clean_qs]
 
     def _run_agent_worker(
         self,
@@ -675,81 +1852,257 @@ class PiAgentManager:
         wiki_depth: str,
         skills: list[str],
         speak_on_finish: bool,
+        run_role: str = "Orchestrator",
+        parallel: Optional[bool] = None,
+        auto_loop: Optional[bool] = None,
+        effort: str = "medium",
     ) -> None:
+        eff = _normalize_effort(effort)
         ctx = AccessContext()
+        run_id = f"run-{session_id}-{int(time.time() * 1000) % 100000}"
+        t_start = time.time()
+        resolved_model = "local-reflex"
+        with self._lock:
+            stop_ev = self.stop_events.setdefault(session_id, threading.Event())
         try:
             orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
             max_loops = int(orch_cfg.get("max_agent_loops", 6))
-            analyst_model = str(orch_cfg.get("analyst_model", "qwen2.5:1.5b"))
-            impl_model = str(orch_cfg.get("implementer_model", "qwen2.5:1.5b"))
-            rev_model = str(orch_cfg.get("reviewer_model", "qwen2.5:1.5b"))
-            attachments = self.wiki_db.list_context_attachments(ctx, scope_id="chat")
+            role_key = "coordinator" if run_role == "Coordinator" else "implementer"
+            coord_exec = resolve_role_execution(orch_cfg, "coordinator")
+            analyst_exec = resolve_role_execution(orch_cfg, "analyst")
+            impl_exec = resolve_role_execution(orch_cfg, "implementer")
+            rev_exec = resolve_role_execution(orch_cfg, "reviewer")
+            coord_model = coord_exec["model"]
+            analyst_model = analyst_exec["model"]
+            impl_model = impl_exec["model"]
+            rev_model = rev_exec["model"]
+            active_exec = coord_exec if role_key == "coordinator" else impl_exec
+            resolved_model = self._resolve_local_pi_model(active_exec["model"])
+            active_ctx_window = active_exec["context_window"]
+            use_parallel = _wants_parallel_swarm(goal, self.pi_runner is not None, parallel, orch_cfg)
+            use_loop = _wants_continuous_loop(goal, auto_loop)
+
+            self._record_run_start(
+                ctx, run_id=run_id, session_id=session_id, role=run_role,
+                model=resolved_model, goal=goal, started_at=t_start,
+            )
+
+            task_atts = self.wiki_db.list_context_attachments(ctx, scope_id=session_id)
+            chat_atts = self.wiki_db.list_context_attachments(ctx, scope_id="chat")
+            attachments = task_atts or chat_atts
+            eff_scope = session_id if task_atts else "chat"
             att_summary = (
                 ", ".join(f"{a['item_type']}:{a['label']}" for a in attachments)
                 if attachments
                 else "Nessun file/cartella allegata (contesto isolato)"
             )
 
+            mode_label = "Parallel Swarm + Loop" if (use_parallel and use_loop) else ("Parallel Swarm" if use_parallel else "Single Coordinator")
             self._append_step(
                 session_id,
                 "thinking",
-                f"Inizializzazione Task Esplicito `pi` (Wiki: {wiki_depth.upper()}, Max Loop: {max_loops})",
-                f"Obiettivo: {goal}\nModelli Configurati: Analyst={analyst_model}, Implementer={impl_model}, Reviewer={rev_model}\nContesto Allegato: {att_summary}",
+                f"Inizializzazione `{run_role}` ({resolved_model} · {mode_label} · Wiki: {wiki_depth.upper()} · Max Loop: {max_loops})",
+                f"Obiettivo: {goal}\nModelli Configurati: Analyst={analyst_model}, Implementer={impl_model}, Reviewer={rev_model}\nContesto Allegato ({eff_scope}): {att_summary}",
             )
-            self.memory_curator.add_task_working_note(session_id, f"Avvio task: {goal} | Allegati: {att_summary}")
-            time.sleep(0.1)
+            self.memory_curator.add_task_working_note(session_id, f"Avvio run {run_id}: {goal} | Allegati: {att_summary}")
+            time.sleep(0.05)
 
-            try:
-                root_nav = self.wiki_db.navigate(ctx, path="/", depth=DepthTier(wiki_depth))
-                children_summary = "\n".join(
-                    f"  • {c['path']} ({c['node_type']}): {c['summary'][:120]}"
-                    for c in root_nav.get("children", [])[:10]
-                ) or "  • (Radice pronta, nessun sotto-nodo)"
-                sub_hash = root_nav["subtree_hash"][:16]
-            except KeyError:
-                children_summary = (
-                    "\n".join(
-                        f"  • [{a['item_type'].upper()}] {a['label']}: {a.get('summary_preview', '')[:120]}"
-                        for a in attachments
-                    )
-                    or "  • Nessun file sorgente pre-caricato automaticamente (usa '+ Allega al Contesto' per aggiungere file o cartelle)."
-                )
-                sub_hash = "isolated-context"
-
-            self._append_step(
-                session_id,
-                "tool_call",
-                f"mcp__cortical-wiki__wiki_navigate(path='/', depth='{wiki_depth}')",
-                f"Subtree Hash: {sub_hash}…\nContesto Attivo:\n{children_summary}",
-                {"tool": "wiki_navigate", "depth": wiki_depth},
-            )
+            att_context_lines: list[str] = []
+            for a in attachments[:6]:
+                att_context_lines.append(f"[{a['item_type'].upper()}] {a['label']}: {a.get('summary_preview', '')[:180]}")
+            att_block = "\n".join(att_context_lines)
 
             hits = self.wiki_db.search(ctx, query=goal, depth=DepthTier(wiki_depth), limit=4)
-            if hits:
-                hit_lines = "\n".join(
-                    f"  • {h['path']} [tier={h['depth_tier']}]: {h['content'][:180]}..."
-                    for h in hits
-                )
-            else:
-                hit_lines = "  • Nessun match FTS5 specifico; uso la vista strutturale di root."
+            hit_lines = "\n".join(f"  • {h['path']} [tier={h['depth_tier']}]: {h['content'][:160]}..." for h in hits) if hits else "  • Nessun match FTS5 specifico."
             self._append_step(
                 session_id,
                 "tool_call",
                 f"mcp__cortical-wiki__wiki_search(query={json.dumps(goal[:40])}, depth='{wiki_depth}')",
-                f"Risultati pertinenti dalla Wiki Merkle:\n{hit_lines}",
+                f"Allegati ({eff_scope}):\n" + (att_block or "  • Nessuno") + f"\n\nWiki Merkle:\n{hit_lines}",
                 {"tool": "wiki_search", "hits": len(hits)},
             )
-            self.memory_curator.add_task_working_note(session_id, f"Ricerca FTS5: {len(hits)} nodi trovati")
 
-            perm_dec = self.perm_gate.evaluate("wiki_navigate", {"path": "/", "depth": wiki_depth})
-            self._append_step(
-                session_id,
-                "permission",
-                f"Adaptive Permission Gate → {perm_dec.verdict.upper()} (risk={perm_dec.risk_score})",
-                f"Pattern: {perm_dec.normalized_pattern} — {perm_dec.reason}",
+            enh_instructions = ""
+            if self.skill_hub is not None:
+                enh = self.skill_hub.enhance_prompt(goal, ctx=ctx, active_episode_id=session_id, scope_id=eff_scope)
+                enh_instructions = enh.enhanced_system_instructions[:450]
+
+            executed_steps: list[dict[str, Any]] = []
+            in_tok = 0
+            out_tok = 0
+            tot_tok = 0
+            pi_output_text = ""
+
+            if use_parallel:
+                loop_limit = max(max_loops, 4) if use_loop else 1
+                prior_notes = ""
+                iter_summaries: list[str] = []
+                for it_idx in range(1, loop_limit + 1):
+                    if stop_ev.is_set():
+                        break
+                    it_res = self._run_parallel_swarm_iteration(
+                        ctx,
+                        session_id=session_id,
+                        goal=goal,
+                        iteration=it_idx,
+                        att_block=att_block,
+                        enh_block=enh_instructions,
+                        orch_cfg=orch_cfg,
+                        prior_notes=prior_notes,
+                        stop_ev=stop_ev,
+                        effort=eff,
+                    )
+                    executed_steps.extend(it_res["steps"])
+                    part_texts = [
+                        f"- **{r['role']}** ({len(r['executed_steps'])} tool, {r['tot_tok']} tok): {r['output_text'][:2500]}"
+                        for r in it_res["results"]
+                        if r["output_text"] or r["executed_steps"]
+                    ]
+                    if it_res["review"] and (it_res["review"]["output_text"] or it_res["review"]["executed_steps"]):
+                        rv = it_res["review"]
+                        part_texts.append(f"- **Reviewer** ({rv['tot_tok']} tok): {rv['output_text'][:2500]}")
+                    prior_raw = "\n".join(part_texts)
+                    fitted_prior = fit_context_to_window(
+                        system_prompt="Coordinator loop context",
+                        user_prompt=goal,
+                        extra_context=prior_raw,
+                        context_window_tokens=active_ctx_window,
+                        summarize_fn=lambda p, _t: _query_llm_endpoints(
+                            "Sintetizza i paragrafi mantenendo tutti i fatti e file citati.",
+                            p,
+                            self.base_url_fn(),
+                            timeout=18.0,
+                            preferred_model=resolved_model,
+                            context_window=active_ctx_window,
+                        ),
+                    )
+                    prior_notes = fitted_prior["fitted_context"]
+                    if part_texts:
+                        iter_summaries.append(f"### Iterazione {it_idx} ({it_res['verdict']})\n" + "\n".join(part_texts))
+                    if it_res["verdict"] == "CONTINUE" and use_loop and it_idx < loop_limit and not stop_ev.is_set():
+                        rv_txt = (it_res.get("review") or {}).get("output_text", "")
+                        loop_qs = [ln.strip() for ln in rv_txt.splitlines() if "?" in ln][:2]
+                        if not loop_qs:
+                            loop_qs = [f"Qual è il prossimo passo concreto per completare l'iterazione {it_idx + 1} di '{goal[:60]}'?"]
+                        auto_ans = self._auto_answer_questions_locally(
+                            session_id,
+                            goal,
+                            loop_qs,
+                            prior_notes,
+                            preferred_model=analyst_model or impl_model,
+                            effort=eff,
+                        )
+                        if auto_ans:
+                            prior_notes = prior_notes + "\n- **Auto-Risposta Loop**: " + auto_ans[0]["answer"][:300]
+                    if it_res["verdict"] in {"DONE", "STOPPED"} or not use_loop:
+                        break
+                pi_output_text = "\n\n".join(iter_summaries).strip()
+
+            if not pi_output_text:
+                fitted_local = fit_context_to_window(
+                    system_prompt="Coordinator task prompt",
+                    user_prompt=goal,
+                    extra_context=enh_instructions if attachments else "",
+                    context_window_tokens=min(active_ctx_window, 8192) if eff == "low" else active_ctx_window,
+                    reserve_output_tokens=2048,
+                )
+                compact_ctx = fitted_local["fitted_context"]
+                local_prompt = (
+                    f"Obiettivo Task ({session_id}): {goal}\n"
+                    "CHIAMA I TOOL REALI (`read`, `edit`, `write`, `bash`) in sequenza, NON fingere modifiche non eseguite, verifica con un comando reale e riporta solo i fatti osservati.\n\n"
+                    + (f"[ALLEGATI CONTESTO]\n{att_block}\n\n" if att_block else "")
+                    + (f"[CONTESTO WIKI]\n{compact_ctx}" if compact_ctx else "")
+                ).strip()
+                pi_res = self._run_pi_local_loop(
+                    session_id=session_id,
+                    prompt=local_prompt,
+                    model_id=coord_model if run_role == "Coordinator" else impl_model,
+                    max_loops=max_loops,
+                    proc_key=f"{session_id}:{run_id}",
+                    stop_event=stop_ev,
+                    effort=eff,
+                    role=run_role,
+                )
+                executed_steps.extend(list(pi_res.get("executed_steps") or []) if pi_res else [])
+                used_tool_names = {str((st.get("meta") or {}).get("tool") or "").lower() for st in executed_steps}
+                goal_low = goal.lower()
+                if any(k in goal_low for k in ("edit", "write", "modifica", "aggiungi")) and not (used_tool_names & {"edit", "write"}):
+                    self._append_step(
+                        session_id,
+                        "system",
+                        "⚠️ Anti-Hallucination Guard: nessuna modifica file (`edit`/`write`) eseguita dai tool reali.",
+                        f"Tool chiamati: {sorted(used_tool_names) or ['nessuno']}",
+                    )
+                usage = (pi_res or {}).get("usage") or {}
+                in_tok = int(usage.get("input_tokens") or 0)
+                out_tok = int(usage.get("output_tokens") or 0)
+                tot_tok = int(usage.get("total_tokens") or (in_tok + out_tok))
+                if pi_res and pi_res.get("model"):
+                    resolved_model = str(pi_res["model"])
+
+                if pi_res and pi_res.get("final_text"):
+                    pi_output_text = str(pi_res["final_text"])
+                else:
+                    ctx_str, _ch_hist = build_chat_context(self.wiki_db, self.memory_curator, goal, scope_id=eff_scope)
+                    steps_txt = "\n".join(f"- {s['title']}: {s['detail'][:200]}" for s in executed_steps[:6])
+                    synth_prompt = f"Task: {goal}\n\nAzioni/Tool già eseguiti:\n{steps_txt or 'Nessun tool eseguito.'}"
+                    llm_fb = _query_llm_endpoints(
+                        "Sei un assistente tecnico locale. Sintetizza in italiano chiaro e fattuale il risultato del task dai dati forniti."
+                        + (f"\n\nContesto:\n{ctx_str[:1400]}" if ctx_str else ""),
+                        synth_prompt,
+                        self.base_url_fn(),
+                        timeout=25.0,
+                        preferred_model=resolved_model,
+                    )
+                    pi_output_text = llm_fb or (
+                        f"Task {session_id} completato ({len(executed_steps)} passi tool eseguiti).\n"
+                        + (steps_txt or f"Contesto ispezionato ({eff_scope}): {att_summary}")
+                    )
+                    if tot_tok == 0:
+                        in_tok = max(12, len(local_prompt) // 4)
+                        out_tok = max(8, len(pi_output_text) // 4)
+                        tot_tok = in_tok + out_tok
+
+            if tot_tok == 0 and pi_output_text:
+                in_tok = max(28, (len(goal) + len(enh_instructions)) // 4)
+                out_tok = max(20, len(pi_output_text) // 4)
+                tot_tok = in_tok + out_tok
+
+            if len(self.sessions.get(session_id, {}).get("steps", [])) <= 12:
+                try:
+                    refined = _synthesize_short_l1_title(goal, self.base_url_fn(), preferred_model=resolved_model)
+                    if refined:
+                        self.rename_session(session_id, refined)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            final_run_status = "stopped" if stop_ev.is_set() else "completed"
+            elapsed_sec = self._record_run_finish(
+                ctx, run_id=run_id, session_id=session_id, role=run_role,
+                model=resolved_model, status=final_run_status, goal=goal,
+                in_tok=in_tok, out_tok=out_tok, tot_tok=tot_tok, started_at=t_start,
             )
+            tok_summary = self.wiki_db.get_token_usage_summary(ctx, episode_id=session_id)
 
-            pi_output_text = query_local_reflex_llm(goal, self.base_url_fn(), timeout=8.0)
+            compiled_skill_id = None
+            if self.skill_hub is not None and executed_steps:
+                synth = self.skill_hub.synthesize_task_discussion_3plus1(
+                    episode_id=session_id,
+                    goal=goal,
+                    discussion_steps=executed_steps,
+                    user_closing_notes=pi_output_text[:400],
+                    ctx=ctx,
+                )
+                if orch_cfg.get("auto_compile_skills_on_close", True):
+                    ev = self.skill_hub.evaluate_and_compile_skill(
+                        episode_id=session_id,
+                        goal=goal,
+                        lessons_learned=synth["lessons_learned"],
+                        discussion_steps=executed_steps,
+                        ctx=ctx,
+                    )
+                    if ev.should_create_skill:
+                        compiled_skill_id = ev.skill_id
 
             touched = [h["path"] for h in hits] if hits else ["/"]
             self.wiki_db.record_episode(
@@ -757,41 +2110,63 @@ class PiAgentManager:
                 episode_id=session_id,
                 title=f"[{session_id}] {goal[:52]}",
                 goal=goal,
-                outcome_status="active",
+                outcome_status="open",
                 learned_summary=pi_output_text[:300],
                 skills_used=skills,
                 relations=[
-                    {
-                        "relation": "relates_to",
-                        "target_type": "subtree",
-                        "target_id": p,
-                    }
+                    {"relation": "relates_to", "target_type": "subtree", "target_id": p}
                     for p in touched
                 ],
             )
             closure_info = self.memory_curator.prepare_task_closure(session_id)
             questions = closure_info.get("closing_questions", [])
-            q_text = "\n".join(f"  ? {q}" for q in questions)
+            auto_answered: list[dict[str, str]] = []
+            if use_loop and questions and not stop_ev.is_set():
+                auto_answered = self._auto_answer_questions_locally(
+                    session_id,
+                    goal,
+                    questions,
+                    pi_output_text,
+                    preferred_model=analyst_model or impl_model,
+                    effort=eff,
+                )
+                questions = []
+            tot_all_tokens = int(tok_summary.get("total_tokens") or tot_tok)
             self._append_step(
                 session_id,
                 "output",
-                "Task attivo completato — Pronto per revisione o archiviazione sintetica",
-                f"{pi_output_text}\n\nDomande di chiusura task (prima dell'archiviazione):\n{q_text}",
+                f"Agente `{run_role}` {'interrotto' if stop_ev.is_set() else 'completato'} ({resolved_model} · {tot_all_tokens} tok · {elapsed_sec}s) — Task ancora aperto",
+                pi_output_text,
+                {"run_id": run_id, "model": resolved_model, "total_tokens": tot_all_tokens},
             )
 
             with self._lock:
-                if self.sessions[session_id]["status"] == "working":
-                    self.sessions[session_id]["status"] = "completed"
-                    self.sessions[session_id]["final_report"] = pi_output_text
-                    self.sessions[session_id]["closing_questions"] = questions
+                sess = self.sessions.get(session_id)
+                if sess is not None:
+                    sess["token_summary"] = tok_summary
+                    sess["updated_at"] = time.time()
+                    if sess["status"] in {"working", "stopped"}:
+                        sess["status"] = "stopped" if stop_ev.is_set() else "completed"
+                        sess["lifecycle_state"] = "open"
+                        sess["final_report"] = pi_output_text
+                        sess["closing_questions"] = questions
+                        sess["auto_answered_questions"] = auto_answered
+                        sess["compiled_skill_id"] = compiled_skill_id
 
-            if speak_on_finish:
-                speak_native_tts(f"Task completato. {pi_output_text[:160]}")
+            if not stop_ev.is_set():
+                self._handle_agent_speech_on_finish(run_role, pi_output_text, speak_on_finish)
 
         except Exception as exc:  # noqa: BLE001
+            self._record_run_finish(
+                ctx, run_id=run_id, session_id=session_id, role=run_role,
+                model=resolved_model, status="error", goal=goal,
+                in_tok=0, out_tok=0, tot_tok=0, started_at=t_start,
+            )
             self._append_step(session_id, "system", f"Errore agente: {exc}")
             with self._lock:
-                self.sessions[session_id]["status"] = "error"
+                if session_id in self.sessions:
+                    self.sessions[session_id]["status"] = "error"
+                    self.sessions[session_id]["lifecycle_state"] = "open"
 
     def open_native_pi_terminal(self) -> dict[str, Any]:
         """Opens a native OS Terminal window running interactive `pi` with the Cortical harness loaded."""
@@ -817,2434 +2192,34 @@ class PiAgentManager:
         return {"opened": False, "command": cmd_str}
 
 
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="it">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cortical Mission Control — Concept Graph, 3+1 Second Brain & Multi-Agent Workbench</title>
-  <style>
-    :root {
-      --bg: #070b14;
-      --bg-sidebar: #0c1221;
-      --panel: #111a2e;
-      --panel-hover: #17233d;
-      --border: #223254;
-      --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.18);
-      --indigo: #818cf8;
-      --emerald: #34d399;
-      --amber: #fbbf24;
-      --rose: #f87171;
-      --violet: #c084fc;
-      --text: #f1f5f9;
-      --muted: #94a3b8;
-      --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; height: 100vh; display: flex; flex-direction: column;
-      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
-      background: var(--bg); color: var(--text); overflow: hidden;
-    }
-    .topbar {
-      min-height: 58px; background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between; padding: 6px 14px;
-      flex-shrink: 0; gap: 10px; flex-wrap: wrap;
-    }
-    .brand { display: flex; align-items: center; gap: 10px; min-width: 190px; }
-    .brand-logo {
-      width: 32px; height: 32px; border-radius: 9px;
-      background: linear-gradient(135deg, var(--accent), var(--indigo));
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 900; font-size: 1rem; color: #070b14; font-family: var(--mono);
-      box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
-    }
-    .brand-title { font-weight: 800; font-size: 1rem; letter-spacing: -0.02em; }
-    .brand-sub { font-size: 0.7rem; color: var(--muted); max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-    /* PRIMARY CENTRAL VIEW SWITCHER */
-    .main-nav {
-      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
-      background: #080d19; padding: 4px; border-radius: 11px; border: 1px solid var(--border);
-    }
-    .nav-tab {
-      padding: 6px 11px; border-radius: 8px; font-size: 0.79rem; font-weight: 700;
-      cursor: pointer; color: var(--muted); border: 1px solid transparent;
-      display: inline-flex; align-items: center; gap: 6px; transition: all 0.15s; white-space: nowrap;
-    }
-    .nav-tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
-    .nav-tab.active {
-      background: linear-gradient(135deg, rgba(56,189,248,0.2), rgba(129,140,248,0.2));
-      color: var(--accent); border-color: rgba(56,189,248,0.5);
-      box-shadow: 0 2px 10px rgba(56,189,248,0.12);
-    }
-
-    .voice-bar {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      background: var(--panel); border: 1px solid var(--border);
-      padding: 4px 9px; border-radius: 14px; max-width: 100%;
-    }
-    .pulse-dot {
-      width: 10px; height: 10px; border-radius: 50%; background: var(--muted);
-      transition: all 0.2s; flex-shrink: 0;
-    }
-    .pulse-dot.listening {
-      background: var(--emerald);
-      box-shadow: 0 0 12px var(--emerald);
-      animation: pulse 1.3s infinite;
-    }
-    @keyframes pulse {
-      0% { transform: scale(0.95); opacity: 1; }
-      50% { transform: scale(1.25); opacity: 0.65; }
-      100% { transform: scale(0.95); opacity: 1; }
-    }
-    .live-transcript {
-      font-size: 0.75rem; color: var(--accent); font-family: var(--mono);
-      min-width: 90px; max-width: 190px; white-space: nowrap;
-      overflow: hidden; text-overflow: ellipsis;
-    }
-    .btn {
-      background: linear-gradient(135deg, var(--accent), var(--indigo));
-      color: #070b14; border: none; border-radius: 8px; padding: 7px 12px;
-      font-size: 0.79rem; font-weight: 700; cursor: pointer; display: inline-flex;
-      align-items: center; gap: 6px; transition: all 0.15s; white-space: nowrap;
-    }
-    .btn:hover { opacity: 0.92; transform: translateY(-1px); }
-    .btn-ghost {
-      background: #152038; color: var(--text); border: 1px solid var(--border);
-      font-weight: 600;
-    }
-    .btn-danger {
-      background: rgba(248, 113, 113, 0.16); color: var(--rose);
-      border: 1px solid rgba(248, 113, 113, 0.4); font-weight: 700;
-    }
-    select, input, textarea {
-      background: #0a101f; color: var(--text); border: 1px solid var(--border);
-      border-radius: 8px; padding: 7px 10px; font-size: 0.82rem;
-    }
-    .workspace {
-      flex: 1; display: grid;
-      grid-template-columns: 310px 1fr;
-      min-height: 0;
-    }
-    .sidebar {
-      display: flex; flex-direction: column; min-height: 0;
-      border-right: 1px solid var(--border); background: var(--bg-sidebar);
-    }
-    .main-stage {
-      display: flex; flex-direction: column; min-height: 0; background: var(--bg);
-    }
-    .stage-view {
-      flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-    }
-    .pane-header {
-      padding: 11px 15px; font-size: 0.75rem; font-weight: 700;
-      text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
-      border-bottom: 1px solid var(--border); background: var(--bg-sidebar);
-      display: flex; justify-content: space-between; align-items: center;
-      flex-shrink: 0;
-    }
-    .pane-body { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
-    .agent-item {
-      padding: 10px 12px; border-radius: 9px; background: var(--panel);
-      border: 1px solid var(--border); margin-bottom: 8px; cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-    }
-    .agent-item:hover, .agent-item.active {
-      border-color: var(--accent); background: var(--panel-hover);
-    }
-    .agent-item-top {
-      display: flex; justify-content: space-between; align-items: center;
-      font-size: 0.8rem; font-weight: 700; margin-bottom: 4px;
-    }
-    .status-pill {
-      font-size: 0.66rem; padding: 2px 7px; border-radius: 999px;
-      font-family: var(--mono); text-transform: uppercase;
-    }
-    .status-working { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
-    .status-completed { background: rgba(52, 211, 153, 0.2); color: var(--emerald); }
-    .status-archived { background: rgba(129, 140, 248, 0.2); color: var(--indigo); }
-    .status-stopped, .status-error { background: rgba(248, 113, 113, 0.2); color: var(--rose); }
-    .step-card {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 12px 15px; margin-bottom: 10px;
-      border-left: 3px solid var(--accent);
-    }
-    .step-card.tool_call { border-left-color: var(--indigo); }
-    .step-card.subagent { border-left-color: var(--amber); }
-    .step-card.output { border-left-color: var(--emerald); }
-    .step-card.permission { border-left-color: var(--rose); }
-    .step-meta {
-      display: flex; justify-content: space-between; font-size: 0.74rem;
-      color: var(--muted); font-family: var(--mono); margin-bottom: 5px;
-    }
-    .step-title { font-weight: 700; font-size: 0.9rem; margin-bottom: 6px; color: var(--text); }
-    .step-detail {
-      margin: 0; font-family: var(--mono); font-size: 0.79rem;
-      color: #cbd5e1; white-space: pre-wrap; background: #060911;
-      padding: 10px; border-radius: 7px; border: 1px solid #1a2640;
-      max-height: 260px; overflow-y: auto; line-height: 1.45;
-    }
-    .composer {
-      padding: 11px 18px; background: var(--bg-sidebar);
-      border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px;
-      flex-shrink: 0;
-    }
-    .composer-row { display: flex; gap: 8px; align-items: center; }
-    .composer input { flex: 1; padding: 10px 13px; font-size: 0.9rem; }
-
-    /* DEDICATED CENTRAL CONCEPT GRAPH VIEW */
-    .graph-stage-grid {
-      flex: 1; display: grid; grid-template-columns: 1fr 370px; min-height: 0;
-    }
-    .graph-main-area {
-      display: flex; flex-direction: column; min-height: 0; padding: 14px;
-      border-right: 1px solid var(--border);
-    }
-    .graph-toolbar {
-      display: flex; justify-content: space-between; align-items: center;
-      gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
-    }
-    .filter-pills { display: flex; gap: 5px; flex-wrap: wrap; }
-    .pill {
-      padding: 5px 10px; border-radius: 999px; font-size: 0.74rem; font-weight: 600;
-      cursor: pointer; background: var(--panel); color: var(--muted);
-      border: 1px solid var(--border); transition: all 0.15s;
-    }
-    .pill.active {
-      background: var(--accent-glow); color: var(--accent); border-color: var(--accent);
-    }
-    .graph-canvas-wrap {
-      flex: 1; background: radial-gradient(circle at center, #0d1629 0%, #060a12 100%);
-      border: 1px solid var(--border); border-radius: 12px;
-      position: relative; overflow: hidden; min-height: 360px;
-      cursor: grab;
-    }
-    .graph-canvas-wrap:active { cursor: grabbing; }
-    .graph-zoom-controls {
-      position: absolute; bottom: 14px; right: 14px; display: flex; gap: 6px;
-      background: rgba(12, 18, 33, 0.9); padding: 6px; border-radius: 9px;
-      border: 1px solid var(--border);
-    }
-    .graph-legend {
-      position: absolute; top: 12px; left: 14px;
-      display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.73rem; color: #cbd5e1;
-      background: rgba(12, 18, 33, 0.85); padding: 7px 12px; border-radius: 8px;
-      border: 1px solid var(--border); font-family: var(--mono); pointer-events: none;
-    }
-    .legend-dot {
-      width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle;
-    }
-    .concept-drawer {
-      display: flex; flex-direction: column; min-height: 0; background: var(--bg-sidebar);
-      padding: 16px; overflow-y: auto;
-    }
-    .concept-badge {
-      display: inline-block; padding: 3px 9px; border-radius: 999px;
-      font-size: 0.7rem; font-family: var(--mono); text-transform: uppercase;
-      background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(56,189,248,0.4);
-      margin-bottom: 8px;
-    }
-    .tier-box {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
-      padding: 10px 12px; margin-bottom: 10px;
-    }
-    .tier-label {
-      font-size: 0.7rem; font-family: var(--mono); color: var(--accent);
-      text-transform: uppercase; font-weight: 700; margin-bottom: 4px;
-    }
-    .second-brain-grid {
-      flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
-      padding: 14px; overflow-y: auto; min-height: 0;
-    }
-    .card-panel {
-      background: var(--bg-sidebar); border: 1px solid var(--border);
-      border-radius: 12px; display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-    }
-    .tree-node {
-      padding: 6px 9px; border-radius: 6px; font-family: var(--mono);
-      font-size: 0.78rem; cursor: pointer; display: flex; justify-content: space-between;
-      color: #cbd5e1;
-    }
-    .tree-node:hover { background: var(--panel-hover); color: var(--accent); }
-
-    /* INTERACTIVE HELP ICONS (?) WITH HOVER TOOLTIP & CLICK-TO-DOCS DRAWER */
-    .help-btn {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 18px; height: 18px; border-radius: 50%;
-      background: rgba(56, 189, 248, 0.14); color: var(--accent);
-      border: 1px solid rgba(56, 189, 248, 0.45);
-      font-size: 0.7rem; font-weight: 800; font-family: var(--mono);
-      cursor: pointer; margin-left: 6px; transition: all 0.15s;
-      vertical-align: middle; user-select: none;
-    }
-    .help-btn:hover {
-      background: var(--accent); color: #070b14;
-      box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
-      transform: scale(1.08);
-    }
-    .floating-tooltip {
-      position: fixed; z-index: 9999; pointer-events: none;
-      max-width: 310px; background: #0b1324; color: #f1f5f9;
-      border: 1px solid var(--accent); border-radius: 10px;
-      padding: 10px 12px; font-size: 0.77rem; line-height: 1.45;
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.65);
-      display: none;
-    }
-    .floating-tooltip .tt-hint {
-      display: block; margin-top: 5px; font-size: 0.68rem;
-      color: var(--accent); font-family: var(--mono);
-    }
-
-    /* SCOPED CONTEXT ATTACHMENT BAR (ChatGPT / Claude Code Style) */
-    .context-bar {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 8px; flex-wrap: wrap; padding: 6px 10px;
-      background: #080e1c; border: 1px solid var(--border); border-radius: 9px;
-    }
-    .context-chips {
-      display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1;
-    }
-    .ctx-chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 3px 9px; border-radius: 999px; font-size: 0.74rem;
-      background: rgba(56, 189, 248, 0.13); color: #e2e8f0;
-      border: 1px solid rgba(56, 189, 248, 0.35); font-family: var(--mono);
-    }
-    .ctx-chip .chip-rm {
-      cursor: pointer; color: var(--rose); font-weight: 800; margin-left: 2px;
-    }
-    .ctx-add-btns {
-      display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
-    }
-    .btn-xs {
-      padding: 4px 8px; font-size: 0.72rem; border-radius: 7px;
-      background: #131e36; color: #e2e8f0; border: 1px solid var(--border);
-      cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;
-    }
-    .btn-xs:hover { border-color: var(--accent); color: var(--accent); }
-
-    /* STUDIO 3-COLUMN GRID FOR TAB 3 */
-    .studio-grid {
-      flex: 1; display: grid; grid-template-columns: 1.15fr 1fr 0.95fr; gap: 14px;
-      padding: 14px; overflow-y: auto; min-height: 0;
-    }
-    .cfg-row {
-      display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px;
-    }
-    .cfg-row label {
-      font-size: 0.73rem; color: #cbd5e1; font-weight: 600;
-    }
-
-    /* INTERACTIVE DOCUMENTATION DRAWER */
-    .help-drawer-backdrop {
-      position: fixed; inset: 0; background: rgba(3, 6, 14, 0.68);
-      z-index: 9000; display: none; justify-content: flex-end;
-    }
-    .help-drawer {
-      width: 500px; max-width: 92vw; height: 100vh;
-      background: var(--bg-sidebar); border-left: 1px solid var(--accent);
-      display: flex; flex-direction: column; box-shadow: -12px 0 34px rgba(0,0,0,0.7);
-    }
-    .doc-section {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 13px 15px; margin-bottom: 12px;
-      transition: border-color 0.25s, box-shadow 0.25s;
-    }
-    .doc-section.highlight {
-      border-color: var(--accent);
-      box-shadow: 0 0 18px rgba(56, 189, 248, 0.28);
-    }
-    .doc-section h4 {
-      margin: 0 0 6px 0; color: var(--accent); font-size: 0.9rem;
-    }
-    .doc-section p {
-      margin: 0; font-size: 0.8rem; color: #cbd5e1; line-height: 1.5;
-    }
-  </style>
-</head>
-<body>
-  <!-- GLOBAL FLOATING TOOLTIP FOR (?) HELP ICONS -->
-  <div id="global-tooltip" class="floating-tooltip"></div>
-  <input type="file" id="hidden-file-picker" style="display:none;" onchange="handleBrowserFileSelected(event)" />
-
-  <!-- INTERACTIVE DOCUMENTATION DRAWER (OPENS ON CLICKING ANY '?' ICON) -->
-  <div id="help-drawer-backdrop" class="help-drawer-backdrop" onclick="closeHelpDrawer(event)">
-    <div class="help-drawer" onclick="event.stopPropagation()">
-      <div class="pane-header" style="border-bottom-color: rgba(56,189,248,0.3);">
-        <span id="help-drawer-title" style="color:var(--accent); font-size:0.84rem;">📖 Guida Interattiva di Cortical v0.4 (IT / EN)</span>
-        <div style="display:flex; gap:6px; align-items:center;">
-          <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.72rem;" id="btn-drawer-lang" onclick="toggleUiLanguage()">🇬🇧 EN</button>
-          <button class="btn btn-ghost" id="btn-help-close" style="padding:3px 9px;" onclick="closeHelpDrawer()">✕ Chiudi</button>
-        </div>
-      </div>
-      <div class="pane-body" id="help-drawer-body">
-        <div class="doc-section" id="doc-stream">
-          <h4>⚡ Stream Operativo, Audio Ducking & Isolamento Voce Utente</h4>
-          <p>Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti. Cortical riproduce la propria voce tramite <b>Web Audio GainNode</b> abbinato alla cancellazione acustica dell'eco WebRTC (<code>echoCancellation</code>) e analisi spettrale: quando parli, <b>abbassa istantaneamente il volume dell'assistente al 14%</b> (stile Alexa / Google Home), isola e dà priorità alla tua frase, e se fai una nuova domanda interrompe la risposta precedente ricalcolando subito. Supporta italiano e inglese.</p>
-        </div>
-        <div class="doc-section" id="doc-attachments">
-          <h4>📎 Contesto Allegato per Chat e Task (File, Cartelle, Skill, Plugin)</h4>
-          <p>Cortical <b>non</b> pre-carica automaticamente la propria cartella sorgente. Come in ChatGPT o Claude Code, per ogni discussione o task puoi allegare esplicitamente <b>📄 File</b>, <b>📁 Cartelle</b>, <b>⚡ Skill</b> e <b>🔌 Plugin/MCP</b>. Gli elementi allegati vengono sintetizzati nei 3+1 livelli (Light, Medium, High, Max) e passati automaticamente al Cortical Harness.</p>
-        </div>
-        <div class="doc-section" id="doc-graph">
-          <h4>🧠 Grafo Semantico dei Concetti (MCP)</h4>
-          <p>Rappresenta la memoria concettuale (non l'elenco grezzo dei file): mostra i <b>5 Pilastri Fondamentali del Framework</b> (anello doppio 🔒) insieme ai concetti estratti dai tuoi allegati, agli insight appresi dalle conversazioni, alle skill generate e ai task.</p>
-        </div>
-        <div class="doc-section" id="doc-concept-config">
-          <h4>⚙️ Configurazione ed Eliminazione dei Concetti</h4>
-          <p>Cliccando un nodo nel Grafo dei Concetti:<br/>
-          • <b>Concetti Fondamentali del Framework (🔒 Core):</b> sono protetti da eliminazione, ma puoi <b>configurarli dal vivo</b> (es. in <i>Orchestratore Multi-Agente</i> imposti quanti loop massimi fanno gli agenti e quali modelli usare per Analyst, Implementer e Reviewer).<br/>
-          • <b>Concetti Sviluppati / Utente (✨ Utente):</b> puoi sia configurarli sia eliminarli definitivamente dalla memoria cliccando <b>🗑️ Elimina Concetto dalla Memoria</b>.</p>
-        </div>
-        <div class="doc-section" id="doc-studio">
-          <h4>🧭 Studio Contesto 3+1, Skill Router & Sicurezza</h4>
-          <p>La terza tab centrale sostituisce i vecchi dump JSON con uno studio operativo in 3 colonne:<br/>
-          1. <b>Ispezione Sintesi 3+1 degli Allegati:</b> vedi come Cortical comprime i tuoi file e cartelle in L1 (~50 token), L2 (~250 token), L3 (~1000 token) e +1 Max.<br/>
-          2. <b>Simulatore Prompt & Skill:</b> verifica quali skill e quali modelli vengono iniettati per qualsiasi richiesta.<br/>
-          3. <b>Adaptive Permission Gate:</b> gestisci i comandi auto-approvati e testa i blocchi deterministici.</p>
-        </div>
-        <div class="doc-section" id="doc-tasks">
-          <h4>🤖 Task Espliciti Multi-Agente & Archiviazione 3+1</h4>
-          <p>Le chiacchierate quotidiane (ora, meteo, domande veloci) non aprono task. Un task si apre solo quando clicchi <b>+ Nuovo Task</b>, selezioni la modalità Task nel composer o usi <code>/task</code> in <code>pi</code>. Quando clicchi <b>📦 Archivia</b>, Cortical sintetizza la discussione nei 3+1 livelli e valuta se compilare una nuova Skill procedurale.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- TOP MISSION CONTROL BAR WITH PRIMARY CENTRAL NAVIGATION -->
-  <div class="topbar">
-    <div class="brand">
-      <div class="brand-logo">C</div>
-      <div>
-        <div class="brand-title">Cortical Mission Control</div>
-        <div class="brand-sub" id="hw-banner">Inizializzazione profilo hardware...</div>
-      </div>
-    </div>
-
-    <!-- DEDICATED CENTRAL WORKSPACE TABS -->
-    <div class="main-nav">
-      <div class="nav-tab active" id="main-tab-stream" onclick="switchMainStage('stream')">
-        <span id="lbl-tab-stream">⚡ Stream & Voce</span>
-        <span class="help-btn" data-tip="Flusso live, audio ducking stile Alexa, isolamento voce e passi degli agenti." data-tip-en="Live stream, Alexa-style audio ducking, user voice isolation & agent steps." onclick="openHelpSection('doc-stream', event)">?</span>
-      </div>
-      <div class="nav-tab" id="main-tab-graph" onclick="switchMainStage('graph')">
-        <span id="lbl-tab-graph">🧠 Grafo dei Concetti</span> <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.72rem; opacity:0.85;">(MCP)</span>
-        <span class="help-btn" data-tip="Mappa interattiva dei concetti: configura i parametri del framework (loop, modelli) o elimina i concetti utente." data-tip-en="Interactive concept map: configure framework pillars (loops, models) or delete user concepts." onclick="openHelpSection('doc-graph', event)">?</span>
-      </div>
-      <div class="nav-tab" id="main-tab-brain" onclick="switchMainStage('brain')">
-        <span id="lbl-tab-brain">📎 Contesto 3+1, Skill & Sicurezza</span>
-        <span class="help-btn" data-tip="Gestisci file/cartelle/skill/plugin allegati, ispeziona sintesi 3+1 e permessi." data-tip-en="Manage attached files/folders/skills/plugins, inspect 3+1 syntheses and permissions." onclick="openHelpSection('doc-studio', event)">?</span>
-      </div>
-    </div>
-
-    <!-- VOICE, DUCKING & BILINGUAL CONTROLS -->
-    <div class="voice-bar">
-      <div class="pulse-dot" id="mic-dot"></div>
-      <span class="live-transcript" id="live-transcript">Ducking & AEC pronti · Di' "Ehi Cortical..."</span>
-      <span id="acoustic-duck-badge" style="font-family:var(--mono); font-size:0.7rem; padding:3px 7px; border-radius:6px; border:1px solid var(--border); color:var(--muted);">🔊 100%</span>
-      <button class="btn" id="btn-always-on" onclick="toggleAlwaysOnMic()">🎤 Mic: OFF</button>
-      <select id="tts-voice" title="Bilingual Neural Voice (IT / EN)">
-        <option value="auto" selected>🌐 Auto (IT / EN)</option>
-        <option value="IsabellaNeural">🇮🇹 Isabella Neurale</option>
-        <option value="GiuseppeNeural">🇮🇹 Giuseppe Neurale</option>
-        <option value="ElsaNeural">🇮🇹 Elsa Neurale</option>
-        <option value="DiegoNeural">🇮🇹 Diego Neurale</option>
-        <option value="JennyNeural">🇺🇸 Jenny Neural (EN)</option>
-        <option value="GuyNeural">🇺🇸 Guy Neural (EN)</option>
-        <option value="AriaNeural">🇺🇸 Aria Neural (EN)</option>
-        <option value="SoniaNeural">🇬🇧 Sonia Neural (EN)</option>
-        <option value="Federica">🇮🇹 Federica (Offline)</option>
-        <option value="Samantha">🇺🇸 Samantha (Offline EN)</option>
-      </select>
-      <button class="btn btn-danger" id="btn-stop-top" onclick="triggerStopBargeIn()" title="Ferma immediatamente voce e agenti / Stop immediately">🛑 Stop</button>
-      <button class="btn btn-ghost" onclick="openNativePiTerminal()" title="Apre pi nel Terminale / Open pi in Terminal">🖥️ `pi`</button>
-      <button class="btn btn-ghost" id="btn-ui-lang" style="border-color: rgba(56,189,248,0.55); color: var(--accent);" onclick="toggleUiLanguage()" title="Switch Language / Cambia Lingua (IT / EN)">🌐 IT / EN</button>
-      <button class="btn btn-ghost" id="btn-guide-top" onclick="openHelpSection('doc-stream', event)" title="Guida Interattiva / Interactive Guide">📖 Guida</button>
-    </div>
-  </div>
-
-  <!-- MAIN WORKSPACE: LEFT TASK SIDEBAR + CENTRAL MULTI-STAGE VIEW -->
-  <div class="workspace">
-    <!-- LEFT SIDEBAR: EXPLICIT MULTI-AGENT TASKS & QUICK CONCEPT SUMMARY -->
-    <div class="sidebar">
-      <div class="pane-header">
-        <span>
-          Task Espliciti `pi`
-          <span class="help-btn" data-tip="Elenco dei task multi-agente aperti su richiesta. Puoi archiviarli nei 3+1 livelli o cancellarli." onclick="openHelpSection('doc-tasks', event)">?</span>
-        </span>
-        <div style="display:flex; gap:5px;">
-          <button class="btn btn-ghost" style="padding:3px 7px; font-size:0.68rem;" onclick="clearArchivedTasks()" title="Rimuove tutti i task già archiviati">🧹 Pulisci</button>
-          <button class="btn" style="padding:3px 8px; font-size:0.72rem;" onclick="spawnQuickAgent()">+ Nuovo Task</button>
-        </div>
-      </div>
-      <div class="pane-body" id="agent-roster" style="flex: 1;">
-        <div style="color:var(--muted); font-size:0.78rem;">
-          Le conversazioni normali non aprono task. Crea un task solo quando vuoi orchestrare un lavoro strutturato con sintesi 3+1 finale.
-        </div>
-      </div>
-
-      <!-- QUICK CONCEPT GRAPH LAUNCHER CARD -->
-      <div style="padding: 12px 14px; border-top: 1px solid var(--border); background: #090f1d;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <span style="font-size:0.74rem; font-weight:700; color:var(--accent); text-transform:uppercase;">
-            🧠 Mappa Concettuale
-            <span class="help-btn" data-tip="Apre il Grafo dei Concetti per configurare loop/modelli degli agenti o rimuovere concetti appresi." onclick="openHelpSection('doc-concept-config', event)">?</span>
-          </span>
-          <span id="sidebar-graph-stats" style="font-size:0.71rem; font-family:var(--mono); color:var(--muted);">-- concetti</span>
-        </div>
-        <div style="font-size:0.76rem; color:var(--muted); margin-bottom:9px;">
-          Configura i pilastri del framework (loop agenti, modelli LLM) o elimina concetti utente dal grafo.
-        </div>
-        <button class="btn" style="width:100%; justify-content:center;" onclick="switchMainStage('graph')">
-          🧠 Apri Grafo & Configura Concetti
-        </button>
-      </div>
-    </div>
-
-    <!-- CENTRAL STAGE (3 SWITCHABLE FULL-SIZE VIEWS + PERSISTENT COMPOSER) -->
-    <div class="main-stage">
-      <!-- STAGE 1: LIVE CONVERSATION & MULTI-AGENT EXECUTION STREAM -->
-      <div class="stage-view" id="stage-stream">
-        <div class="pane-header">
-          <span>
-            Stream Conversazionale & Multi-Agente (Isolamento Sorgenti · Contesto Allegato · Voce Anti-Eco)
-            <span class="help-btn" data-tip="Cronologia live delle risposte vocali/testuali e delle azioni eseguite dagli agenti nel contesto corrente." onclick="openHelpSection('doc-stream', event)">?</span>
-          </span>
-          <span style="font-family:var(--mono); font-size:0.73rem; color:var(--accent);" id="active-session-badge">CHAT & VOICE</span>
-        </div>
-        <div class="pane-body" id="agent-stream">
-          <div class="step-card output">
-            <div class="step-meta"><span>CORTICAL v0.4 READY</span><span>Contesto Allegato · Concetti Configurabili · Guida Interattiva</span></div>
-            <div class="step-title">Benvenuto in Cortical v0.4 — Controllo Totale su Contesto e Concetti</div>
-            <pre class="step-detail">• 📎 Contesto Isolato (Stile ChatGPT / Claude Code): Cortical NON pre-carica più la propria cartella sorgente. Usa la barra "📎 Contesto Attivo" qui sotto per allegare 📄 File, 📁 Cartelle, ⚡ Skill o 🔌 Plugin specifici alla tua chat o al tuo task.
-• 🧠 Grafo dei Concetti Configurabile: nella tab "🧠 Grafo dei Concetti", clicca sui concetti fondamentali (🔒) per configurare quanti loop massimi eseguono gli agenti e quali modelli usare per ogni ruolo, oppure elimina (🗑️) i concetti sviluppati dall'utente.
-• ❓ Aiuto Contestuale Ovunque: passa il mouse sulle icone "?" per una spiegazione immediata, oppure cliccale per aprire il capitolo dedicato della Guida Interattiva.</pre>
-          </div>
-        </div>
-      </div>
-
-      <!-- STAGE 2: DEDICATED CENTRAL CONCEPT KNOWLEDGE GRAPH -->
-      <div class="stage-view" id="stage-graph" style="display:none;">
-        <div class="graph-stage-grid">
-          <div class="graph-main-area">
-            <div class="graph-toolbar">
-              <div class="filter-pills" id="graph-filter-pills">
-                <span class="pill active" onclick="setGraphFilter('all', this)">Tutti i Nodi</span>
-                <span class="pill" onclick="setGraphFilter('concept', this)">🧠 Concetti</span>
-                <span class="pill" onclick="setGraphFilter('memoria', this)">📚 Memoria 3+1</span>
-                <span class="pill" onclick="setGraphFilter('agenti', this)">🤖 Agenti & Loop</span>
-                <span class="pill" onclick="setGraphFilter('voce', this)">🎙️ Voce</span>
-                <span class="pill" onclick="setGraphFilter('sicurezza', this)">🛡️ Sicurezza</span>
-                <span class="pill" onclick="setGraphFilter('insight', this)">💡 Insight</span>
-                <span class="pill" onclick="setGraphFilter('skill', this)">⚡ Skill</span>
-                <span class="pill" onclick="setGraphFilter('task', this)">🎯 Task</span>
-              </div>
-              <div style="display:flex; gap:6px; align-items:center;">
-                <input id="graph-search-input" placeholder="Filtra concetto..." style="width:165px; padding:5px 9px;" oninput="renderKnowledgeGraphSvg()" />
-                <button class="btn btn-ghost" style="padding:5px 10px;" onclick="loadMcpKnowledgeGraph()">🔄 Sincronizza</button>
-                <span class="help-btn" data-tip="Trascina i nodi con il mouse. I nodi con doppio anello (🔒) sono pilastri configurabili del framework; gli altri sono concetti utente eliminabili." onclick="openHelpSection('doc-graph', event)">?</span>
-              </div>
-            </div>
-
-            <div class="graph-canvas-wrap" id="graph-canvas-container">
-              <div class="graph-legend">
-                <span><i class="legend-dot" style="background:#38bdf8; border:2px solid #fff;"></i>🔒 Pilastro Framework (Configurabile)</span>
-                <span><i class="legend-dot" style="background:#c084fc;"></i>✨ Concetto Utente (Eliminabile)</span>
-                <span><i class="legend-dot" style="background:#34d399;"></i>💡 Insight</span>
-                <span><i class="legend-dot" style="background:#fbbf24;"></i>⚡ Skill / Task</span>
-              </div>
-              <svg id="mcp-graph-svg" width="100%" height="100%" viewBox="0 0 920 560"></svg>
-              <div class="graph-zoom-controls">
-                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="zoomGraph(1.2)" title="Ingrandisci">＋</button>
-                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="zoomGraph(0.84)" title="Riduci">－</button>
-                <button class="btn btn-ghost" style="padding:4px 9px;" onclick="resetGraphView()" title="Centra grafo">Centra</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- RIGHT CONCEPT INSPECTOR, CONFIGURATOR & DELETION DRAWER -->
-          <div class="concept-drawer">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <span style="font-size:0.74rem; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">
-                Scheda & Configurazione Concetto
-              </span>
-              <span class="help-btn" data-tip="Configura i parametri operativi del concetto (es. loop massimi agenti, modelli LLM) o elimina i concetti sviluppati dall'utente." onclick="openHelpSection('doc-concept-config', event)">?</span>
-            </div>
-            <div id="concept-detail-panel">
-              <div class="concept-badge" id="cd-badge">🔒 PILASTRO FRAMEWORK</div>
-              <h3 id="cd-title" style="margin: 0 0 8px 0; font-size: 1.08rem; color: var(--text);">Orchestratore Multi-Agente</h3>
-
-              <!-- DYNAMIC CONFIGURATION FORM FOR SELECTED CONCEPT -->
-              <div class="tier-box" id="cd-config-box" style="border-color: rgba(56,189,248,0.4);">
-                <div class="tier-label">⚙️ Configurazione Parametri del Concetto</div>
-                <div id="cd-config-form" style="margin-top:6px; font-size:0.78rem; color:var(--muted);">
-                  Clicca su un nodo del grafo (es. "Orchestratore Multi-Agente") per configurarne loop massimi, modelli e comportamento.
-                </div>
-              </div>
-
-              <!-- DELETE ACTION FOR USER-DEVELOPED CONCEPTS -->
-              <div id="cd-delete-box" style="margin-bottom:10px;"></div>
-
-              <div class="tier-box">
-                <div class="tier-label">Livello 1 — Sintesi Light (~50 token)</div>
-                <div id="cd-summary-l1" style="font-size:0.82rem; color:#e2e8f0; line-height:1.45;">
-                  Seleziona un nodo nel grafo per visualizzarne la sintesi e i parametri.
-                </div>
-              </div>
-              <div class="tier-box">
-                <div class="tier-label">Livello 2 — Struttura & Relazioni (~250 token)</div>
-                <div id="cd-summary-l2" style="font-size:0.79rem; color:var(--muted); line-height:1.45;">
-                  I pilastri fondamentali del framework possono essere configurati in tempo reale; i concetti utente possono anche essere eliminati.
-                </div>
-              </div>
-              <div class="tier-box">
-                <div class="tier-label">Connessioni Semantiche & Fonti</div>
-                <div id="cd-connections" style="font-size:0.76rem; font-family:var(--mono); color:#cbd5e1; margin-bottom:4px;">--</div>
-                <div id="cd-sources" style="font-size:0.73rem; font-family:var(--mono); color:var(--accent);">framework:core</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- STAGE 3: CLEAR, NON-DUPLICATE CONTEXT, 3+1 SYNTHESIS & SECURITY STUDIO -->
-      <div class="stage-view" id="stage-brain" style="display:none;">
-        <div class="studio-grid">
-          <!-- COLUMN 1: SCOPED CONTEXT MANAGER (FILES, FOLDERS, SKILLS, PLUGINS) & 3+1 PREVIEW -->
-          <div class="card-panel">
-            <div class="pane-header">
-              <span>
-                📎 1. Contesto Allegato & Sintesi 3+1
-                <span class="help-btn" data-tip="Allega file, cartelle, skill o plugin alla chat/task corrente e visualizza come vengono sintetizzati nei 3+1 livelli." onclick="openHelpSection('doc-attachments', event)">?</span>
-              </span>
-              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadScopedContext()">🔄 Aggiorna</button>
-            </div>
-            <div class="pane-body">
-              <div style="font-size:0.77rem; color:var(--muted); margin-bottom:10px; line-height:1.4;">
-                Aggiungi solo i file, le cartelle, le skill e i plugin che vuoi passare all'harness per questa conversazione o task:
-              </div>
-              <div style="display:grid; grid-template-columns: 110px 1fr 95px; gap:6px; margin-bottom:8px;">
-                <select id="ctx-item-type">
-                  <option value="file">📄 File</option>
-                  <option value="folder">📁 Cartella</option>
-                  <option value="skill">⚡ Skill</option>
-                  <option value="plugin">🔌 Plugin/MCP</option>
-                </select>
-                <input id="ctx-item-ref" placeholder="Percorso file/cartella o nome skill/plugin..." onkeydown="if(event.key==='Enter') attachFromStudio()" />
-                <select id="ctx-item-tier" title="Livello sintesi 3+1">
-                  <option value="light">L1 Light</option>
-                  <option value="medium" selected>L2 Medium</option>
-                  <option value="high">L3 High</option>
-                  <option value="max">+1 Max</option>
-                </select>
-              </div>
-              <div style="display:flex; gap:6px; margin-bottom:12px;">
-                <button class="btn" style="flex:1; justify-content:center;" onclick="attachFromStudio()">+ Allega al Contesto Attivo</button>
-                <button class="btn btn-ghost" onclick="document.getElementById('hidden-file-picker').click()">📂 Sfoglia File Locale…</button>
-              </div>
-
-              <div style="font-size:0.72rem; font-weight:700; color:var(--accent); text-transform:uppercase; margin-bottom:6px;">
-                Elementi Attualmente Allegati al Contesto
-              </div>
-              <div id="studio-context-list" style="margin-bottom:12px;"></div>
-
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                <span style="font-size:0.72rem; font-weight:700; color:var(--muted); text-transform:uppercase;">
-                  Ispezione Sintesi 3+1 del Nodo Selezionato
-                </span>
-                <select id="wiki-depth" onchange="navigateWiki(currentWikiPath)" style="padding:2px 6px; font-size:0.71rem;">
-                  <option value="light">L1 LIGHT (~50t)</option>
-                  <option value="medium" selected>L2 MEDIUM (~250t)</option>
-                  <option value="high">L3 HIGH (~1000t)</option>
-                  <option value="max">+1 MAX (Integrale)</option>
-                </select>
-              </div>
-              <pre class="step-detail" id="wiki-node-view" style="max-height:170px;">Nessun file pre-caricato. Allega un file o una cartella qui sopra per ispezionare in tempo reale le sue 4 sintesi gerarchiche (Light, Medium, High, Max).</pre>
-            </div>
-          </div>
-
-          <!-- COLUMN 2: PARALLEL SKILL ROUTER & PROMPT ENHANCEMENT SIMULATOR -->
-          <div class="card-panel">
-            <div class="pane-header">
-              <span>
-                ⚡ 2. Skill in Parallelo & Simulatore Harness
-                <span class="help-btn" data-tip="Mostra le Skill disponibili (3+1 Memoria + Procedurali) e simula come il tuo prompt viene arricchito prima di arrivare al modello." onclick="openHelpSection('doc-studio', event)">?</span>
-              </span>
-              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSkillsHub()">🔄 Skill</button>
-            </div>
-            <div class="pane-body">
-              <div style="font-size:0.77rem; color:var(--muted); margin-bottom:8px;">
-                Verifica come l'harness combina il tuo <b>Contesto Allegato</b>, la <b>Skill di Memoria 3+1</b> e i <b>Modelli Configurati</b>:
-              </div>
-              <div style="display:flex; gap:6px; margin-bottom:10px;">
-                <input id="skill-test-input" placeholder="Simula un prompt (es: 'analizza gli allegati e crea i test')..." style="flex:1;" onkeydown="if(event.key==='Enter') testPromptEnhancer()" />
-                <button class="btn" onclick="testPromptEnhancer()">Simula</button>
-              </div>
-              <pre class="step-detail" id="skill-enhance-view" style="max-height:185px; margin-bottom:12px;">Premi "Simula" per vedere il payload esatto (allegati + livello 3+1 + skill + modelli/loop) che viene iniettato nel contesto dell'agente.</pre>
-              <div style="font-size:0.72rem; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:6px;">
-                Catalogo Skill (Clicca "+ Allega" per forzarne l'attivazione nella chat)
-              </div>
-              <div id="skills-list-view"></div>
-            </div>
-          </div>
-
-          <!-- COLUMN 3: ADAPTIVE PERMISSION GATE & CURATED CONVERSATION MEMORY -->
-          <div class="card-panel">
-            <div class="pane-header">
-              <span>
-                🛡️ 3. Sicurezza Adattiva & Memoria Curata
-                <span class="help-btn" data-tip="Valuta la sicurezza dei comandi prima dell'esecuzione e mostra gli insight salvati (filtrando le chiacchierate effimere)." onclick="openHelpSection('doc-studio', event)">?</span>
-              </span>
-              <button class="btn btn-ghost" style="padding:3px 8px; font-size:0.7rem;" onclick="loadSmartMemory()">🧠 Memoria</button>
-            </div>
-            <div class="pane-body">
-              <div style="font-size:0.72rem; font-weight:700; color:var(--accent); text-transform:uppercase; margin-bottom:6px;">
-                🛡️ Verifica Comandi (Adaptive Permission Gate)
-              </div>
-              <div style="font-size:0.76rem; color:var(--muted); margin-bottom:8px;">
-                Blocca comandi distruttivi (<code>rm -rf /</code>) e impara i comandi sicuri che approvi:
-              </div>
-              <div style="display:flex; gap:5px; margin-bottom:8px; flex-wrap:wrap;">
-                <select id="perm-tool">
-                  <option value="bash">bash</option>
-                  <option value="write_file">write_file</option>
-                  <option value="chrome">chrome</option>
-                </select>
-                <input id="perm-cmd" value="pytest tests/" style="flex:1; min-width:120px;" />
-              </div>
-              <div style="display:flex; gap:6px; margin-bottom:10px;">
-                <button class="btn" onclick="evalPerm()">Valuta Comando</button>
-                <button class="btn btn-ghost" onclick="feedbackPerm(true)">👍 Approva & Impara</button>
-                <button class="btn btn-danger" onclick="testHardBlock()">Test Blocco</button>
-              </div>
-              <pre class="step-detail" id="perm-view" style="max-height:125px; margin-bottom:14px;">Adaptive Permission Gate pronto.</pre>
-
-              <div style="font-size:0.72rem; font-weight:700; color:var(--emerald); text-transform:uppercase; margin-bottom:6px;">
-                💡 Memoria Conversazionale Curata (Max 20 Turni FIFO)
-              </div>
-              <pre class="step-detail" id="memory-state-view" style="max-height:175px;">Clicca "🧠 Memoria" per ispezionare il buffer leggero delle chiacchierate e gli insight estratti.</pre>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- PERSISTENT PROMPT, CONTEXT ATTACHMENT BAR & VOICE COMPOSER -->
-      <div class="composer">
-        <!-- CHATGPT / CLAUDE CODE STYLE SCOPED CONTEXT ATTACHMENT BAR -->
-        <div class="context-bar">
-          <div class="context-chips" id="composer-context-chips">
-            <span style="font-size:0.74rem; color:var(--muted); font-family:var(--mono);">
-              📎 Contesto Attivo: <i style="color:#64748b;">Nessun file/cartella pre-caricata (contesto pulito)</i>
-            </span>
-          </div>
-          <div class="ctx-add-btns">
-            <button class="btn-xs" onclick="document.getElementById('hidden-file-picker').click()" title="Sfoglia e allega un file dal tuo computer">+ 📄 Sfoglia File</button>
-            <button class="btn-xs" onclick="quickAttachPrompt('file')" title="Allega un file tramite percorso">+ 📄 Percorso File</button>
-            <button class="btn-xs" onclick="quickAttachPrompt('folder')" title="Allega una cartella specifica al contesto">+ 📁 Cartella</button>
-            <button class="btn-xs" onclick="quickAttachPrompt('skill')" title="Attiva una Skill specifica nella chat">+ ⚡ Skill</button>
-            <button class="btn-xs" onclick="quickAttachPrompt('plugin')" title="Attiva un Plugin o Server MCP nella chat">+ 🔌 Plugin</button>
-            <span class="help-btn" data-tip="Come in ChatGPT o Claude Code, allega file, cartelle, skill o plugin specifici per questa conversazione o task. Cortical non carica file non richiesti." onclick="openHelpSection('doc-attachments', event)">?</span>
-          </div>
-        </div>
-
-        <div class="composer-row">
-          <select id="dispatch-mode">
-            <option value="auto">💬 Conversazione & Voce (Crea task solo se richiesto esplicitamente)</option>
-            <option value="agent">🤖 Apri Nuovo Task Multi-Agente `pi` (Con Sintesi 3+1 & Contesto Allegato)</option>
-          </select>
-          <select id="agent-depth">
-            <option value="light">Memoria 3+1: L1 LIGHT</option>
-            <option value="medium" selected>Memoria 3+1: L2 MEDIUM</option>
-            <option value="high">Memoria 3+1: L3 HIGH</option>
-            <option value="max">Memoria 3+1: +1 MAX (Full)</option>
-          </select>
-          <label style="font-size:0.79rem; color:var(--muted); display:flex; align-items:center; gap:5px; cursor:pointer;">
-            <input type="checkbox" id="chk-speak" checked /> Pronuncia risposta (Voce Neurale Ita)
-          </label>
-        </div>
-        <div class="composer-row">
-          <input id="prompt-input" placeholder="Chiedi a Cortical (con i file/skill allegati qui sopra) o di' 'Ehi Cortical...'" onkeydown="if(event.key==='Enter') submitComposer()" />
-          <button class="btn" onclick="submitComposer()">Invia ↵</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    let currentWikiPath = '/';
-    let selectedSessionId = null;
-    let selectedConceptNode = null;
-    let alwaysOnActive = false;
-    let recognition = null;
-    let lastSpokenResponseText = '';
-    let lastSpokenAtMs = 0;
-    let localTtsShieldUntilMs = 0;
-    let activeAbortController = null;
-    let cachedAttachments = [];
-    let uiLang = localStorage.getItem('cortical_ui_lang') || 'it';
-
-    // Interactive Concept Graph State
-    let cachedGraphData = { nodes: [], edges: [], stats: {} };
-    let currentGraphFilter = 'all';
-    let graphZoom = 1.0;
-    let graphPanX = 0;
-    let graphPanY = 0;
-    let isPanningGraph = false;
-    let panStartX = 0;
-    let panStartY = 0;
-    let draggedNodeId = null;
-    let nodePositions = {};
-
-    const I18N = {
-      it: {
-        guideTitle: '📖 Guida Interattiva di Cortical v0.4 (IT / EN)',
-        close: '✕ Chiudi',
-        toggleLangBtn: '🇮🇹 IT',
-        drawerLangBtn: '🇬🇧 EN',
-        tabStream: '⚡ Stream & Voce',
-        tabGraph: '🧠 Grafo dei Concetti',
-        tabBrain: '📎 Contesto 3+1, Skill & Sicurezza',
-        guideBtn: '📖 Guida',
-        micOff: '🎤 Mic: OFF',
-        micOn: '🟢 Mic Attivo',
-        micDenied: '🎤 Mic: Negato',
-        promptPlaceholder: "Chiedi a Cortical (IT o EN) con i file/skill allegati o di' 'Ehi Cortical...'",
-        liveReady: `Ducking & AEC pronti · Di' "Ehi Cortical..." o "Hey Cortical..."`,
-        duckNormal: '🔊 100%',
-        duckLow: '🔉 14% Duck · Priorità Voce',
-        newTaskBtn: '+ Nuovo Task',
-        clearBtn: '🧹 Pulisci',
-        openGraphBtn: '🧠 Apri Grafo & Configura Concetti',
-        tooltipHint: '💡 Clicca per aprire la guida interattiva',
-      },
-      en: {
-        guideTitle: '📖 Cortical v0.4 Interactive Guide (EN / IT)',
-        close: '✕ Close',
-        toggleLangBtn: '🇬🇧 EN',
-        drawerLangBtn: '🇮🇹 IT',
-        tabStream: '⚡ Stream & Voice',
-        tabGraph: '🧠 Concept Graph',
-        tabBrain: '📎 Context 3+1, Skills & Safety',
-        guideBtn: '📖 Guide',
-        micOff: '🎤 Mic: OFF',
-        micOn: '🟢 Mic Active',
-        micDenied: '🎤 Mic: Denied',
-        promptPlaceholder: "Ask Cortical (EN or IT) with attached files/skills or say 'Hey Cortical...'",
-        liveReady: 'Ducking & AEC Ready · Say "Hey Cortical..." or "Ehi Cortical..."',
-        duckNormal: '🔊 100%',
-        duckLow: '🔉 14% Duck · Voice Priority',
-        newTaskBtn: '+ New Task',
-        clearBtn: '🧹 Clear',
-        openGraphBtn: '🧠 Open Graph & Configure Concepts',
-        tooltipHint: '💡 Click to open the interactive guide',
-      }
-    };
-
-    const GUIDE_DOCS = {
-      it: {
-        'doc-stream': ['⚡ Stream Operativo, Audio Ducking & Isolamento Voce Utente', 'Mostra in tempo reale la conversazione vocale/testuale e i passaggi degli agenti. Cortical riproduce la propria voce tramite <b>Web Audio GainNode</b> abbinato alla cancellazione acustica dell\\\'eco WebRTC (<code>echoCancellation</code>) e analisi spettrale: quando parli, <b>abbassa istantaneamente il volume dell\\\'assistente al 14%</b> (stile Alexa / Google Home), isola e dà priorità alla tua frase, e se fai una nuova domanda interrompe la risposta precedente ricalcolando subito. Supporta italiano e inglese.'],
-        'doc-attachments': ['📎 Contesto Allegato per Chat e Task (File, Cartelle, Skill, Plugin)', 'Cortical <b>non</b> pre-carica automaticamente la propria cartella sorgente. Come in ChatGPT o Claude Code, per ogni discussione o task puoi allegare esplicitamente <b>📄 File</b>, <b>📁 Cartelle</b>, <b>⚡ Skill</b> e <b>🔌 Plugin/MCP</b>. Gli elementi allegati vengono sintetizzati nei 3+1 livelli (Light, Medium, High, Max) e passati automaticamente al Cortical Harness.'],
-        'doc-graph': ['🧠 Grafo Semantico dei Concetti (MCP)', 'Rappresenta la memoria concettuale (non l\\\'elenco grezzo dei file): mostra i <b>5 Pilastri Fondamentali del Framework</b> (anello doppio 🔒) insieme ai concetti estratti dai tuoi allegati, agli insight appresi dalle conversazioni, alle skill generate e ai task.'],
-        'doc-concept-config': ['⚙️ Configurazione ed Eliminazione dei Concetti', 'Cliccando un nodo nel Grafo dei Concetti:<br/>• <b>Concetti Fondamentali del Framework (🔒 Core):</b> sono protetti da eliminazione, ma puoi <b>configurarli dal vivo</b> (es. in <i>Orchestratore Multi-Agente</i> imposti quanti loop massimi fanno gli agenti e quali modelli usare).<br/>• <b>Concetti Sviluppati / Utente (✨ Utente):</b> puoi sia configurarli sia eliminarli definitivamente dalla memoria cliccando <b>🗑️ Elimina Concetto dalla Memoria</b>.'],
-        'doc-studio': ['🧭 Studio Contesto 3+1, Skill Router & Sicurezza', 'La terza tab centrale unifica 3 strumenti:<br/>1. <b>Ispezione Sintesi 3+1 degli Allegati:</b> compressione in L1 (~50 tok), L2 (~250 tok), L3 (~1000 tok) e +1 Max.<br/>2. <b>Simulatore Prompt & Skill:</b> verifica quali skill e modelli vengono attivati.<br/>3. <b>Adaptive Permission Gate:</b> gestisci permessi automatici e blocchi di sicurezza.'],
-        'doc-tasks': ['🤖 Task Espliciti Multi-Agente & Archiviazione 3+1', 'Le chiacchierate quotidiane (ora, meteo, ricerche veloci) non aprono task. Un task si apre solo quando lo richiedi esplicitamente o clicchi <b>+ Nuovo Task</b>. Quando archivi (<b>📦 Archivia</b>), Cortical sintetizza la discussione nei 3+1 livelli e valuta la compilazione di nuove Skill.']
-      },
-      en: {
-        'doc-stream': ['⚡ Live Stream, Alexa-Style Ducking & User Voice Isolation', 'Displays live bilingual voice/text chat and agent steps. Assistant audio plays through a <b>Web Audio GainNode</b> paired with WebRTC hardware echo cancellation (<code>echoCancellation</code>) and spectral tone comparison: when you speak, Cortical <b>smoothly lowers playback volume to 14%</b> (like Alexa / Google Home), isolates your voice from its own assistant tone, and cancels the previous reply to recalculate your new question immediately. Supports English & Italian.'],
-        'doc-attachments': ['📎 Scoped Context Attachments (Files, Folders, Skills, Plugins)', 'Cortical <b>never</b> auto-loads its own source repository. Just like ChatGPT or Claude Code, explicitly attach <b>📄 Files</b>, <b>📁 Folders</b>, <b>⚡ Skills</b>, and <b>🔌 Plugins/MCP</b> for any chat or task. Attachments are summarized across 3+1 tiers (Light, Medium, High, Max) and passed cleanly into the Cortical Harness.'],
-        'doc-graph': ['🧠 Semantic Concept Knowledge Graph (MCP)', 'Displays conceptual memory rather than raw file dumps: shows the <b>5 Core Framework Pillars</b> (double ring 🔒) connected to concepts extracted from attachments, curated conversation insights, procedural skills, and explicit tasks.'],
-        'doc-concept-config': ['⚙️ Concept Configuration & Deletion', 'Click any node in the Concept Graph:<br/>• <b>Core Framework Pillars (🔒 Core):</b> protected from deletion, yet <b>live-configurable</b> (e.g., tune max agent loops and Analyst/Implementer/Reviewer models).<br/>• <b>User-Developed Concepts (✨ User):</b> configurable and permanently removable with <b>🗑️ Delete Concept from Memory</b>.'],
-        'doc-studio': ['🧭 3+1 Context Studio, Skill Router & Safety Gate', 'Unifies three live panels:<br/>1. <b>3+1 Attachment Synthesis:</b> inspect compression across L1 (~50 tok), L2 (~250 tok), L3 (~1000 tok), and +1 Max.<br/>2. <b>Skill & Prompt Router Simulator:</b> preview selected skills and tier routing.<br/>3. <b>Adaptive Permission Gate:</b> manage safe patterns and deterministic blocks.'],
-        'doc-tasks': ['🤖 Explicit Multi-Agent Tasks & 3+1 Archival', 'Everyday chitchat (clock, weather, quick browser searches) never creates tasks. Tasks spawn only when explicitly requested or via <b>+ New Task</b>. Archiving (<b>📦 Archive</b>) distills discussions into 3+1 Wiki levels and evaluates reusable Skill compilation.']
-      }
-    };
-
-    function applyUiTranslations(lang) {
-      uiLang = (lang === 'en') ? 'en' : 'it';
-      localStorage.setItem('cortical_ui_lang', uiLang);
-      const t = I18N[uiLang];
-      const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-      setTxt('help-drawer-title', t.guideTitle);
-      setTxt('btn-help-close', t.close);
-      setTxt('btn-ui-lang', t.toggleLangBtn);
-      setTxt('btn-drawer-lang', t.drawerLangBtn);
-      setTxt('lbl-tab-stream', t.tabStream);
-      setTxt('lbl-tab-graph', t.tabGraph);
-      setTxt('lbl-tab-brain', t.tabBrain);
-      setTxt('btn-guide-top', t.guideBtn);
-      const micBtn = document.getElementById('btn-always-on');
-      if (micBtn) micBtn.textContent = alwaysOnActive ? t.micOn : t.micOff;
-      const pi = document.getElementById('prompt-input');
-      if (pi && !micFinalBuffer && !micInterimBuffer) pi.placeholder = t.promptPlaceholder;
-      const lt = document.getElementById('live-transcript');
-      if (lt && !alwaysOnActive) lt.textContent = t.liveReady;
-      const guideSet = GUIDE_DOCS[uiLang] || GUIDE_DOCS.it;
-      Object.entries(guideSet).forEach(([secId, [title, body]]) => {
-        const sec = document.getElementById(secId);
-        if (sec) {
-          const h4 = sec.querySelector('h4');
-          const p = sec.querySelector('p');
-          if (h4) h4.innerHTML = title;
-          if (p) p.innerHTML = body;
-        }
-      });
-      if (recognition) {
-        recognition.lang = (uiLang === 'en') ? 'en-US' : 'it-IT';
-      }
-    }
-
-    function setUiLanguage(lang) {
-      applyUiTranslations(lang);
-    }
-
-    function toggleUiLanguage() {
-      setUiLanguage(uiLang === 'en' ? 'it' : 'en');
-    }
-
-    // =========================================================================
-    // INTERACTIVE HELP (?) HOVER TOOLTIPS & CLICK-TO-DOCS DRAWER
-    // =========================================================================
-    function initHelpTooltips() {
-      const tooltip = document.getElementById('global-tooltip');
-      if (!tooltip) return;
-
-      document.body.addEventListener('mouseover', (e) => {
-        const target = e.target.closest('[data-tip]');
-        if (!target) return;
-        const tip = (uiLang === 'en' && target.getAttribute('data-tip-en'))
-          ? target.getAttribute('data-tip-en')
-          : target.getAttribute('data-tip');
-        if (!tip) return;
-        const hint = (I18N[uiLang] || I18N.it).tooltipHint;
-        tooltip.innerHTML = `${tip}<span class="tt-hint">${hint}</span>`;
-        tooltip.style.display = 'block';
-        positionTooltip(e, tooltip);
-      });
-
-      document.body.addEventListener('mousemove', (e) => {
-        if (tooltip.style.display === 'block') {
-          positionTooltip(e, tooltip);
-        }
-      });
-
-      document.body.addEventListener('mouseout', (e) => {
-        const target = e.target.closest('[data-tip]');
-        if (target) {
-          tooltip.style.display = 'none';
-        }
-      });
-
-      document.body.addEventListener('click', (e) => {
-        if (e.target.closest('.help-btn')) {
-          tooltip.style.display = 'none';
-        }
-      });
-    }
-
-    function positionTooltip(e, tooltip) {
-      const pad = 12;
-      let x = e.clientX + pad;
-      let y = e.clientY + pad;
-      if (x + 320 > window.innerWidth) {
-        x = Math.max(10, window.innerWidth - 330);
-      }
-      if (y + 120 > window.innerHeight) {
-        y = Math.max(10, e.clientY - 90);
-      }
-      tooltip.style.left = `${x}px`;
-      tooltip.style.top = `${y}px`;
-    }
-
-    function openHelpSection(sectionId, event) {
-      if (event) event.stopPropagation();
-      const tooltip = document.getElementById('global-tooltip');
-      if (tooltip) tooltip.style.display = 'none';
-
-      const backdrop = document.getElementById('help-drawer-backdrop');
-      if (backdrop) backdrop.style.display = 'flex';
-
-      document.querySelectorAll('.doc-section').forEach(sec => sec.classList.remove('highlight'));
-      if (sectionId) {
-        const target = document.getElementById(sectionId);
-        if (target) {
-          target.classList.add('highlight');
-          setTimeout(() => {
-            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }, 60);
-        }
-      }
-    }
-
-    function closeHelpDrawer(event) {
-      if (event) event.stopPropagation();
-      const backdrop = document.getElementById('help-drawer-backdrop');
-      if (backdrop) backdrop.style.display = 'none';
-    }
-
-    // =========================================================================
-    // SCOPED CONTEXT ATTACHMENTS (FILES, FOLDERS, SKILLS, PLUGINS)
-    // =========================================================================
-    async function loadScopedContext() {
-      try {
-        const r = await fetch('/api/context');
-        const data = await r.json();
-        cachedAttachments = data.attachments || [];
-        renderContextChips();
-      } catch (err) {
-        console.error("Errore caricamento contesto:", err);
-      }
-    }
-
-    function renderContextChips() {
-      const chipsContainer = document.getElementById('composer-context-chips');
-      const studioList = document.getElementById('studio-context-list');
-
-      const iconMap = {
-        file: '📄',
-        folder: '📁',
-        skill: '⚡',
-        plugin: '🔌'
-      };
-
-      if (!cachedAttachments.length) {
-        if (chipsContainer) {
-          chipsContainer.innerHTML = `
-            <span style="font-size:0.74rem; color:var(--muted); font-family:var(--mono);">
-              📎 Contesto Attivo: <i style="color:#64748b;">Nessun file/cartella pre-caricata (contesto pulito)</i>
-            </span>
-          `;
-        }
-        if (studioList) {
-          studioList.innerHTML = `<div style="font-size:0.76rem; color:var(--muted); font-style:italic;">Nessun elemento allegato. Usa i pulsanti sopra per aggiungere file, cartelle, skill o plugin.</div>`;
-        }
-        return;
-      }
-
-      if (chipsContainer) {
-        chipsContainer.innerHTML = cachedAttachments.map(att => {
-          const icon = iconMap[att.item_type] || '📎';
-          const name = att.item_ref.split('/').pop() || att.item_ref;
-          const tierBadge = att.depth_tier ? ` · ${att.depth_tier.toUpperCase()}` : '';
-          return `
-            <span class="ctx-chip" title="${att.item_ref} (~${att.tokens_estimate || 0} tok)">
-              <span>${icon} ${name}${tierBadge}</span>
-              <span class="chip-rm" onclick="detachContextItem('${att.id}', event)" title="Rimuovi dal contesto">✕</span>
-            </span>
-          `;
-        }).join('');
-      }
-
-      if (studioList) {
-        studioList.innerHTML = cachedAttachments.map(att => {
-          const icon = iconMap[att.item_type] || '📎';
-          return `
-            <div style="background:rgba(15,23,42,0.85); border:1px solid var(--border); border-radius:8px; padding:6px 10px; margin-bottom:6px; font-size:0.75rem; display:flex; justify-content:space-between; align-items:center;">
-              <div>
-                <div><b>${icon} ${att.item_type.toUpperCase()}:</b> <code style="color:var(--accent);">${att.item_ref}</code></div>
-                <div style="font-size:0.69rem; color:var(--muted); font-family:var(--mono);">Tier: ${att.depth_tier.toUpperCase()} · ~${att.tokens_estimate || 0} tokens · Scope: ${att.scope_id}</div>
-              </div>
-              <div style="display:flex; gap:5px;">
-                <button class="btn btn-ghost" style="padding:2px 7px; font-size:0.67rem;" onclick="inspectAttachment3Plus1('${att.id}')" title="Ispeziona sintesi 3+1">🔍 Sintesi</button>
-                <button class="btn btn-danger" style="padding:2px 7px; font-size:0.67rem;" onclick="detachContextItem('${att.id}', event)" title="Rimuovi">✕</button>
-              </div>
-            </div>
-          `;
-        }).join('');
-      }
-    }
-
-    async function attachContextItemApi(itemType, itemRef, depthTier = 'medium', label = null, inlineContent = null) {
-      if (!itemRef) return;
-      try {
-        const r = await fetch('/api/context/attach', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            scope_id: 'chat',
-            item_type: itemType,
-            item_ref: itemRef,
-            depth_tier: depthTier,
-            label: label,
-            inline_content: inlineContent
-          })
-        });
-        const d = await r.json();
-        if (d.error) {
-          alert(`Impossibile allegare: ${d.error}`);
-          return;
-        }
-        await loadScopedContext();
-        await loadMcpKnowledgeGraph();
-        appendStreamCard(
-          'system',
-          `CONTEXT ATTACHED → ${itemType.toUpperCase()}`,
-          `~${d.tokens_estimate || 0} tok`,
-          `📎 Allegato: ${d.item_ref}`,
-          `Tipo: ${d.item_type} | Livello 3+1: ${d.depth_tier.toUpperCase()} | Hash: ${d.merkle_hash || 'inline'}`
-        );
-      } catch (err) {
-        alert("Errore durante l'allegato: " + err.message);
-      }
-    }
-
-    async function detachContextItem(attachmentId, event) {
-      if (event) event.stopPropagation();
-      try {
-        const r = await fetch('/api/context/detach', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ attachment_id: attachmentId })
-        });
-        const d = await r.json();
-        await loadScopedContext();
-        await loadMcpKnowledgeGraph();
-        appendStreamCard(
-          'system',
-          'CONTEXT DETACHED',
-          'OK',
-          `Rimosso allegato ${attachmentId}`,
-          ''
-        );
-      } catch (err) {
-        console.error("Errore rimozione allegato:", err);
-      }
-    }
-
-    function quickAttachPrompt(type) {
-      let promptMsg = "Inserisci il percorso assoluto o relativo del File da allegare:";
-      let defaultVal = "src/cortical/server.py";
-      if (type === 'folder') {
-        promptMsg = "Inserisci il percorso della Cartella da allegare:";
-        defaultVal = "src/cortical";
-      } else if (type === 'skill') {
-        promptMsg = "Inserisci il nome della Skill da attivare:";
-        defaultVal = "ai-reviewer-mandate-and-complexity";
-      } else if (type === 'plugin') {
-        promptMsg = "Inserisci il nome del Plugin/MCP da attivare:";
-        defaultVal = "mcp:cortical-wiki";
-      }
-
-      const val = prompt(promptMsg, defaultVal);
-      if (val && val.trim()) {
-        const tier = document.getElementById('agent-depth')?.value || 'medium';
-        attachContextItemApi(type, val.trim(), tier);
-      }
-    }
-
-    function attachFromStudio() {
-      const typeEl = document.getElementById('ctx-item-type');
-      const refEl = document.getElementById('ctx-item-ref');
-      const tierEl = document.getElementById('ctx-item-tier');
-      if (!refEl || !refEl.value.trim()) {
-        alert("Inserisci un percorso o nome valido nel campo.");
-        return;
-      }
-      const itemType = typeEl.value;
-      const itemRef = refEl.value.trim();
-      const depthTier = tierEl.value;
-      attachContextItemApi(itemType, itemRef, depthTier);
-      refEl.value = '';
-    }
-
-    async function handleBrowserFileSelected(event) {
-      const input = event.target;
-      if (!input.files || !input.files[0]) return;
-      const file = input.files[0];
-      const tier = document.getElementById('agent-depth')?.value || 'medium';
-      try {
-        const inlineContent = await file.text();
-        await attachContextItemApi('file', file.name, tier, file.name, inlineContent);
-      } catch (err) {
-        const fullPath = prompt(
-          `File selezionato: "${file.name}".\\nInserisci il percorso relativo o assoluto del file sul tuo sistema:`,
-          file.name
-        );
-        if (fullPath && fullPath.trim()) {
-          await attachContextItemApi('file', fullPath.trim(), tier);
-        }
-      } finally {
-        input.value = '';
-      }
-    }
-
-    function inspectAttachment3Plus1(attachmentId) {
-      const att = cachedAttachments.find(a => a.id === attachmentId);
-      if (!att) return;
-      const view = document.getElementById('wiki-node-view');
-      if (view) {
-        view.textContent = JSON.stringify(att, null, 2);
-      }
-    }
-
-    // =========================================================================
-    // NAVIGATION & VOICE UTILS
-    // =========================================================================
-    function switchMainStage(stage) {
-      ['stream', 'graph', 'brain'].forEach(s => {
-        const view = document.getElementById(`stage-${s}`);
-        const tab = document.getElementById(`main-tab-${s}`);
-        if (view) view.style.display = (s === stage) ? 'flex' : 'none';
-        if (tab) tab.classList.toggle('active', s === stage);
-      });
-      if (stage === 'graph') {
-        loadMcpKnowledgeGraph();
-      } else if (stage === 'brain') {
-        loadSkillsHub();
-        loadScopedContext();
-        loadSmartMemory();
-        navigateWiki(currentWikiPath);
-      }
-    }
-
-    // =========================================================================
-    // WEB AUDIO GAINNODE DUCKING, HARDWARE AEC3 & SPECTRAL VOICE PRIORITY
-    // =========================================================================
-    let assistantAudioCtx = null;
-    let assistantGainNode = null;
-    let assistantAnalyser = null;
-    let assistantAudioEl = null;
-    let assistantSourceNode = null;
-    let micMediaStream = null;
-    let micAnalyser = null;
-    let acousticMonitorTimer = null;
-    let duckRestoreTimer = null;
-    let acousticUserPriorityDetected = false;
-    let assistantDucked = false;
-    let assistantBaselineCentroidHz = 0;
-    let lastMicRms = 0;
-    let lastAssistantRms = 0;
-
-    function updateDuckBadge(ducked) {
-      const badge = document.getElementById('acoustic-duck-badge');
-      if (!badge) return;
-      const t = I18N[uiLang] || I18N.it;
-      if (ducked) {
-        badge.textContent = t.duckLow;
-        badge.style.color = '#fbbf24';
-        badge.style.borderColor = 'rgba(251,191,36,0.55)';
-      } else {
-        badge.textContent = t.duckNormal;
-        badge.style.color = 'var(--muted)';
-        badge.style.borderColor = 'var(--border)';
-      }
-    }
-
-    function ensureAssistantAudioPipeline() {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return false;
-      if (!assistantAudioCtx) {
-        assistantAudioCtx = new AC();
-        assistantGainNode = assistantAudioCtx.createGain();
-        assistantGainNode.gain.value = 1.0;
-        assistantAnalyser = assistantAudioCtx.createAnalyser();
-        assistantAnalyser.fftSize = 1024;
-        assistantAudioEl = new Audio();
-        assistantAudioEl.crossOrigin = 'anonymous';
-        assistantSourceNode = assistantAudioCtx.createMediaElementSource(assistantAudioEl);
-        assistantSourceNode.connect(assistantAnalyser);
-        assistantAnalyser.connect(assistantGainNode);
-        assistantGainNode.connect(assistantAudioCtx.destination);
-        assistantAudioEl.onended = () => {
-          localTtsShieldUntilMs = 0;
-          restoreAssistantAudio(1.0);
-        };
-      }
-      if (assistantAudioCtx.state === 'suspended') {
-        assistantAudioCtx.resume().catch(() => {});
-      }
-      return true;
-    }
-
-    function isAssistantAudioPlaying() {
-      return Boolean(assistantAudioEl && !assistantAudioEl.paused && !assistantAudioEl.ended);
-    }
-
-    function duckAssistantAudio(level = 0.14) {
-      if (!assistantGainNode || !assistantAudioCtx) return;
-      const now = assistantAudioCtx.currentTime;
-      assistantGainNode.gain.cancelScheduledValues(now);
-      assistantGainNode.gain.setTargetAtTime(level, now, 0.035);
-      assistantDucked = true;
-      updateDuckBadge(true);
-    }
-
-    function restoreAssistantAudio(level = 1.0) {
-      if (!assistantGainNode || !assistantAudioCtx) return;
-      const now = assistantAudioCtx.currentTime;
-      assistantGainNode.gain.cancelScheduledValues(now);
-      assistantGainNode.gain.setTargetAtTime(level, now, 0.14);
-      assistantDucked = false;
-      updateDuckBadge(false);
-    }
-
-    function stopAssistantAudio() {
-      if (duckRestoreTimer) {
-        clearTimeout(duckRestoreTimer);
-        duckRestoreTimer = null;
-      }
-      if (assistantAudioEl) {
-        try {
-          assistantAudioEl.pause();
-          assistantAudioEl.currentTime = 0;
-        } catch (_) {}
-      }
-      restoreAssistantAudio(1.0);
-    }
-
-    async function playAssistantAudioUrl(url) {
-      if (!url || !ensureAssistantAudioPipeline()) return;
-      stopAssistantAudio();
-      assistantAudioEl.src = url;
-      assistantBaselineCentroidHz = 0;
-      restoreAssistantAudio(1.0);
-      try {
-        await assistantAudioEl.play();
-      } catch (err) {
-        console.warn('Web Audio play warning:', err);
-      }
-    }
-
-    function getAnalyserRmsAndCentroid(analyser, sampleRate) {
-      if (!analyser) return { rms: 0, centroidHz: 0 };
-      const timeData = new Float32Array(analyser.fftSize);
-      analyser.getFloatTimeDomainData(timeData);
-      let sumSq = 0;
-      for (let i = 0; i < timeData.length; i++) sumSq += timeData[i] * timeData[i];
-      const rms = Math.sqrt(sumSq / timeData.length);
-
-      const freqData = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(freqData);
-      const binHz = (sampleRate || 48000) / (analyser.fftSize || 1024);
-      let weighted = 0;
-      let total = 0;
-      for (let i = 1; i < freqData.length; i++) {
-        const mag = freqData[i];
-        weighted += mag * (i * binHz);
-        total += mag;
-      }
-      return { rms, centroidHz: total > 0 ? weighted / total : 0 };
-    }
-
-    async function startAcousticMonitor() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-      ensureAssistantAudioPipeline();
-      try {
-        if (!micMediaStream) {
-          // Enabling hardware WebRTC AEC3 on the same Chrome AudioContext reference eliminates assistant tone leakage
-          micMediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
-          });
-          const micSource = assistantAudioCtx.createMediaStreamSource(micMediaStream);
-          micAnalyser = assistantAudioCtx.createAnalyser();
-          micAnalyser.fftSize = 1024;
-          micSource.connect(micAnalyser);
-        }
-        if (acousticMonitorTimer) clearInterval(acousticMonitorTimer);
-        acousticMonitorTimer = setInterval(() => {
-          if (!alwaysOnActive || !micAnalyser || !assistantAudioCtx) return;
-          const sr = assistantAudioCtx.sampleRate || 48000;
-          const micStats = getAnalyserRmsAndCentroid(micAnalyser, sr);
-          const asstStats = getAnalyserRmsAndCentroid(assistantAnalyser, sr);
-          lastMicRms = Number(micStats.rms.toFixed(4));
-          lastAssistantRms = Number(asstStats.rms.toFixed(4));
-
-          if (isAssistantAudioPlaying() && asstStats.rms > 0.015 && asstStats.centroidHz > 80) {
-            assistantBaselineCentroidHz = assistantBaselineCentroidHz
-              ? (assistantBaselineCentroidHz * 0.85 + asstStats.centroidHz * 0.15)
-              : asstStats.centroidHz;
-          }
-
-          if (isAssistantAudioPlaying()) {
-            const pitchDiffRatio = (assistantBaselineCentroidHz > 80 && micStats.centroidHz > 80)
-              ? Math.abs(micStats.centroidHz - assistantBaselineCentroidHz) / assistantBaselineCentroidHz
-              : 0;
-            const userSpeakingNow = micStats.rms > 0.024 && (micStats.rms > asstStats.rms * 0.9 || pitchDiffRatio > 0.14);
-            if (userSpeakingNow) {
-              acousticUserPriorityDetected = true;
-              if (!assistantDucked) duckAssistantAudio(0.14);
-              if (duckRestoreTimer) clearTimeout(duckRestoreTimer);
-              duckRestoreTimer = setTimeout(() => {
-                if (!micInterimBuffer && !micFinalBuffer && isAssistantAudioPlaying()) {
-                  restoreAssistantAudio(1.0);
-                  acousticUserPriorityDetected = false;
-                }
-              }, 1600);
-            }
-          }
-        }, 70);
-      } catch (err) {
-        console.warn('Hardware AEC getUserMedia unavailable:', err);
-      }
-    }
-
-    function stopAcousticMonitor() {
-      if (acousticMonitorTimer) {
-        clearInterval(acousticMonitorTimer);
-        acousticMonitorTimer = null;
-      }
-      if (micMediaStream) {
-        micMediaStream.getTracks().forEach(t => t.stop());
-        micMediaStream = null;
-      }
-      micAnalyser = null;
-      acousticUserPriorityDetected = false;
-    }
-
-    function hasWakeOrBargeInWord(s) {
-      return /\\b(cortical|peppe|ferma|fermati|stop|basta|silenzio|zitto|annulla|aspetta|quiet|cancel|nevermind|enough|wait)\\b/i.test(s || '');
-    }
-
-    function detectLangClient(s) {
-      if (!s) return uiLang || 'it';
-      if (/[àèéìòù]/i.test(s)) return 'it';
-      const enHits = (s.match(/\\b(the|what|when|where|how|weather|tomorrow|open|search|browser|wikipedia|read|summarize|page|hey|create|task)\\b/gi) || []).length;
-      const itHits = (s.match(/\\b(che|cosa|come|meteo|domani|apri|cerca|browser|leggi|riassumi|pagina|ehi|crea|task|ora)\\b/gi) || []).length;
-      if (enHits > itHits) return 'en';
-      if (itHits > enHits) return 'it';
-      return uiLang || 'it';
-    }
-
-    function isTtsShieldActive() {
-      return isAssistantAudioPlaying() || Date.now() < localTtsShieldUntilMs;
-    }
-
-    function normalizeTokens(s) {
-      return (s || '')
-        .toLowerCase()
-        .replace(/(\\d+)[.,](\\d+)\\s*°c/gi, '$1 virgola $2 gradi')
-        .replace(/(\\d+)\\s*°c/gi, '$1 gradi')
-        .replace(/\\bmin\\s+(\\d+)/gi, 'minima $1')
-        .replace(/\\bmax\\s+(\\d+)/gi, 'massima $1')
-        .replace(/(\\d+)\\s*%/g, '$1 per cento')
-        .replace(/[^\\w\\sàèéìòù]/g, ' ')
-        .split(/\\s+/)
-        .filter(w => w.length > 1);
-    }
-
-    function isSelfEchoClient(candidate) {
-      if (!candidate) return false;
-      if (hasWakeOrBargeInWord(candidate)) return false;
-      const candWords = normalizeTokens(candidate);
-      const spokenWords = new Set(normalizeTokens(lastSpokenResponseText || ''));
-      const overlap = (candWords.length && spokenWords.size)
-        ? (candWords.filter(w => spokenWords.has(w)).length / candWords.length)
-        : 0;
-      // During short TTS acoustic shield, ignore short 1-3 word bleeds or phrases overlapping with TTS,
-      // but NEVER drop clear multi-word human commands (>=4 distinct non-overlapping words).
-      if (isTtsShieldActive()) {
-        if (candWords.length < 4 || overlap >= 0.35) return true;
-        return false;
-      }
-      if (!lastSpokenResponseText) return false;
-      const elapsedSec = (Date.now() - lastSpokenAtMs) / 1000.0;
-      if (elapsedSec > 25.0) return false;
-      if (!candWords.length || !spokenWords.size) return false;
-      const candJoined = candWords.join(' ');
-      const spokenJoined = normalizeTokens(lastSpokenResponseText).join(' ');
-      if (candJoined.length >= 5 && spokenJoined.includes(candJoined)) return true;
-      return overlap >= 0.45;
-    }
-
-    async function loadHealth() {
-      try {
-        const r = await fetch('/health');
-        const d = await r.json();
-        document.getElementById('hw-banner').textContent =
-          `${d.os_name} (${d.arch}) · ${d.tier} · ${d.tts_engine} · LLM: ${d.active_base_url}`;
-      } catch (err) {
-        console.error("Errore loadHealth:", err);
-      }
-    }
-
-    function appendStreamCard(type, metaLeft, metaRight, title, detail) {
-      const stream = document.getElementById('agent-stream');
-      if (!stream) return;
-      const div = document.createElement('div');
-      div.className = `step-card ${type}`;
-      div.innerHTML = `
-        <div class="step-meta"><span>${metaLeft}</span><span>${metaRight}</span></div>
-        <div class="step-title">${title}</div>
-        <pre class="step-detail">${detail}</pre>
-      `;
-      stream.appendChild(div);
-      stream.scrollTop = stream.scrollHeight;
-    }
-
-    async function submitComposer(overrideText) {
-      const input = document.getElementById('prompt-input');
-      const fromMic = (overrideText !== undefined);
-      const text = (fromMic ? overrideText : input.value).trim();
-      if (!text) return;
-      if (!fromMic) input.value = '';
-
-      if (fromMic && isSelfEchoClient(text) && !acousticUserPriorityDetected) {
-        document.getElementById('live-transcript').textContent = `🔇 [Eco altoparlante ignorato / Speaker bleed ignored]`;
-        return;
-      }
-
-      // Spoken language switching shortcuts
-      if (/\\b(parla inglese|in inglese|switch to english|speak english)\\b/i.test(text)) {
-        setUiLanguage('en');
-        const vSel = document.getElementById('tts-voice');
-        if (vSel && !vSel.value.includes('Jenny') && !vSel.value.includes('Guy') && vSel.value !== 'auto') {
-          vSel.value = 'JennyNeural';
-        }
-      } else if (/\\b(parla italiano|in italiano|switch to italian|speak italian)\\b/i.test(text)) {
-        setUiLanguage('it');
-        const vSel = document.getElementById('tts-voice');
-        if (vSel && vSel.value !== 'auto') vSel.value = 'IsabellaNeural';
-      }
-
-      if (activeAbortController) {
-        activeAbortController.abort();
-      }
-      const wordCount = normalizeTokens(text).length;
-      const wasSpeaking = isAssistantAudioPlaying();
-      const hadUserPriority = acousticUserPriorityDetected || hasWakeOrBargeInWord(text) || (wordCount >= 3 && !isSelfEchoClient(text));
-      if (!fromMic || hadUserPriority) {
-        localTtsShieldUntilMs = 0;
-        stopAssistantAudio();
-        await fetch('/api/voice/duck', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({force_stop: true})
-        }).catch(() => {});
-      }
-
-      const mode = document.getElementById('dispatch-mode').value;
-      const depth = document.getElementById('agent-depth').value;
-      const speak = document.getElementById('chk-speak').checked;
-      const voice = document.getElementById('tts-voice').value;
-      const utteranceLang = detectLangClient(text);
-
-      if (mode === 'agent') {
-        switchMainStage('stream');
-        await spawnAgentSession(text, depth, speak);
-        return;
-      }
-
-      activeAbortController = new AbortController();
-      try {
-        const r = await fetch('/api/voice', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            utterance: text,
-            speak,
-            client_audio: true,
-            client_tts_speaking: wasSpeaking,
-            voice,
-            lang: utteranceLang,
-            wiki_depth: depth,
-            from_mic: fromMic,
-            discourse_hints: {
-              acoustic_user_priority: hadUserPriority,
-              mic_rms: lastMicRms,
-              assistant_rms: lastAssistantRms
-            }
-          }),
-          signal: activeAbortController.signal
-        });
-        const d = await r.json();
-        acousticUserPriorityDetected = false;
-
-        if (d.route === 'ignored_echo') {
-          document.getElementById('live-transcript').textContent = `🔇 [Eco ignorato / Self-echo ignored]`;
-          return;
-        }
-
-        if (d.spoken_response) {
-          lastSpokenResponseText = d.spoken_response;
-          lastSpokenAtMs = Date.now();
-          if (d.audio_url && speak && d.route !== 'stop') {
-            await playAssistantAudioUrl(d.audio_url);
-          } else if (speak && d.route !== 'stop') {
-            const estMs = Math.min(7500, Math.max(2500, d.spoken_response.length * 55 + 1100));
-            localTtsShieldUntilMs = Date.now() + estMs;
-          } else {
-            localTtsShieldUntilMs = Date.now() + 900;
-          }
-        }
-
-        if (d.spawned_session_id) {
-          selectedSessionId = d.spawned_session_id;
-          await refreshAgents();
-          await loadMcpKnowledgeGraph();
-        } else {
-          selectedSessionId = null;
-          appendStreamCard(
-            d.route === 'stop' ? 'permission' : 'output',
-            `VOICE & CHAT ROUTER → ${d.route.toUpperCase()}`,
-            `${d.latency_ms} ms`,
-            `Tu: "${text}"`,
-            `Cortical: ${d.spoken_response}`
-          );
-          await loadMcpKnowledgeGraph();
-        }
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          appendStreamCard('system', 'BARGE-IN RECALCULATION', 'ABORTED', `Domanda precedente interrotta per ricalcolare la nuova richiesta`, '');
-        }
-      } finally {
-        activeAbortController = null;
-      }
-    }
-
-    async function spawnAgentSession(goal, depth, speak) {
-      const r = await fetch('/api/agents/spawn', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({goal, wiki_depth: depth, speak})
-      });
-      const sess = await r.json();
-      selectedSessionId = sess.session_id;
-      await refreshAgents();
-      await loadMcpKnowledgeGraph();
-    }
-
-    function spawnQuickAgent() {
-      const goal = prompt("Inserisci l'obiettivo per il nuovo Task esplicito pi:", "Analizza la struttura del repository e riassumi i concetti chiave");
-      if (goal) {
-        switchMainStage('stream');
-        spawnAgentSession(goal, document.getElementById('agent-depth').value, true);
-      }
-    }
-
-    async function closeAndArchiveTask(event, sessionId) {
-      event.stopPropagation();
-      const prevRes = await fetch('/api/tasks/close-preview', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({episode_id: sessionId})
-      });
-      const prev = await prevRes.json();
-      const questions = (prev.closing_questions || []).join('\\n• ');
-      const notes = prompt(
-        `Chiusura & Archiviazione Task ${sessionId}\\n\\nDomande di chiusura di Cortical:\\n• ${questions}\\n\\nInserisci la lezione appresa (Cortical salverà la sintesi a 3+1 livelli e valuterà se creare una nuova Skill per il futuro):`,
-        "Confermo la sintesi e salvo le lezioni apprese nei 3+1 livelli."
-      );
-      if (notes === null) return;
-      const archRes = await fetch('/api/tasks/archive', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({episode_id: sessionId, user_closing_notes: notes})
-      });
-      const arch = await archRes.json();
-      const skillInfo = arch.skill_evaluation?.should_create_skill
-        ? `\\n✨ Nuova Skill Generata: ${arch.skill_evaluation.skill_id} (${arch.skill_evaluation.skill_path})`
-        : `\\nℹ️ Valutazione Skill: ${arch.skill_evaluation?.reason || 'nessuna nuova skill richiesta'}`;
-      appendStreamCard(
-        'output',
-        `TASK ARCHIVED (3+1 MEMORY + SKILL EVAL) → ${sessionId}`,
-        `Note rimosse: ${arch.purged_working_notes}`,
-        `📦 Task ${sessionId} archiviato nei 3+1 livelli`,
-        `Traccia L1 conservata: ${arch.archived_trace}${skillInfo}`
-      );
-      await refreshAgents();
-      await loadMcpKnowledgeGraph();
-    }
-
-    async function deleteTask(event, sessionId) {
-      event.stopPropagation();
-      if (!confirm(`Vuoi cancellare definitivamente il task ${sessionId} e tutti i suoi dati?`)) return;
-      await fetch('/api/tasks/delete', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({episode_id: sessionId})
-      });
-      if (selectedSessionId === sessionId) selectedSessionId = null;
-      appendStreamCard('permission', `TASK DELETED → ${sessionId}`, 'REMOVED', `🗑️ Task ${sessionId} cancellato definitivamente.`, '');
-      await refreshAgents();
-      await loadMcpKnowledgeGraph();
-    }
-
-    async function clearArchivedTasks() {
-      const r = await fetch('/api/tasks/clear-archived', {method: 'POST', body: '{}'});
-      const d = await r.json();
-      appendStreamCard('system', 'CLEANUP ARCHIVED TASKS', `${d.deleted_count || 0} rimossi`, '🧹 Task archiviati rimossi dalla lista.', JSON.stringify(d, null, 2));
-      await refreshAgents();
-      await loadMcpKnowledgeGraph();
-    }
-
-    async function refreshAgents() {
-      try {
-        const r = await fetch('/api/agents');
-        const data = await r.json();
-        const sessions = data.sessions || [];
-        const roster = document.getElementById('agent-roster');
-        if (!sessions.length) {
-          roster.innerHTML = `<div style="color:var(--muted); font-size:0.78rem;">Nessun task attivo. Le chiacchierate non creano task. Usa "+ Nuovo Task" o "/task" in pi per aprirne uno.</div>`;
-          return;
-        }
-
-        roster.innerHTML = sessions.map(s => `
-          <div class="agent-item ${s.session_id === selectedSessionId ? 'active' : ''}" onclick="selectSession('${s.session_id}')">
-            <div class="agent-item-top">
-              <span>🤖 ${s.session_id}</span>
-              <span class="status-pill status-${s.status}">${s.status}</span>
-            </div>
-            <div style="font-size:0.78rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-              ${s.goal}
-            </div>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px; gap:4px;">
-              <span style="font-size:0.68rem; color:var(--muted); font-family:var(--mono);">
-                3+1: ${s.wiki_depth.toUpperCase()} · Steps: ${s.steps.length}
-              </span>
-              <div style="display:flex; gap:4px;">
-                ${s.status !== 'archived' ? `<button class="btn btn-ghost" style="padding:2px 6px; font-size:0.67rem;" onclick="closeAndArchiveTask(event, '${s.session_id}')" title="Archivia nei 3+1 livelli e valuta nuova Skill">📦 Archivia</button>` : ''}
-                <button class="btn btn-danger" style="padding:2px 6px; font-size:0.67rem;" onclick="deleteTask(event, '${s.session_id}')" title="Cancella definitivamente il task">🗑️ Cancella</button>
-              </div>
-            </div>
-          </div>
-        `).join('');
-
-        if (selectedSessionId) {
-          const active = sessions.find(s => s.session_id === selectedSessionId);
-          if (active) {
-            document.getElementById('active-session-badge').textContent = `${active.session_id} (${active.status.toUpperCase()})`;
-            const stream = document.getElementById('agent-stream');
-            stream.innerHTML = active.steps.map(st => `
-              <div class="step-card ${st.type}">
-                <div class="step-meta"><span>STEP #${st.index} · ${st.type.toUpperCase()}</span><span>${st.timestamp}</span></div>
-                <div class="step-title">${st.title}</div>
-                ${st.detail ? `<pre class="step-detail">${st.detail}</pre>` : ''}
-              </div>
-            `).join('');
-          }
-        }
-      } catch (err) {
-        console.error("Errore refreshAgents:", err);
-      }
-    }
-
-    function selectSession(sid) {
-      selectedSessionId = sid;
-      switchMainStage('stream');
-      refreshAgents();
-    }
-
-    async function triggerStopBargeIn() {
-      if (activeAbortController) activeAbortController.abort();
-      stopAssistantAudio();
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
-      await fetch('/api/voice', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          utterance: uiLang === 'en' ? 'Hey Cortical stop' : 'Ehi Cortical basta',
-          speak: true,
-          client_audio: true,
-          lang: uiLang,
-          voice: document.getElementById('tts-voice').value
-        })
-      });
-      refreshAgents();
-    }
-
-    async function openNativePiTerminal() {
-      const r = await fetch('/api/agents/open-terminal', {method: 'POST', body: '{}'});
-      const d = await r.json();
-      appendStreamCard('subagent', 'TERMINAL LAUNCHER', d.platform || 'CLI', 'Apertura sessione interattiva `pi`', JSON.stringify(d, null, 2));
-    }
-
-    let micFinalBuffer = '';
-    let micInterimBuffer = '';
-    let micCommitTimer = null;
-    let micRestartTimer = null;
-    let micIsRecognizing = false;
-
-    function flushMicTranscriptBuffer() {
-      if (micCommitTimer) {
-        clearTimeout(micCommitTimer);
-        micCommitTimer = null;
-      }
-      const combined = `${micFinalBuffer} ${micInterimBuffer}`.replace(/\\s+/g, ' ').trim();
-      micFinalBuffer = '';
-      micInterimBuffer = '';
-      const promptInput = document.getElementById('prompt-input');
-      if (promptInput) {
-        promptInput.placeholder = (I18N[uiLang] || I18N.it).promptPlaceholder;
-      }
-      if (!combined) return;
-      if (isSelfEchoClient(combined) && !acousticUserPriorityDetected) {
-        const lt = document.getElementById('live-transcript');
-        if (lt) lt.textContent = '🔇 [Eco altoparlante ignorato / Bleed ignored]';
-        return;
-      }
-      const lt = document.getElementById('live-transcript');
-      if (lt) {
-        lt.textContent = `🗣️ "${combined}"`;
-        lt.title = combined;
-      }
-      submitComposer(combined);
-    }
-
-    function scheduleMicCommit(delayMs) {
-      if (micCommitTimer) clearTimeout(micCommitTimer);
-      micCommitTimer = setTimeout(flushMicTranscriptBuffer, delayMs);
-    }
-
-    function startMicRecognizer() {
-      if (!alwaysOnActive || !recognition || micIsRecognizing) return;
-      try {
-        recognition.start();
-      } catch (_) {}
-    }
-
-    function toggleAlwaysOnMic() {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) {
-        alert("Il browser corrente non espone Web Speech API (usa Chrome o Edge per il microfono continuo).");
-        return;
-      }
-      if (alwaysOnActive) {
-        alwaysOnActive = false;
-        stopAcousticMonitor();
-        if (micCommitTimer) clearTimeout(micCommitTimer);
-        if (micRestartTimer) clearTimeout(micRestartTimer);
-        micFinalBuffer = '';
-        micInterimBuffer = '';
-        if (recognition) {
-          try { recognition.stop(); } catch (_) {}
-        }
-        micIsRecognizing = false;
-        document.getElementById('mic-dot').classList.remove('listening');
-        document.getElementById('btn-always-on').textContent = (I18N[uiLang] || I18N.it).micOff;
-        document.getElementById('live-transcript').textContent = (uiLang === 'en') ? 'Microphone paused.' : 'Microfono in pausa.';
-        return;
-      }
-
-      alwaysOnActive = true;
-      micFinalBuffer = '';
-      micInterimBuffer = '';
-      startAcousticMonitor();
-      document.getElementById('mic-dot').classList.add('listening');
-      document.getElementById('btn-always-on').textContent = (I18N[uiLang] || I18N.it).micOn;
-      document.getElementById('live-transcript').textContent = (uiLang === 'en')
-        ? 'Listening (AEC + Ducking active, speak naturally)...'
-        : 'In ascolto (AEC + Ducking attivi, parla pure)...';
-
-      recognition = new SR();
-      recognition.lang = (uiLang === 'en') ? 'en-US' : 'it-IT';
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-
-      recognition.onstart = () => {
-        micIsRecognizing = true;
-        if (!micFinalBuffer && !micInterimBuffer) {
-          document.getElementById('live-transcript').textContent = '🎙️ In ascolto...';
-        }
-      };
-
-      recognition.onspeechstart = () => {
-        document.getElementById('mic-dot').classList.add('listening');
-        if (!micFinalBuffer && !micInterimBuffer) {
-          document.getElementById('live-transcript').textContent = '🎙️ Voce rilevata...';
-        }
-      };
-
-      recognition.onresult = (event) => {
-        let currentInterim = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const chunk = (event.results[i][0]?.transcript || '').trim();
-          if (!chunk) continue;
-          if (isSelfEchoClient(chunk) && !micFinalBuffer) {
-            const lt = document.getElementById('live-transcript');
-            if (lt) lt.textContent = '🔇 [Scudo Anti-Eco: ignoro la mia voce]';
-            continue;
-          }
-          if (event.results[i].isFinal) {
-            micFinalBuffer = `${micFinalBuffer} ${chunk}`.replace(/\\s+/g, ' ').trim();
-            micInterimBuffer = '';
-            // If user explicitly issued a stop/barge-in word, flush immediately without waiting!
-            if (hasWakeOrBargeInWord(micFinalBuffer) && micFinalBuffer.split(/\\s+/).length <= 4) {
-              flushMicTranscriptBuffer();
-              return;
-            }
-            scheduleMicCommit(1250);
-          } else {
-            currentInterim += chunk + ' ';
-            // Smooth Alexa-style ducking as soon as non-echo interim user speech starts!
-            if (isAssistantAudioPlaying() && !isSelfEchoClient(currentInterim)) {
-              acousticUserPriorityDetected = true;
-              duckAssistantAudio(0.14);
-            }
-            if (hasWakeOrBargeInWord(currentInterim)) {
-              localTtsShieldUntilMs = 0;
-              stopAssistantAudio();
-              fetch('/api/voice/duck', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({force_stop: true})
-              }).catch(() => {});
-            }
-          }
-        }
-        if (currentInterim.trim()) {
-          micInterimBuffer = currentInterim.trim();
-          // Fallback silence commit if Chromium delays emitting isFinal on long sentences
-          scheduleMicCommit(2200);
-        }
-        const livePreview = `${micFinalBuffer} ${micInterimBuffer}`.replace(/\\s+/g, ' ').trim();
-        if (livePreview) {
-          const lt = document.getElementById('live-transcript');
-          if (lt) {
-            lt.textContent = `🎙️ ${livePreview}`;
-            lt.title = livePreview;
-          }
-          const pi = document.getElementById('prompt-input');
-          if (pi && !pi.value) {
-            pi.placeholder = `🎙️ Trascrizione live: "${livePreview}"`;
-          }
-        }
-      };
-
-      recognition.onerror = (ev) => {
-        const errCode = ev?.error || 'unknown';
-        const lt = document.getElementById('live-transcript');
-        if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
-          alwaysOnActive = false;
-          micIsRecognizing = false;
-          document.getElementById('mic-dot').classList.remove('listening');
-          document.getElementById('btn-always-on').textContent = '🎤 Mic: Negato';
-          if (lt) lt.textContent = '🚫 Permesso microfono negato dal browser.';
-          appendStreamCard('permission', 'MICROFONO BLOCCATO', errCode, 'Consenti accesso al microfono nel browser (lucchetto URL).', '');
-          return;
-        }
-        if (errCode === 'audio-capture') {
-          if (lt) lt.textContent = '⚠️ Nessun microfono audio rilevato.';
-          return;
-        }
-        if (errCode === 'network' && lt) {
-          lt.textContent = '⚠️ Rete Web Speech momentaneamente instabile, riconnessione...';
-        }
-      };
-
-      recognition.onend = () => {
-        micIsRecognizing = false;
-        // Flush any accumulated long-phrase transcript before restarting
-        if (micFinalBuffer || micInterimBuffer) {
-          flushMicTranscriptBuffer();
-        }
-        if (alwaysOnActive) {
-          if (micRestartTimer) clearTimeout(micRestartTimer);
-          micRestartTimer = setTimeout(startMicRecognizer, 220);
-        }
-      };
-
-      startMicRecognizer();
-    }
-
-    // =========================================================================
-    // INTERACTIVE CONCEPT KNOWLEDGE GRAPH (MCP `wiki_get_knowledge_graph`)
-    // =========================================================================
-    async function loadMcpKnowledgeGraph() {
-      try {
-        const mcpReq = {
-          jsonrpc: '2.0',
-          id: Date.now(),
-          method: 'tools/call',
-          params: {
-            name: 'wiki_get_knowledge_graph',
-            arguments: { max_nodes: 60 }
-          }
-        };
-        const r = await fetch('/api/mcp', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(mcpReq)
-        });
-        const mcpRes = await r.json();
-        const rawText = mcpRes?.result?.content?.[0]?.text || '{}';
-        cachedGraphData = JSON.parse(rawText);
-        const stats = cachedGraphData.stats || {};
-        const label = `${stats.concept_count || stats.node_count || 0} concetti · ${stats.edge_count || 0} relazioni`;
-        const sidebarStats = document.getElementById('sidebar-graph-stats');
-        if (sidebarStats) sidebarStats.textContent = label;
-        const navCount = document.getElementById('nav-graph-count');
-        if (navCount) navCount.textContent = `(${stats.node_count || 0})`;
-        computeConceptLayout(cachedGraphData);
-        renderKnowledgeGraphSvg();
-      } catch (err) {
-        console.error("Errore loadMcpKnowledgeGraph:", err);
-      }
-    }
-
-    function setGraphFilter(filter, el) {
-      currentGraphFilter = filter;
-      document.querySelectorAll('#graph-filter-pills .pill').forEach(p => p.classList.remove('active'));
-      if (el) el.classList.add('active');
-      renderKnowledgeGraphSvg();
-    }
-
-    function zoomGraph(factor) {
-      graphZoom = Math.max(0.45, Math.min(2.6, graphZoom * factor));
-      renderKnowledgeGraphSvg();
-    }
-
-    function resetGraphView() {
-      graphZoom = 1.0;
-      graphPanX = 0;
-      graphPanY = 0;
-      computeConceptLayout(cachedGraphData, true);
-      renderKnowledgeGraphSvg();
-    }
-
-    function computeConceptLayout(graph, forceReset = false) {
-      const nodes = graph.nodes || [];
-      const W = 920, H = 560, cx = W / 2, cy = H / 2;
-      const primaryConcepts = nodes.filter(n => n.kind === 'concept');
-      const otherNodes = nodes.filter(n => n.kind !== 'hub' && n.kind !== 'concept');
-
-      nodes.forEach((n) => {
-        if (!forceReset && nodePositions[n.id]) return;
-        if (n.kind === 'hub') {
-          nodePositions[n.id] = { x: cx, y: cy };
-          return;
-        }
-        const pIdx = primaryConcepts.findIndex(c => c.id === n.id);
-        if (pIdx !== -1) {
-          const ring = (pIdx % 2 === 0) ? 155 : 210;
-          const angle = (2 * Math.PI * pIdx) / Math.max(1, primaryConcepts.length) - Math.PI / 2;
-          nodePositions[n.id] = {
-            x: Math.round(cx + ring * Math.cos(angle)),
-            y: Math.round(cy + ring * Math.sin(angle))
-          };
-          return;
-        }
-        const oIdx = Math.max(0, otherNodes.findIndex(o => o.id === n.id));
-        const ring = 250;
-        const angle = (2 * Math.PI * oIdx) / Math.max(1, otherNodes.length) + 0.35;
-        nodePositions[n.id] = {
-          x: Math.round(cx + ring * Math.cos(angle)),
-          y: Math.round(cy + ring * Math.sin(angle))
-        };
-      });
-    }
-
-    function nodeMatchesFilter(n, q) {
-      if (q) {
-        const hay = `${n.label || ''} ${n.summary || ''} ${n.category || ''}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      if (currentGraphFilter === 'all') return true;
-      if (n.kind === 'hub') return true;
-      if (currentGraphFilter === 'concept') return n.kind === 'concept';
-      if (currentGraphFilter === 'memoria') return n.category === 'memoria';
-      if (currentGraphFilter === 'agenti') return n.category === 'agenti';
-      if (currentGraphFilter === 'voce') return n.category === 'voce';
-      if (currentGraphFilter === 'sicurezza') return n.category === 'sicurezza';
-      if (currentGraphFilter === 'insight') return n.kind === 'insight';
-      if (currentGraphFilter === 'skill') return n.kind === 'skill';
-      if (currentGraphFilter === 'task') return (n.kind || '').startsWith('task_');
-      return n.category === currentGraphFilter;
-    }
-
-    function renderKnowledgeGraphSvg() {
-      const svg = document.getElementById('mcp-graph-svg');
-      if (!svg) return;
-      const q = (document.getElementById('graph-search-input')?.value || '').trim().toLowerCase();
-      const allNodes = cachedGraphData.nodes || [];
-      const allEdges = cachedGraphData.edges || [];
-      const nodes = allNodes.filter(n => nodeMatchesFilter(n, q));
-      const visibleIds = new Set(nodes.map(n => n.id));
-      const edges = allEdges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target));
-
-      if (!nodes.length) {
-        svg.innerHTML = '<text x="460" y="280" fill="#94a3b8" text-anchor="middle" font-size="14">Nessun concetto corrispondente al filtro selezionato</text>';
-        return;
-      }
-
-      const colorByKind = {
-        hub: '#38bdf8',
-        concept: '#c084fc',
-        insight: '#34d399',
-        skill: '#fbbf24',
-        task_active: '#fbbf24',
-        task_archived: '#818cf8'
-      };
-      const catColor = {
-        memoria: '#38bdf8',
-        architettura: '#c084fc',
-        agenti: '#fbbf24',
-        voce: '#34d399',
-        sicurezza: '#f87171'
-      };
-
-      let html = `<g transform="translate(${graphPanX}, ${graphPanY}) scale(${graphZoom})">`;
-
-      // Render semantic edges with relation labels
-      edges.forEach(e => {
-        const s = nodePositions[e.source];
-        const t = nodePositions[e.target];
-        if (!s || !t) return;
-        const mx = (s.x + t.x) / 2;
-        const my = (s.y + t.y) / 2;
-        const stroke = e.kind === 'macro' ? '#fbbf24' : (e.kind === 'insight_link' ? '#34d399' : '#2b3f66');
-        const dash = e.kind === 'macro' ? 'stroke-dasharray="5,4"' : '';
-        html += `
-          <line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${stroke}" stroke-width="1.8" ${dash} opacity="0.82" />
-          <text x="${mx}" y="${my - 4}" fill="#64748b" font-size="9.5" font-family="monospace" text-anchor="middle">${e.relation || ''}</text>
-        `;
-      });
-
-      // Render interactive concept nodes (pill/circle badges)
-      nodes.forEach(n => {
-        const p = nodePositions[n.id];
-        if (!p) return;
-        const isCore = !!n.is_framework_core;
-        const col = n.kind === 'concept' ? (catColor[n.category] || '#c084fc') : (colorByKind[n.kind] || '#38bdf8');
-        const r = n.kind === 'hub' ? 18 : (n.kind === 'concept' ? 13 : 10);
-        const safeId = n.id.replace(/'/g, "\\'");
-        const label = n.label || n.key;
-        const coreBorder = isCore ? 'stroke="#38bdf8" stroke-width="3"' : 'stroke="#070b14" stroke-width="2"';
-        html += `
-          <g style="cursor:pointer;" onmousedown="startDragNode(event, '${safeId}')" onclick="inspectConceptById('${safeId}')">
-            <circle cx="${p.x}" cy="${p.y}" r="${r + 5}" fill="${col}" opacity="${isCore ? '0.28' : '0.14'}" />
-            <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${col}" ${coreBorder} />
-            ${isCore ? `<circle cx="${p.x}" cy="${p.y}" r="${r + 2.5}" fill="none" stroke="#fff" stroke-width="1" opacity="0.8" />` : ''}
-            <rect x="${p.x - Math.min(115, label.length * 3.8 + 10)}" y="${p.y + r + 5}" width="${Math.min(230, label.length * 7.6 + 20)}" height="19" rx="5" fill="rgba(7,11,20,0.88)" stroke="${isCore ? 'rgba(56,189,248,0.5)' : 'rgba(192,132,252,0.3)'}" />
-            <text x="${p.x}" y="${p.y + r + 18}" fill="#f1f5f9" font-size="11" font-weight="600" text-anchor="middle">${label}</text>
-          </g>
-        `;
-      });
-
-      html += `</g>`;
-      svg.innerHTML = html;
-    }
-
-    function startDragNode(event, nodeId) {
-      event.stopPropagation();
-      draggedNodeId = nodeId;
-    }
-
-    // Setup pan & node drag on the central SVG canvas
-    (function initGraphCanvasInteractions() {
-      window.addEventListener('DOMContentLoaded', () => {
-        const wrap = document.getElementById('graph-canvas-container');
-        const svg = document.getElementById('mcp-graph-svg');
-        if (!wrap || !svg) return;
-
-        wrap.addEventListener('mousedown', (e) => {
-          if (draggedNodeId) return;
-          isPanningGraph = true;
-          panStartX = e.clientX - graphPanX;
-          panStartY = e.clientY - graphPanY;
-        });
-
-        window.addEventListener('mousemove', (e) => {
-          if (draggedNodeId && nodePositions[draggedNodeId]) {
-            const rect = svg.getBoundingClientRect();
-            const svgX = ((e.clientX - rect.left) * (920 / rect.width) - graphPanX) / graphZoom;
-            const svgY = ((e.clientY - rect.top) * (560 / rect.height) - graphPanY) / graphZoom;
-            nodePositions[draggedNodeId] = { x: Math.round(svgX), y: Math.round(svgY) };
-            renderKnowledgeGraphSvg();
-          } else if (isPanningGraph) {
-            graphPanX = e.clientX - panStartX;
-            graphPanY = e.clientY - panStartY;
-            renderKnowledgeGraphSvg();
-          }
-        });
-
-        window.addEventListener('mouseup', () => {
-          draggedNodeId = null;
-          isPanningGraph = false;
-        });
-      });
-    })();
-
-    // =========================================================================
-    // CONCEPT INSPECTOR, DYNAMIC CONFIG FORM & USER CONCEPT DELETION
-    // =========================================================================
-    function inspectConceptById(nodeId) {
-      selectedConceptNode = (cachedGraphData.nodes || []).find(n => n.id === nodeId);
-      if (!selectedConceptNode) return;
-      const node = selectedConceptNode;
-
-      const isCore = !!node.is_framework_core;
-      const badgeEl = document.getElementById('cd-badge');
-      badgeEl.textContent = isCore ? `🔒 PILASTRO FRAMEWORK (${(node.category || 'core').toUpperCase()})` : `✨ CONCETTO UTENTE (${(node.category || 'utente').toUpperCase()})`;
-      badgeEl.style.background = isCore ? 'rgba(56,189,248,0.2)' : 'rgba(192,132,252,0.2)';
-      badgeEl.style.borderColor = isCore ? 'var(--accent)' : 'var(--purple)';
-
-      document.getElementById('cd-title').textContent = node.label || node.key;
-      document.getElementById('cd-summary-l1').textContent = node.summary || 'Nessuna sintesi L1 disponibile.';
-      document.getElementById('cd-summary-l2').textContent = node.summary_medium || node.summary || 'Nessun dettaglio L2 aggiuntivo.';
-
-      // Dynamic Config Form
-      const cfgForm = document.getElementById('cd-config-form');
-      const cfg = node.config || {};
-      const cfgKeys = Object.keys(cfg);
-
-      if (cfgKeys.length > 0) {
-        let formHtml = `<div style="margin-bottom:8px; font-weight:600; color:#e2e8f0;">Modifica parametri del concetto:</div>`;
-        cfgKeys.forEach(k => {
-          const val = cfg[k];
-          const isNum = typeof val === 'number';
-          formHtml += `
-            <div class="cfg-row">
-              <label>${k.replace(/_/g, ' ').toUpperCase()}:</label>
-              <input id="cfg-input-${k}" type="${isNum ? 'number' : 'text'}" value="${val}" style="padding:4px 8px; font-size:0.77rem; width:100%;" />
-            </div>
-          `;
-        });
-        formHtml += `
-          <button class="btn" style="width:100%; justify-content:center; margin-top:6px;" onclick="saveSelectedConceptConfig('${node.id}')">
-            💾 Salva Configurazione Concetto
-          </button>
-        `;
-        cfgForm.innerHTML = formHtml;
-      } else {
-        cfgForm.innerHTML = `
-          <div style="color:var(--muted); font-size:0.75rem; margin-bottom:6px;">Questo concetto non ha parametri personalizzati definiti.</div>
-          <button class="btn btn-ghost" style="font-size:0.72rem;" onclick="addCustomConfigField('${node.id}')">+ Aggiungi Parametro</button>
-        `;
-      }
-
-      // Deletion Box
-      const delBox = document.getElementById('cd-delete-box');
-      if (isCore) {
-        delBox.innerHTML = `
-          <div style="font-size:0.72rem; color:var(--muted); background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:7px; padding:6px 9px;">
-            🔒 <b>Pilastro del Framework:</b> Questo concetto è fondamentale per l'architettura di Cortical e non può essere eliminato. Puoi tuttavia configurarne i parametri operativi qui sopra.
-          </div>
-        `;
-      } else {
-        delBox.innerHTML = `
-          <button class="btn btn-danger" style="width:100%; justify-content:center;" onclick="deleteSelectedConcept('${node.id}')">
-            🗑️ Elimina Concetto dalla Memoria
-          </button>
-        `;
-      }
-
-      // Connected Edges
-      const connected = (cachedGraphData.edges || [])
-        .filter(e => e.source === node.id || e.target === node.id)
-        .map(e => {
-          const otherId = e.source === node.id ? e.target : e.source;
-          const otherNode = (cachedGraphData.nodes || []).find(n => n.id === otherId);
-          return `• [${e.relation}] → ${otherNode ? otherNode.label : otherId}`;
-        });
-      document.getElementById('cd-connections').textContent = connected.length ? connected.join('\\n') : 'Nessuna connessione diretta.';
-      document.getElementById('cd-sources').textContent = (node.sources || ['/']).join(', ');
-    }
-
-    async function saveSelectedConceptConfig(conceptId) {
-      if (!selectedConceptNode) return;
-      const cfg = selectedConceptNode.config || {};
-      const updates = {};
-      Object.keys(cfg).forEach(k => {
-        const input = document.getElementById(`cfg-input-${k}`);
-        if (input) {
-          const origType = typeof cfg[k];
-          if (origType === 'number') {
-            updates[k] = parseFloat(input.value) || 0;
-          } else {
-            updates[k] = input.value;
-          }
-        }
-      });
-
-      try {
-        const r = await fetch('/api/graph/concept/config', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ concept_id: conceptId, config: updates })
-        });
-        const d = await r.json();
-        appendStreamCard(
-          'system',
-          'CONCEPT CONFIG UPDATED',
-          conceptId,
-          `Configurazione aggiornata per ${selectedConceptNode.label || conceptId}`,
-          JSON.stringify(d, null, 2)
-        );
-        await loadMcpKnowledgeGraph();
-        inspectConceptById(conceptId);
-      } catch (err) {
-        alert("Errore salvataggio configurazione: " + err.message);
-      }
-    }
-
-    async function deleteSelectedConcept(nodeId) {
-      if (!confirm(`Sei sicuro di voler eliminare definitivamente il concetto "${nodeId}" dal grafo della memoria?`)) return;
-      try {
-        const r = await fetch('/api/graph/concept/delete', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ node_id: nodeId })
-        });
-        const d = await r.json();
-        if (d.error) {
-          alert(`Eliminazione non consentita: ${d.error}`);
-          return;
-        }
-        appendStreamCard(
-          'permission',
-          'CONCEPT DELETED FROM MEMORY',
-          nodeId,
-          `🗑️ Concetto "${nodeId}" eliminato con successo dal grafo della conoscenza.`,
-          ''
-        );
-        selectedConceptNode = null;
-        document.getElementById('cd-title').textContent = "Seleziona un concetto";
-        document.getElementById('cd-config-form').innerHTML = "Clicca su un nodo del grafo per configurarne i parametri.";
-        document.getElementById('cd-delete-box').innerHTML = "";
-        await loadMcpKnowledgeGraph();
-      } catch (err) {
-        alert("Errore cancellazione concetto: " + err.message);
-      }
-    }
-
-    function addCustomConfigField(conceptId) {
-      const key = prompt("Nome del nuovo parametro (es: timeout_sec, model_override):");
-      if (!key) return;
-      const val = prompt(`Valore per ${key}:`, "default");
-      if (val === null) return;
-      if (!selectedConceptNode.config) selectedConceptNode.config = {};
-      selectedConceptNode.config[key] = val;
-      saveSelectedConceptConfig(conceptId);
-    }
-
-    // =========================================================================
-    // SMART MEMORY, 3+1 WIKI & PERMISSION GATE
-    // =========================================================================
-    async function loadSmartMemory() {
-      try {
-        const r = await fetch('/api/memory/state');
-        const d = await r.json();
-        const memView = document.getElementById('memory-state-view');
-        if (memView) memView.textContent = JSON.stringify(d, null, 2);
-      } catch (err) {
-        console.error("Errore loadSmartMemory:", err);
-      }
-    }
-
-    async function navigateWiki(path = '/') {
-      currentWikiPath = path;
-      const depth = document.getElementById('wiki-depth').value;
-      try {
-        const r = await fetch(`/api/wiki/navigate?path=${encodeURIComponent(path)}&depth=${depth}`);
-        const d = await r.json();
-        const wikiView = document.getElementById('wiki-node-view');
-        if (wikiView) wikiView.textContent = JSON.stringify(d, null, 2);
-
-        const children = d.children || [];
-        const tree = document.getElementById('wiki-tree');
-        if (tree) {
-          let html = '';
-          if (path !== '/') {
-            const parent = d.parent_path || '/';
-            html += `<div class="tree-node" onclick="navigateWiki('${parent}')"><span>⬅️ .. (${parent})</span><span>DIR</span></div>`;
-          }
-          html += children.map(c => `
-            <div class="tree-node" onclick="navigateWiki('${c.path}')">
-              <span>${c.node_type === 'dir' ? '📁' : '📄'} ${c.path.split('/').pop() || '/'}</span>
-              <span style="color:var(--muted); font-size:0.7rem;">${c.node_type}</span>
-            </div>
-          `).join('');
-          tree.innerHTML = html || `<div class="tree-node" onclick="navigateWiki('/')"><span>📁 / (Torna a root)</span></div>`;
-        }
-      } catch (err) {
-        console.error("Errore navigateWiki:", err);
-      }
-    }
-
-    async function searchWiki() {
-      const q = document.getElementById('wiki-search-input').value;
-      const depth = document.getElementById('wiki-depth').value;
-      const r = await fetch(`/api/wiki/search?q=${encodeURIComponent(q)}&depth=${depth}`);
-      document.getElementById('wiki-node-view').textContent = JSON.stringify(await r.json(), null, 2);
-    }
-
-    async function loadSkillsHub() {
-      try {
-        const r = await fetch('/api/skills/state');
-        const d = await r.json();
-        const box = document.getElementById('skills-list-view');
-        const skills = d.skills || [];
-        if (box) {
-          box.innerHTML = skills.map(s => `
-            <div style="background:rgba(15,23,42,0.85); border:1px solid ${s.category === 'memory_tier' ? 'rgba(56,189,248,0.4)' : s.category === 'learned' ? 'rgba(52,211,153,0.4)' : 'var(--border)'}; border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:0.77rem;">
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <b style="color:${s.category === 'memory_tier' ? 'var(--accent)' : s.category === 'learned' ? 'var(--emerald)' : '#f8fafc'};">${s.name}</b>
-                <span class="status-pill" style="background:rgba(255,255,255,0.06); color:var(--muted);">${s.category}</span>
-              </div>
-              <div style="color:var(--muted); margin-top:3px;">${s.description}</div>
-            </div>
-          `).join('');
-        }
-      } catch (err) {
-        console.error("Errore loadSkillsHub:", err);
-      }
-    }
-
-    async function testPromptEnhancer() {
-      const prompt = document.getElementById('skill-test-input').value.trim();
-      if (!prompt) return;
-      const r = await fetch('/api/skills/enhance', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({prompt})
-      });
-      const d = await r.json();
-      document.getElementById('skill-enhance-view').textContent =
-        `[Mode]: ${d.mode} | [Livello 3+1]: ${d.recommended_depth}\\n` +
-        `[Memory Skill]: ${d.memory_tier_skill}\\n` +
-        `[Procedural Skills]: ${(d.selected_procedural_skills || []).join(', ')}\\n` +
-        `[Team Roster]: ${(d.team_roster || []).map(x => x.id).join(' -> ')}\\n\\n` +
-        (d.context_injection || '(Conversazione casual: nessun overhead iniettato)');
-    }
-
-    async function evalPerm() {
-      const tool = document.getElementById('perm-tool').value;
-      const cmd = document.getElementById('perm-cmd').value;
-      const r = await fetch('/api/permissions/evaluate', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({tool, args: {command: cmd, path: cmd}})
-      });
-      document.getElementById('perm-view').textContent = JSON.stringify(await r.json(), null, 2);
-    }
-
-    async function feedbackPerm(approved) {
-      const tool = document.getElementById('perm-tool').value;
-      const cmd = document.getElementById('perm-cmd').value;
-      const r = await fetch('/api/permissions/feedback', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({tool, args: {command: cmd, path: cmd}, approved, remember: true})
-      });
-      document.getElementById('perm-view').textContent = JSON.stringify(await r.json(), null, 2);
-    }
-
-    function testHardBlock() {
-      document.getElementById('perm-tool').value = 'bash';
-      document.getElementById('perm-cmd').value = 'rm -rf /';
-      evalPerm();
-    }
-
-    // =========================================================================
-    // BOOTSTRAP INITIALIZATION
-    // =========================================================================
-    window.addEventListener('DOMContentLoaded', () => {
-      initHelpTooltips();
-      applyUiTranslations(uiLang);
-      loadHealth();
-      loadScopedContext();
-      navigateWiki('/');
-      loadMcpKnowledgeGraph();
-      loadSmartMemory();
-      loadSkillsHub();
-      setInterval(refreshAgents, 2000);
-    });
-  </script>
-</body>
-</html>
-"""
+UI_DIR = Path(__file__).with_name("ui").resolve()
+DASHBOARD_HTML = Path(__file__).with_name("dashboard.html").read_text(encoding="utf-8")
+
+_UI_MIME_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".html": "text/html; charset=utf-8",
+}
+
+
+def resolve_ui_asset(url_path: str) -> Optional[tuple[bytes, str]]:
+    """Safely resolves a static frontend asset under `/ui/` without allowing path traversal."""
+    if not url_path.startswith("/ui/"):
+        return None
+    rel = url_path[4:].lstrip("/")
+    if not rel or ".." in Path(rel).parts:
+        return None
+    candidate = (UI_DIR / rel).resolve()
+    try:
+        if not candidate.is_relative_to(UI_DIR) or not candidate.is_file():
+            return None
+    except ValueError:
+        return None
+    mime = _UI_MIME_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
+    return (candidate.read_bytes(), mime)
 
 
 class CorticalLiveService:
@@ -3269,12 +2244,54 @@ class CorticalLiveService:
         self.hw_profile = self.profiler.detect()
         self.model_rec = self.profiler.recommend_models(self.hw_profile)
 
-        def _reflex(prompt: str) -> str:
-            return query_local_reflex_llm(prompt, self.model_rec.active_base_url)
+        def _resolve_role(role_id: str) -> dict[str, Any]:
+            orch_cfg = self.wiki_db.get_concept_config(AccessContext(), "concept:orchestratore-multi-agente")
+            return resolve_role_execution(orch_cfg, role_id)
 
-        self.memory_curator = MemoryCurator(self.wiki_db, llm_fn=_reflex)
-        self.skill_hub = CorticalSkillHub(self.wiki_db, self.repo_root / ".pi" / "skills", llm_fn=_reflex)
+        def _reflex_for_role(role_id: str):
+            def _fn(prompt: str) -> str:
+                r = _resolve_role(role_id)
+                return query_local_reflex_llm(
+                    prompt,
+                    self.model_rec.active_base_url,
+                    preferred_model=r["model"],
+                    context_window=r["context_window"],
+                    effort=r["effort"],
+                )
+            return _fn
+
+        self.memory_curator = MemoryCurator(self.wiki_db, llm_fn=_reflex_for_role("memory_curator"))
+        agents_skills = self.repo_root / ".agents" / "skills"
+        legacy_skills = self.repo_root / ".pi" / "skills"
+        skills_dir = agents_skills if (agents_skills.exists() or not legacy_skills.exists()) else legacy_skills
+        self.skill_hub = CorticalSkillHub(self.wiki_db, skills_dir, llm_fn=_reflex_for_role("skill_compiler"))
         self.mcp_server = CorticalWikiMCPServer(wiki_db_path)
+
+        self.audio_responses_enabled: bool = True
+        self._current_chat_scope = threading.local()
+        self._dispatch_speak_flag = threading.local()
+
+        def _reflex_with_context(prompt: str) -> str:
+            active_scope = getattr(self._current_chat_scope, "value", "chat") or "chat"
+            extra_ctx, hist = build_chat_context(self.wiki_db, self.memory_curator, prompt, scope_id=active_scope)
+            orch_cfg = self.wiki_db.get_concept_config(AccessContext(), "concept:orchestratore-multi-agente")
+            scope_prefs = ((orch_cfg.get("scope_preferences") or {}).get(active_scope)) or {}
+            role_id = "chat" if active_scope == "chat" else "coordinator"
+            r_chat = _resolve_role(role_id)
+            r_browser = _resolve_role("browser_agent")
+            return query_local_reflex_llm(
+                prompt,
+                self.model_rec.active_base_url,
+                extra_context=extra_ctx,
+                chat_history=hist,
+                preferred_model=r_chat["model"],
+                context_window=r_chat["context_window"],
+                effort=r_chat["effort"],
+                browser_model=r_browser["model"],
+                browser_context_window=r_browser["context_window"],
+                strategy_override=str(scope_prefs.get("context_strategy") or "auto"),
+                thinking_mode=str(scope_prefs.get("thinking_mode") or "auto"),
+            )
 
         self.agent_mgr = PiAgentManager(
             repo_root=self.repo_root,
@@ -3282,10 +2299,14 @@ class CorticalLiveService:
             memory_curator=self.memory_curator,
             perm_gate=self.perm_gate,
             base_url_fn=lambda: self.model_rec.active_base_url,
+            skill_hub=self.skill_hub,
+            audio_enabled_fn=lambda: self.audio_responses_enabled,
         )
 
         def _dispatch_agentic(goal: str) -> str:
-            sess = self.agent_mgr.spawn_agent(goal=goal, wiki_depth="medium", speak_on_finish=True)
+            req_speak = getattr(self._dispatch_speak_flag, "value", None)
+            should_speak = self.audio_responses_enabled if req_speak is None else bool(req_speak and self.audio_responses_enabled)
+            sess = self.agent_mgr.spawn_agent(goal=goal, role="Coordinator", wiki_depth="medium", speak_on_finish=should_speak)
             return str(sess["session_id"])
 
         def _on_stop() -> None:
@@ -3298,12 +2319,252 @@ class CorticalLiveService:
         self.voice_engine = CorticalVoiceEngine(
             wiki_db=self.wiki_db,
             permission_gate=self.perm_gate,
-            reflex_llm_fn=_reflex,
+            reflex_llm_fn=_reflex_with_context,
             agentic_dispatch_fn=_dispatch_agentic,
             stop_callback=_on_stop,
             duck_callback=_on_duck,
             memory_curator=self.memory_curator,
+            sessions_status_fn=self.agent_mgr.list_sessions,
         )
+
+    def _discover_catalog(self) -> dict[str, Any]:
+        """Discovers installable/attachable Skills, Plugins, and MCP servers in the workspace."""
+        skills = [
+            {
+                "name": s.name,
+                "description": s.description,
+                "category": s.category,
+                "path": str(s.path),
+            }
+            for s in self.skill_hub.discover_skills()
+        ]
+        plugins = [
+            {"name": "plugin:weather-grounding", "description": "Meteo & Browser Open-Meteo Grounding"},
+            {"name": "plugin:adaptive-permission-gate", "description": "Controllo sicurezza & approvazioni comandi"},
+        ]
+        plugins_dir = self.repo_root / ".agents" / "plugins"
+        if plugins_dir.is_dir():
+            for child in sorted(plugins_dir.iterdir()):
+                if child.is_dir():
+                    plugins.append({"name": f"plugin:{child.name}", "path": str(child), "description": f"Plugin locale ({child.name})"})
+
+        mcp_servers: list[dict[str, Any]] = []
+        mcp_json = self.repo_root / ".pi" / "mcp.json"
+        if mcp_json.is_file():
+            try:
+                raw = json.loads(mcp_json.read_text(encoding="utf-8"))
+                for name, cfg in (raw.get("mcpServers") or {}).items():
+                    mcp_servers.append({
+                        "name": f"mcp:{name}",
+                        "description": str(cfg.get("description") or cfg.get("command") or name),
+                        "path": str(mcp_json),
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+        if not any(m["name"] == "mcp:cortical-wiki" for m in mcp_servers):
+            mcp_servers.append({"name": "mcp:cortical-wiki", "description": "Cortical 4-Tier Merkle Second Brain MCP"})
+        if not any(m["name"] == "mcp:chrome-devtools" for m in mcp_servers):
+            mcp_servers.append({"name": "mcp:chrome-devtools", "description": "Chrome DevTools DOM & Browser Automation MCP"})
+        return {"skills": skills, "plugins": plugins, "mcp_servers": mcp_servers}
+
+    def _browse_fs(self, raw_path: Optional[str]) -> dict[str, Any]:
+        """Lists folders and files cleanly for UI skill/plugin/MCP/file browsing."""
+        target = Path(raw_path).expanduser() if raw_path else self.repo_root
+        try:
+            resolved = target.resolve()
+        except Exception:  # noqa: BLE001
+            resolved = self.repo_root
+        if not resolved.exists() or not resolved.is_dir():
+            resolved = self.repo_root
+        entries: list[dict[str, Any]] = []
+        try:
+            children = sorted(resolved.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError:
+            children = []
+        for p in children[:160]:
+            if p.name.startswith(".") and p.name not in {".agents", ".pi"}:
+                continue
+            if p.name in {"node_modules", "__pycache__", ".venv", ".git"}:
+                continue
+            hint = "folder" if p.is_dir() else "file"
+            if p.is_dir() and (p / "SKILL.md").is_file():
+                hint = "skill"
+            elif p.is_dir() and ((p / "package.json").is_file() or (p / ".pi-plugin").exists()):
+                hint = "plugin"
+            elif p.is_file() and (p.name == "mcp.json" or p.name.endswith(".mcp.json") or p.name == "opencode.json"):
+                hint = "mcp"
+            entries.append({
+                "name": p.name,
+                "path": str(p),
+                "is_dir": p.is_dir(),
+                "hint": hint,
+            })
+        parent = str(resolved.parent) if resolved.parent != resolved else str(resolved)
+        return {"current_path": str(resolved), "parent_path": parent, "entries": entries}
+
+    def _import_context_item(
+        self,
+        ctx: AccessContext,
+        *,
+        scope_id: str,
+        item_type: str,
+        item_ref: str,
+        depth_tier: str = "medium",
+    ) -> dict[str, Any]:
+        """Imports a Skill folder, Plugin folder, or MCP JSON from disk and attaches it to scope_id."""
+        ref_path = Path(item_ref).expanduser()
+        eff_type = item_type.lower().strip()
+        eff_ref = item_ref.strip()
+        eff_label: Optional[str] = None
+        if eff_type == "skill" and ref_path.exists():
+            src_dir = ref_path.parent if ref_path.is_file() and ref_path.name == "SKILL.md" else ref_path
+            if (src_dir / "SKILL.md").is_file():
+                slug = re.sub(r"[^a-z0-9_-]+", "-", src_dir.name.lower()).strip("-") or "imported-skill"
+                dest_dir = self.skill_hub.skills_root / slug
+                if src_dir.resolve() != dest_dir.resolve():
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_dir / "SKILL.md", dest_dir / "SKILL.md")
+                eff_ref = slug
+                eff_label = slug
+        elif eff_type == "mcp" and ref_path.is_file():
+            try:
+                cfg = json.loads(ref_path.read_text(encoding="utf-8"))
+                servers = cfg.get("mcpServers") or (cfg.get("mcp") or {}).get("servers") or {}
+                if isinstance(servers, dict) and servers:
+                    first_name = next(iter(servers.keys()))
+                    mcp_file = self.repo_root / ".pi" / "mcp.json"
+                    mcp_file.parent.mkdir(parents=True, exist_ok=True)
+                    existing = json.loads(mcp_file.read_text(encoding="utf-8")) if mcp_file.is_file() else {"mcpServers": {}}
+                    existing.setdefault("mcpServers", {}).update(servers)
+                    mcp_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                    eff_ref = f"mcp:{first_name}"
+                    eff_label = eff_ref
+            except Exception:  # noqa: BLE001
+                pass
+        elif eff_type == "plugin" and ref_path.is_dir():
+            eff_label = f"plugin:{ref_path.name}"
+        return self.wiki_db.attach_context_item(
+            ctx,
+            scope_id=scope_id,
+            item_type=eff_type,
+            item_ref=eff_ref,
+            depth_tier=depth_tier,
+            label=eff_label,
+        )
+
+    def _get_models_config_payload(self, ctx: AccessContext, scope_id: str = "chat") -> dict[str, Any]:
+        orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+        roles = get_all_roles(orch_cfg)
+        role_models = {f"{r['id']}_model": r["model"] for r in roles}
+        role_context_windows = {r["id"]: r["context_window"] for r in roles}
+        role_efforts = {r["id"]: r["effort"] for r in roles}
+
+        raw_windows = orch_cfg.get("model_context_windows")
+        configured_windows: dict[str, int] = dict(raw_windows) if isinstance(raw_windows, dict) else {}
+        base_url = self.model_rec.active_base_url or "http://127.0.0.1:11434"
+        ollama_detailed = list_ollama_models_detailed(base_url)
+        detailed_by_name = {m["name"]: m for m in ollama_detailed}
+        discovered = [m["name"] for m in ollama_detailed] or discover_ollama_models(base_url)
+        all_models = sorted(
+            {
+                *discovered,
+                *[r["model"] for r in roles],
+                *configured_windows.keys(),
+            }
+            - {""}
+        )
+        models_info = []
+        for m in all_models:
+            det = detailed_by_name.get(m, {})
+            models_info.append(
+                {
+                    "model": m,
+                    "context_window": get_model_context_window(m, configured_windows),
+                    "installed": m in discovered,
+                    "size_gb": det.get("size_gb", 0.0),
+                    "digest": det.get("digest", ""),
+                    "parameter_size": det.get("parameter_size", ""),
+                    "quantization": det.get("quantization", ""),
+                    "is_duplicate": bool(det.get("is_duplicate", False)),
+                    "is_hf": bool(det.get("is_hf", m.startswith("hf.co/"))),
+                }
+            )
+        # Compute live context occupancy telemetry for the active scope
+        ctx_str, hist_msgs = build_chat_context(self.wiki_db, self.memory_curator, "", scope_id=scope_id)
+        active_role = resolve_role_execution(orch_cfg, "chat" if scope_id == "chat" else "coordinator")
+        active_model = active_role["model"]
+        active_win = active_role["context_window"]
+        scope_prefs_all = orch_cfg.get("scope_preferences") if isinstance(orch_cfg.get("scope_preferences"), dict) else {}
+        cur_prefs = dict(scope_prefs_all.get(scope_id) or {})
+        cur_prefs.setdefault("context_strategy", "auto")
+        cur_prefs.setdefault("thinking_mode", "auto")
+        fitted = fit_context_to_window(
+            system_prompt="Cortical Mission Control",
+            user_prompt="",
+            extra_context=ctx_str,
+            history_messages=hist_msgs,
+            context_window_tokens=active_win,
+            strategy_override=str(cur_prefs["context_strategy"]),
+        )
+        telemetry = dict(fitted["telemetry"])
+        telemetry["active_model"] = active_model
+        telemetry["scope_id"] = scope_id
+        telemetry["thinking_mode"] = cur_prefs["thinking_mode"]
+        return {
+            "available_models": all_models,
+            "models": models_info,
+            "roles": roles,
+            "role_models": role_models,
+            "role_context_windows": role_context_windows,
+            "role_efforts": role_efforts,
+            "model_context_windows": {m["model"]: m["context_window"] for m in models_info},
+            "presets": RECOMMENDED_MODEL_PRESETS,
+            "context_telemetry": telemetry,
+            "scope_preferences": cur_prefs,
+        }
+
+    def _update_models_config(self, ctx: AccessContext, body: dict[str, Any]) -> dict[str, Any]:
+        orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+        updates: dict[str, Any] = {}
+        roles = get_all_roles(orch_cfg)
+        rm_in = body.get("role_models") if isinstance(body.get("role_models"), dict) else body
+        for r in roles:
+            rk = f"{r['id']}_model"
+            val = str(rm_in.get(rk, "")).strip()
+            if val:
+                updates[rk] = val
+
+        rcw_in = body.get("role_context_windows")
+        if isinstance(rcw_in, dict):
+            merged_rcw = dict(orch_cfg.get("role_context_windows") or {})
+            for rid, w_val in rcw_in.items():
+                rid_clean = str(rid or "").strip()
+                if rid_clean:
+                    merged_rcw[rid_clean] = clamp_context_window(w_val)
+            updates["role_context_windows"] = merged_rcw
+
+        reff_in = body.get("role_efforts")
+        if isinstance(reff_in, dict):
+            merged_eff = dict(orch_cfg.get("role_efforts") or {})
+            for rid, e_val in reff_in.items():
+                rid_clean = str(rid or "").strip()
+                if rid_clean and str(e_val).strip().lower() in ("low", "medium", "high"):
+                    merged_eff[rid_clean] = str(e_val).strip().lower()
+            updates["role_efforts"] = merged_eff
+
+        win_in = body.get("model_context_windows")
+        if isinstance(win_in, dict):
+            merged = dict(orch_cfg.get("model_context_windows") or {})
+            for m_id, w_val in win_in.items():
+                mid = str(m_id or "").strip()
+                if mid:
+                    merged[mid] = clamp_context_window(w_val)
+            updates["model_context_windows"] = merged
+            sync_pi_models_json(merged)
+
+        if updates:
+            self.wiki_db.update_concept_config(ctx, "concept:orchestratore-multi-agente", updates)
+        return self._get_models_config_payload(ctx, scope_id=str(body.get("scope_id", "chat")))
 
     def handle_api(
         self,
@@ -3342,22 +2603,36 @@ class CorticalLiveService:
             resp = self.mcp_server.handle_request(body)
             return (HTTPStatus.OK, resp or {})
 
-        # Scoped Context Attachments (Files, Folders, Skills, Plugins — ChatGPT / Claude Code style)
+        # Scoped Context Attachments (Files, Folders, Skills, Plugins, MCP — per-chat or per-task)
         if method == "GET" and path == "/api/context":
             scope_id = (query.get("scope_id") or [None])[0]
+            catalog = self._discover_catalog()
             return (
                 HTTPStatus.OK,
                 {
                     "attachments": self.wiki_db.list_context_attachments(ctx, scope_id=scope_id),
-                    "available_skills": [s.name for s in self.skill_hub.discover_skills()],
-                    "available_plugins": [
-                        "mcp:cortical-wiki",
-                        "mcp:chrome-devtools",
-                        "plugin:weather-grounding",
-                        "plugin:adaptive-permission-gate",
-                    ],
+                    "available_skills": [s["name"] for s in catalog["skills"]],
+                    "available_plugins": [p["name"] for p in catalog["plugins"]] + [m["name"] for m in catalog["mcp_servers"]],
+                    "catalog": catalog,
                 },
             )
+
+        if method == "GET" and path == "/api/fs/list":
+            raw_p = (query.get("path") or [None])[0]
+            return (HTTPStatus.OK, self._browse_fs(raw_p))
+
+        if method == "POST" and path == "/api/context/import":
+            try:
+                att = self._import_context_item(
+                    ctx,
+                    scope_id=str(body.get("scope_id", "chat")),
+                    item_type=str(body.get("item_type", "skill")),
+                    item_ref=str(body.get("item_ref", "")),
+                    depth_tier=str(body.get("depth_tier", "medium")),
+                )
+                return (HTTPStatus.OK, att)
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
         if method == "POST" and path == "/api/context/attach":
             try:
@@ -3401,6 +2676,45 @@ class CorticalLiveService:
             except PermissionError as exc:
                 return (HTTPStatus.FORBIDDEN, {"error": str(exc), "is_framework_core": True})
 
+        if method == "POST" and path == "/api/graph/concept/promote":
+            cid = str(body.get("concept_id", "")).strip()
+            title = str(body.get("title") or cid).strip()
+            summary = str(body.get("summary") or "").strip()
+            category = str(body.get("category") or "custom").strip()
+            if not cid:
+                return (HTTPStatus.BAD_REQUEST, {"error": "concept_id required"})
+            cfg_updates: dict[str, Any] = {"custom_label": title}
+            if summary:
+                cfg_updates["custom_summary"] = summary
+            if body.get("config") and isinstance(body["config"], dict):
+                cfg_updates.update(body["config"])
+            self.wiki_db.update_concept_config(ctx, cid, cfg_updates)
+
+            slug = re.sub(r"[^a-z0-9_-]+", "-", title.lower()).strip("-") or "concept-skill"
+            skill_name = f"concept-{slug[:40]}"
+            skill_dir = self.repo_root / ".agents" / "skills" / skill_name
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            cfg_lines = "\n".join(f"- `{k}`: `{v}`" for k, v in cfg_updates.items())
+            skill_md = (
+                f"---\nname: {skill_name}\n"
+                f"description: Global platform skill promoted from Cortical concept '{title}' ({category}).\n---\n\n"
+                f"# {title}\n\n{summary or 'Concetto globale promosso a skill di piattaforma Cortical.'}\n\n"
+                f"## Parametri Configurati\n{cfg_lines}\n"
+            )
+            skill_path = skill_dir / "SKILL.md"
+            skill_path.write_text(skill_md, encoding="utf-8")
+            self.wiki_db.update_concept_config(ctx, cid, {"promoted_skill": skill_name})
+            return (
+                HTTPStatus.OK,
+                {
+                    "status": "promoted",
+                    "concept_id": cid,
+                    "title": title,
+                    "skill_name": skill_name,
+                    "skill_path": str(skill_path),
+                },
+            )
+
         # Smart Memory & Task Lifecycle Endpoints
         if method == "GET" and path == "/api/memory/state":
             return (
@@ -3414,11 +2728,41 @@ class CorticalLiveService:
 
         if method == "POST" and path == "/api/tasks/close-preview":
             ep_id = str(body.get("episode_id", ""))
-            return (HTTPStatus.OK, self.memory_curator.prepare_task_closure(ep_id))
+            try:
+                return (HTTPStatus.OK, self.memory_curator.prepare_task_closure(ep_id))
+            except KeyError:
+                sess = self.agent_mgr.get_session(ep_id)
+                if sess is not None:
+                    self.wiki_db.record_episode(
+                        ctx,
+                        episode_id=ep_id,
+                        title=f"[{ep_id}] {str(sess.get('goal') or ep_id)[:52]}",
+                        goal=str(sess.get("goal") or ep_id),
+                        outcome_status="open",
+                        learned_summary=str(sess.get("final_report") or ""),
+                        skills_used=list(sess.get("skills") or []),
+                    )
+                    return (HTTPStatus.OK, self.memory_curator.prepare_task_closure(ep_id))
+                return (HTTPStatus.NOT_FOUND, {"error": f"Task '{ep_id}' not found."})
 
         if method == "POST" and path == "/api/tasks/archive":
             ep_id = str(body.get("episode_id", ""))
             notes = str(body.get("user_closing_notes", ""))
+            sess = self.agent_mgr.get_session(ep_id)
+            if sess is not None:
+                # Ensure row exists even if archiving a working/early task
+                try:
+                    self.memory_curator.prepare_task_closure(ep_id)
+                except KeyError:
+                    self.wiki_db.record_episode(
+                        ctx,
+                        episode_id=ep_id,
+                        title=f"[{ep_id}] {str(sess.get('goal') or ep_id)[:52]}",
+                        goal=str(sess.get("goal") or ep_id),
+                        outcome_status="open",
+                        learned_summary=str(sess.get("final_report") or ""),
+                        skills_used=list(sess.get("skills") or []),
+                    )
             synth = self.skill_hub.synthesize_task_discussion_3plus1(ep_id, notes)
             skill_eval = self.skill_hub.evaluate_and_compile_skill(ep_id, notes).to_dict()
             res = self.memory_curator.archive_task(ep_id, user_closing_notes=notes)
@@ -3427,6 +2771,66 @@ class CorticalLiveService:
             res["synthesis_3plus1"] = synth
             res["skill_evaluation"] = skill_eval
             return (HTTPStatus.OK, res)
+
+        if method == "POST" and path == "/api/tasks/reopen":
+            ep_id = str(body.get("episode_id", ""))
+            mem_res = self.memory_curator.reopen_task(ep_id)
+            ag_res = self.agent_mgr.reopen_session(ep_id)
+            return (HTTPStatus.OK, {**mem_res, **ag_res})
+
+        if method == "GET" and path == "/api/chats":
+            chat_scope = (query.get("scope_id") or ["chat"])[0] or "chat"
+            return (
+                HTTPStatus.OK,
+                {
+                    "chats": self.memory_curator.list_chats(ctx=ctx),
+                    "active_scope": chat_scope,
+                    "messages": self.memory_curator.get_recent_chat(limit=30, ctx=ctx, scope_id=chat_scope),
+                },
+            )
+
+        if method == "POST" and path == "/api/chats/create":
+            title = str(body.get("title", "")).strip()
+            created = self.memory_curator.create_chat(title=title, ctx=ctx)
+            return (HTTPStatus.OK, {"chat": created, "chats": self.memory_curator.list_chats(ctx=ctx)})
+
+        if method == "POST" and path == "/api/chats/delete":
+            cid = str(body.get("chat_id", "")).strip() or "chat"
+            res = self.memory_curator.delete_chat(cid, ctx=ctx)
+            res["chats"] = self.memory_curator.list_chats(ctx=ctx)
+            return (HTTPStatus.OK, res)
+
+        if method == "POST" and path == "/api/tasks/continue":
+            sid = str(body.get("session_id", "")).strip()
+            prompt = str(body.get("prompt", "")).strip()
+            depth = str(body.get("wiki_depth", "medium"))
+            effort = _normalize_effort(body.get("effort", "medium"))
+            speak = bool(body.get("speak", False) and self.audio_responses_enabled)
+            parallel = body.get("parallel") if isinstance(body.get("parallel"), bool) else None
+            auto_loop = body.get("auto_loop") if isinstance(body.get("auto_loop"), bool) else None
+            sess = self.agent_mgr.continue_session(
+                sid,
+                prompt,
+                wiki_depth=depth,
+                speak_on_finish=speak,
+                parallel=parallel,
+                auto_loop=auto_loop,
+                effort=effort,
+            )
+            if not sess:
+                return (HTTPStatus.NOT_FOUND, {"error": f"Task session {sid} not found"})
+            return (HTTPStatus.OK, sess)
+
+        if method == "GET" and path == "/api/tokens/summary":
+            ep_id = (query.get("episode_id") or [None])[0]
+            return (HTTPStatus.OK, self.wiki_db.get_token_usage_summary(ctx, episode_id=ep_id))
+
+        if method == "POST" and path == "/api/tasks/rename":
+            ep_id = str(body.get("episode_id") or body.get("session_id") or "").strip()
+            title = str(body.get("title") or "").strip()
+            if not ep_id or not title:
+                return (HTTPStatus.BAD_REQUEST, {"error": "Missing episode_id or title"})
+            return (HTTPStatus.OK, self.agent_mgr.rename_session(ep_id, title))
 
         if method == "POST" and path == "/api/tasks/delete":
             ep_id = str(body.get("episode_id", ""))
@@ -3438,6 +2842,61 @@ class CorticalLiveService:
             mem_res = self.memory_curator.clear_archived_tasks()
             ag_res = self.agent_mgr.clear_archived_sessions()
             return (HTTPStatus.OK, {**mem_res, **ag_res})
+
+        if method == "GET" and path == "/api/platform/sources":
+            sources = _scan_external_platform_skills(self.skill_hub.skills_root)
+            return (HTTPStatus.OK, {"sources": sources, "target_dir": str(self.skill_hub.skills_root)})
+
+        if method == "POST" and path == "/api/platform/import":
+            req_name = str(body.get("name", "")).strip()
+            req_path = str(body.get("path", "")).strip()
+            sources = _scan_external_platform_skills(self.skill_hub.skills_root)
+            match = None
+            for s in sources:
+                if (req_path and s["path"] == req_path) or (req_name and s["name"] == req_name):
+                    match = s
+                    break
+            if not match:
+                return (HTTPStatus.NOT_FOUND, {"error": f"Platform skill not found: {req_name or req_path}"})
+            src_skill = Path(match["path"])
+            dst_dir = self.skill_hub.skills_root / match["name"]
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            content = src_skill.read_text(encoding="utf-8", errors="ignore")
+            (dst_dir / "SKILL.md").write_text(content, encoding="utf-8")
+            # Also register all 4 Second Brain tiers (L1, L2, L3, +1) into WikiDB
+            lines = [ln.strip() for ln in content.splitlines() if ln.strip() and not ln.strip().startswith("---")]
+            l1 = f"Skill {match['name']} ({match['platform']}): {match['description'] or (lines[0] if lines else match['name'])}"[:220]
+            l2 = "\n".join(lines[:14])[:1200]
+            l3 = content[:4000]
+            chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            wiki_path = f"/.agents/skills/{match['name']}/SKILL.md"
+            self.wiki_db.upsert_merkle_node(
+                ctx,
+                path=wiki_path,
+                parent_path=f"/.agents/skills/{match['name']}",
+                node_type="file",
+                content_hash=chash,
+                subtree_hash=chash,
+                summary_light=l1,
+                summary_medium=l2,
+                summary_high=l3,
+                raw_content=content,
+            )
+            self.wiki_db.update_concept_config(
+                ctx,
+                f"skill:{match['name']}",
+                {"platform": match["platform"], "source_path": match["path"], "wiki_path": wiki_path},
+            )
+            return (
+                HTTPStatus.OK,
+                {
+                    "imported": True,
+                    "name": match["name"],
+                    "platform": match["platform"],
+                    "target": str(dst_dir / "SKILL.md"),
+                    "concept_id": f"skill:{match['name']}",
+                },
+            )
 
         # Adaptive Skills & Prompt Router Endpoints
         if method == "GET" and path == "/api/skills/state":
@@ -3471,7 +2930,15 @@ class CorticalLiveService:
                 ).to_dict(),
             )
 
-        # Voice Ducking & Echo State Endpoints
+        # Voice Ducking, Audio Switch & Echo State Endpoints
+        if method == "POST" and path == "/api/voice/config":
+            if "speak_enabled" in body:
+                self.audio_responses_enabled = bool(body.get("speak_enabled"))
+                if not self.audio_responses_enabled:
+                    stop_native_tts()
+                    self.agent_mgr.clear_pending_speech()
+            return (HTTPStatus.OK, {"speak_enabled": self.audio_responses_enabled})
+
         if method == "POST" and path == "/api/voice/duck":
             force_stop = bool(body.get("force_stop", False))
             return (HTTPStatus.OK, duck_native_tts(force_stop=force_stop))
@@ -3480,20 +2947,151 @@ class CorticalLiveService:
             return (
                 HTTPStatus.OK,
                 {
+                    "speak_enabled": self.audio_responses_enabled,
                     "tts_speaking": is_tts_speaking(),
                     "tts_shield_active": is_tts_speaking_or_cooling_down(),
                     "last_spoken_text": self.voice_engine.last_spoken_text or _LAST_SPOKEN_TEXT,
                 },
             )
 
+        if method == "GET" and path == "/api/models/config":
+            scope_id = (query.get("scope_id") or ["chat"])[0]
+            return (HTTPStatus.OK, self._get_models_config_payload(ctx, scope_id=scope_id))
+
+        if method == "POST" and path == "/api/models/config":
+            return (HTTPStatus.OK, self._update_models_config(ctx, body))
+
+        if method == "POST" and path == "/api/models/pull":
+            model_name = str(body.get("model") or "").strip()
+            res = pull_ollama_model(model_name, base_url=self.model_rec.active_base_url or "http://127.0.0.1:11434")
+            status = HTTPStatus.OK if res.get("ok") else HTTPStatus.BAD_REQUEST
+            if res.get("ok"):
+                res["config"] = self._get_models_config_payload(ctx)
+            return (status, res)
+
+        if method == "POST" and path == "/api/models/delete":
+            model_name = str(body.get("model") or "").strip()
+            res = delete_ollama_model(model_name, base_url=self.model_rec.active_base_url or "http://127.0.0.1:11434")
+            status = HTTPStatus.OK if res.get("ok") else HTTPStatus.BAD_REQUEST
+            if res.get("ok"):
+                res["config"] = self._get_models_config_payload(ctx)
+            return (status, res)
+
+        if method == "POST" and path == "/api/roles/add":
+            orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+            try:
+                updated_cfg = add_custom_role(
+                    orch_cfg,
+                    role_id=str(body.get("id") or ""),
+                    label=str(body.get("label") or ""),
+                    description=str(body.get("description") or ""),
+                    model=str(body.get("model") or "qwen3.8:27b-iq2_xs"),
+                    context_window=int(body.get("context_window") or 16384),
+                    effort=str(body.get("effort") or "medium"),
+                    tools=list(body.get("tools") or []),
+                )
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self.wiki_db.update_concept_config(ctx, "concept:orchestratore-multi-agente", updated_cfg)
+            return (HTTPStatus.OK, {"ok": True, "config": self._get_models_config_payload(ctx)})
+
+        if method == "POST" and path == "/api/roles/delete":
+            orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+            try:
+                updated_cfg = delete_custom_role(orch_cfg, str(body.get("id") or ""))
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self.wiki_db.update_concept_config(ctx, "concept:orchestratore-multi-agente", updated_cfg)
+            return (HTTPStatus.OK, {"ok": True, "config": self._get_models_config_payload(ctx)})
+
+        if method == "GET" and path == "/api/chrome/profiles":
+            return (HTTPStatus.OK, discover_chrome_profiles())
+
+        if method == "POST" and path == "/api/chrome/profile":
+            saved = save_chrome_profile_preference(body or {})
+            return (HTTPStatus.OK, {"ok": True, "selected": saved, "discovery": discover_chrome_profiles()})
+
         if method == "GET" and path == "/api/agents":
-            return (HTTPStatus.OK, {"sessions": self.agent_mgr.list_sessions()})
+            q_str = (query.get("q") or [""])[0]
+            offset = int((query.get("offset") or ["0"])[0] or 0)
+            limit = int((query.get("limit") or ["20"])[0] or 20)
+            page = self.agent_mgr.search_sessions(query=q_str, offset=offset, limit=limit)
+            ep_filter = (query.get("episode_id") or [None])[0]
+            scope_id = ep_filter or (query.get("scope_id") or ["chat"])[0] or "chat"
+            page["token_summary"] = self.wiki_db.get_token_usage_summary(ctx, episode_id=ep_filter)
+            mcfg = self._get_models_config_payload(ctx, scope_id=scope_id)
+            page["context_telemetry"] = mcfg["context_telemetry"]
+            page["scope_preferences"] = mcfg["scope_preferences"]
+            page["role_models"] = mcfg["role_models"]
+            if ep_filter:
+                page["selected_session"] = self.agent_mgr.get_session(ep_filter)
+            return (HTTPStatus.OK, page)
+
+        if method == "GET" and path == "/api/agents/runs":
+            ep_filter = (query.get("episode_id") or [None])[0]
+            status_f = (query.get("status") or ["all"])[0]
+            q_str = (query.get("q") or [""])[0]
+            offset = int((query.get("offset") or ["0"])[0] or 0)
+            limit = min(50, max(1, int((query.get("limit") or ["12"])[0] or 12)))
+            runs = self.wiki_db.list_agent_runs(
+                ctx, episode_id=ep_filter, limit=limit, offset=offset, status_filter=status_f, search_query=q_str
+            )
+            total = self.wiki_db.count_agent_runs(ctx, episode_id=ep_filter, status_filter=status_f, search_query=q_str)
+            return (
+                HTTPStatus.OK,
+                {"runs": runs, "total_count": total, "offset": offset, "limit": limit, "has_more": (offset + len(runs)) < total},
+            )
+
+        if method == "POST" and path == "/api/agents/run/stop":
+            rid = str(body.get("run_id") or "").strip()
+            sid = str(body.get("session_id") or "").strip() or None
+            res = self.agent_mgr.stop_run(rid, session_id=sid)
+            return (HTTPStatus.OK if res.get("stopped") else HTTPStatus.NOT_FOUND, res)
+
+        if method == "POST" and path == "/api/chat/preferences":
+            scope_id = str(body.get("scope_id") or "chat").strip() or "chat"
+            orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+            prefs_all = dict(orch_cfg.get("scope_preferences") or {})
+            cur = dict(prefs_all.get(scope_id) or {})
+            if body.get("context_strategy") in {"auto", "direct", "multi_message", "summarize"}:
+                cur["context_strategy"] = str(body["context_strategy"])
+            if body.get("thinking_mode") in {"auto", "off", "low", "medium", "high"}:
+                cur["thinking_mode"] = str(body["thinking_mode"])
+            prefs_all[scope_id] = cur
+            self.wiki_db.update_concept_config(ctx, "concept:orchestratore-multi-agente", {"scope_preferences": prefs_all})
+            mcfg = self._get_models_config_payload(ctx, scope_id=scope_id)
+            return (HTTPStatus.OK, {"ok": True, "scope_id": scope_id, "scope_preferences": mcfg["scope_preferences"], "context_telemetry": mcfg["context_telemetry"]})
 
         if method == "POST" and path == "/api/agents/spawn":
             goal = str(body.get("goal", "")).strip()
             depth = str(body.get("wiki_depth", "medium"))
-            speak = bool(body.get("speak", False))
-            sess = self.agent_mgr.spawn_agent(goal=goal, wiki_depth=depth, speak_on_finish=speak)
+            effort = _normalize_effort(body.get("effort", "medium"))
+            speak = bool(body.get("speak", False) and self.audio_responses_enabled)
+            source_scope = str(body.get("source_scope_id") or "").strip()
+            parallel = body.get("parallel") if isinstance(body.get("parallel"), bool) else None
+            auto_loop = body.get("auto_loop") if isinstance(body.get("auto_loop"), bool) else None
+            sess = self.agent_mgr.spawn_agent(
+                goal=goal,
+                role="Coordinator",
+                wiki_depth=depth,
+                speak_on_finish=speak,
+                parallel=parallel,
+                auto_loop=auto_loop,
+                effort=effort,
+            )
+            if source_scope:
+                for ca in self.wiki_db.list_context_attachments(ctx, scope_id=source_scope):
+                    try:
+                        self.wiki_db.attach_context_item(
+                            ctx,
+                            scope_id=str(sess["session_id"]),
+                            item_type=ca["item_type"],
+                            item_ref=ca["item_ref"],
+                            depth_tier=ca.get("depth_tier", "medium"),
+                            label=ca.get("label"),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             return (HTTPStatus.OK, sess)
 
         if method == "POST" and path == "/api/agents/open-terminal":
@@ -3572,23 +3170,116 @@ class CorticalLiveService:
             )
             return (HTTPStatus.OK, dataclasses.asdict(dec))
 
+        if method == "GET" and path == "/api/security/egress":
+            sid = (query.get("session_id") or [""])[0]
+            limit = int((query.get("limit") or ["50"])[0] or 50)
+            events = self.perm_gate.list_egress_events(limit=limit, session_id=sid)
+            return (
+                HTTPStatus.OK,
+                {
+                    "isolation_enabled": True,
+                    "proxy_port": self.agent_mgr.egress_proxy_port,
+                    "total_blocked": len(events),
+                    "events": events,
+                },
+            )
+
+        if method == "POST" and path == "/api/security/egress":
+            if str(body.get("action") or "") == "clear":
+                cleared = self.perm_gate.clear_egress_events()
+                return (HTTPStatus.OK, {"cleared": cleared})
+            ev = self.perm_gate.record_egress_event(
+                session_id=str(body.get("session_id") or ""),
+                role=str(body.get("role") or ""),
+                model=str(body.get("model") or ""),
+                source=str(body.get("source") or "harness_gate"),
+                method=str(body.get("method") or ""),
+                target_host=str(body.get("target_host") or ""),
+                target_url=str(body.get("target_url") or ""),
+                payload_excerpt=str(body.get("payload_excerpt") or ""),
+                verdict=str(body.get("verdict") or "blocked"),
+                reason=str(body.get("reason") or "Blocked by Cortical isolation."),
+            )
+            return (HTTPStatus.OK, {"recorded": True, "event": ev})
+
         if method == "POST" and path == "/api/voice":
             utterance = str(body.get("utterance", ""))
+            session_id = str(body.get("session_id") or "").strip()
+            chat_scope = str(body.get("scope_id") or "chat").strip() or "chat"
             speak = bool(body.get("speak", False))
+            if not self.audio_responses_enabled:
+                speak = False
             client_audio = bool(body.get("client_audio", False))
             voice_name = str(body.get("voice", "IsabellaNeural"))
             from_mic = bool(body.get("from_mic", False))
             preferred_lang = str(body.get("lang", "")) or None
+            wiki_depth = str(body.get("wiki_depth", "medium"))
             discourse_hints = body.get("discourse_hints") if isinstance(body.get("discourse_hints"), dict) else None
             tts_active = bool(body.get("client_tts_speaking", False)) or is_tts_speaking_or_cooling_down()
             t0 = time.perf_counter()
-            res = self.voice_engine.handle_utterance(
-                utterance,
-                from_mic=from_mic,
-                tts_currently_speaking=tts_active,
-                discourse_hints=discourse_hints,
-                preferred_lang=preferred_lang,
-            )
+
+            # Follow-up sent inside an open/reopened task continues THAT task in its own scope
+            # (unless the utterance is a barge-in stop command).
+            is_stop_cmd = bool(re.search(r"\b(ferma|fermati|stop|basta|annulla)\b", utterance.lower()))
+            if session_id and utterance.strip() and not is_stop_cmd:
+                cont = self.agent_mgr.continue_session(
+                    session_id,
+                    utterance.strip(),
+                    wiki_depth=wiki_depth,
+                    speak_on_finish=speak,
+                    effort=_normalize_effort(body.get("effort", "medium")),
+                )
+                if cont is not None:
+                    eff_lang = preferred_lang if preferred_lang in ("it", "en") else detect_language(utterance)
+                    msg = (
+                        f"Continuing task {session_id} with local agent."
+                        if eff_lang == "en"
+                        else f"Continuo il task {session_id} con l'agente locale."
+                    )
+                    c_tts = False
+                    c_audio_url = None
+                    c_voice = voice_name
+                    if speak:
+                        if client_audio:
+                            ab, mime, c_voice = synthesize_tts_audio_bytes(msg, voice=voice_name, lang=eff_lang)
+                            if ab:
+                                aid = cache_tts_audio(ab, mime)
+                                c_audio_url = f"/api/tts/audio?id={aid}"
+                                c_tts = True
+                            else:
+                                c_tts = speak_native_tts(msg, voice=voice_name, lang=eff_lang)
+                        else:
+                            c_tts = speak_native_tts(msg, voice=voice_name, lang=eff_lang)
+                    return (
+                        HTTPStatus.OK,
+                        {
+                            "route": "system2_task_continue",
+                            "spoken_response": msg,
+                            "lang": eff_lang,
+                            "spawned_session_id": session_id,
+                            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                            "tts_triggered": c_tts,
+                            "audio_url": c_audio_url,
+                            "tts_voice_used": c_voice,
+                        },
+                    )
+
+            prev_scope = getattr(self._current_chat_scope, "value", "chat")
+            prev_speak = getattr(self._dispatch_speak_flag, "value", None)
+            self._current_chat_scope.value = chat_scope
+            self._dispatch_speak_flag.value = speak
+            try:
+                res = self.voice_engine.handle_utterance(
+                    utterance,
+                    from_mic=from_mic,
+                    tts_currently_speaking=tts_active,
+                    discourse_hints=discourse_hints,
+                    preferred_lang=preferred_lang,
+                    scope_id=chat_scope,
+                )
+            finally:
+                self._current_chat_scope.value = prev_scope
+                self._dispatch_speak_flag.value = prev_speak
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             tts_triggered = False
             audio_url = None
@@ -3616,7 +3307,20 @@ class CorticalLiveService:
             if res.route == "system2_agentic":
                 sessions = self.agent_mgr.list_sessions()
                 if sessions:
-                    out["spawned_session_id"] = sessions[0]["session_id"]
+                    new_sid = sessions[0]["session_id"]
+                    out["spawned_session_id"] = new_sid
+                    for ca in self.wiki_db.list_context_attachments(ctx, scope_id=chat_scope):
+                        try:
+                            self.wiki_db.attach_context_item(
+                                ctx,
+                                scope_id=new_sid,
+                                item_type=ca["item_type"],
+                                item_ref=ca["item_ref"],
+                                depth_tier=ca.get("depth_tier", "medium"),
+                                label=ca.get("label"),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
             return (HTTPStatus.OK, out)
 
         return (HTTPStatus.NOT_FOUND, {"error": f"Unknown endpoint: {method} {path}"})
@@ -3634,12 +3338,28 @@ def run_live_server(
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path in {"/", "/index.html"}:
-                data = DASHBOARD_HTML.encode("utf-8")
+                html_path = Path(__file__).with_name("dashboard.html")
+                data = html_path.read_bytes() if html_path.is_file() else DASHBOARD_HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
+                return
+
+            if parsed.path.startswith("/ui/"):
+                asset = resolve_ui_asset(parsed.path)
+                if not asset:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "UI asset not found"})
+                    return
+                asset_bytes, mime = asset
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(asset_bytes)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(asset_bytes)
                 return
 
             if parsed.path == "/api/tts/audio":
@@ -3659,23 +3379,34 @@ def run_live_server(
                 return
 
             q = urllib.parse.parse_qs(parsed.query)
-            status, payload = service.handle_api("GET", parsed.path, q, {})
-            self._send_json(status, payload)
+            try:
+                status, payload = service.handle_api("GET", parsed.path, q, {})
+                self._send_json(status, payload)
+            except KeyError as exc:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
-            body = json.loads(raw) if raw.strip() else {}
-            q = urllib.parse.parse_qs(parsed.query)
-            status, payload = service.handle_api("POST", parsed.path, q, body)
-            self._send_json(status, payload)
+            try:
+                body = json.loads(raw) if raw.strip() else {}
+                q = urllib.parse.parse_qs(parsed.query)
+                status, payload = service.handle_api("POST", parsed.path, q, body)
+                self._send_json(status, payload)
+            except KeyError as exc:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 

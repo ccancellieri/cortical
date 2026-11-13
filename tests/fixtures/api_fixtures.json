@@ -90,5 +90,26 @@
       "from_mic": true,
       "client_tts_speaking": true
     }
-  }
+  },
+  "chrome_cdp_version": {
+    "Browser": "Chrome/136.0.0.0",
+    "Protocol-Version": "1.3",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/test-session-9222"
+  },
+  "pi_json_events": [
+    {"type": "agent_start"},
+    {"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "read", "args": {"path": "src/cortical/cli.py"}},
+    {"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "read", "result": {"content": [{"type": "text", "text": "def main(argv=None) exceeds 50 LOC due to inline subcommand branches."}]}, "isError": false},
+    {"type": "tool_execution_start", "toolCallId": "call_2", "toolName": "bash", "args": {"command": "PYTHONPATH=src .venv/bin/python -m unittest discover -s tests"}},
+    {"type": "tool_execution_end", "toolCallId": "call_2", "toolName": "bash", "result": {"content": [{"type": "text", "text": "Ran 17 tests in 1.10s - OK"}]}, "isError": false},
+    {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Pattern verificato: estrarre handler da src/cortical/cli.py sotto 40 LOC per funzione e rieseguire unittest (17/17 OK)."}]}},
+    {"type": "agent_end", "messages": [], "willRetry": false}
+  ],
+  "pi_json_events_with_usage": [
+    {"type": "agent_start"},
+    {"type": "tool_execution_start", "toolCallId": "call_u1", "toolName": "read", "args": {"path": "docs/spec.txt"}},
+    {"type": "tool_execution_end", "toolCallId": "call_u1", "toolName": "read", "result": {"content": [{"type": "text", "text": "Spec verified cleanly."}]}, "isError": false},
+    {"type": "turn_end", "message": {"role": "assistant", "model": "qwen3:8b", "content": [{"type": "text", "text": "<think>ragionamento interno</think>Analisi completata senza errori sui requisiti."}], "usage": {"input": 420, "output": 85, "totalTokens": 505}}, "toolResults": []},
+    {"type": "agent_end", "messages": [], "willRetry": false}
+  ]
 }

@@ -12,12 +12,12 @@
  *    - Tracks the discussion and tool executions inside the isolated task.
  * 3. Task Closure, 3+1 Synthesis & Automatic Skill Generation (`/task-close [lezioni]`):
  *    - Synthesizes the discussion at 3+1 levels in the Wiki MCP (`L1`, `L2`, `L3`, `Max`).
- *    - Evaluates whether the work produced a reusable pattern and compiles a new `.pi/skills/learned-<slug>/SKILL.md`.
+ *    - Evaluates whether the work produced a reusable pattern and compiles a new `.agents/skills/learned-<slug>/SKILL.md`.
  *    - Archives the compact trace and purges bulky temporary logs.
  * 4. Task Deletion (`/task-delete <id>`) & Skills Inspector (`/skills`).
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,7 +48,9 @@ function resolveCorticalPaths(): { pythonBin: string; pythonPath: string; skills
   for (const root of candidates) {
     const srcDir = path.join(root, "src");
     const venvPy = path.join(root, ".venv", "bin", "python");
-    const skillsDir = path.join(root, ".pi", "skills");
+    const agentsSkillsDir = path.join(root, ".agents", "skills");
+    const legacySkillsDir = path.join(root, ".pi", "skills");
+    const skillsDir = existsSync(agentsSkillsDir) ? agentsSkillsDir : legacySkillsDir;
     if (existsSync(srcDir)) {
       return {
         pythonBin: process.env.CORTICAL_PYTHON || (existsSync(venvPy) ? venvPy : "python3"),
@@ -60,8 +62,133 @@ function resolveCorticalPaths(): { pythonBin: string; pythonPath: string; skills
   return {
     pythonBin: process.env.CORTICAL_PYTHON || "python3",
     pythonPath: process.env.CORTICAL_PYTHONPATH || "./src",
-    skillsDir: "./.pi/skills",
+    skillsDir: existsSync("./.agents/skills") ? "./.agents/skills" : "./.pi/skills",
   };
+}
+
+function resolveEnvWithPath(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const curPath = process.env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin";
+  const prefix = ["/opt/homebrew/bin", "/usr/local/bin"].filter((p) => !curPath.split(":").includes(p));
+  return {
+    ...process.env,
+    PATH: [...prefix, curPath].join(":"),
+    ...extra,
+  };
+}
+
+function resolvePiExecutable(): string {
+  const candidates = ["/opt/homebrew/bin/pi", "/usr/local/bin/pi", "pi"];
+  return candidates.find((c) => c === "pi" || existsSync(c)) || "pi";
+}
+
+interface SubagentRunResult {
+  role: string;
+  model: string;
+  status: "completed" | "error";
+  toolsExecuted: number;
+  tokens: number;
+  summary: string;
+}
+
+async function runPiWorkerAsync(
+  role: string,
+  goal: string,
+  enhancementText: string,
+  modelId = "qwen3:8b",
+  timeoutMs = 120000
+): Promise<SubagentRunResult> {
+  const piBin = resolvePiExecutable();
+  const harnessPath = fileURLToPath(import.meta.url);
+  const { pythonPath } = resolveCorticalPaths();
+  const workerCwd = path.resolve(pythonPath, "..");
+  const prompt = [
+    `Ruolo assegnato: ${role}`,
+    `Obiettivo specifico: ${goal}`,
+    "Usa i tool reali (read, bash, edit, write), non inventare risultati e rispondi in italiano conciso.",
+    enhancementText ? `\n[CONTESTO WIKI/SKILL]\n${enhancementText.slice(0, 800)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const args = [
+    "-p", "--mode", "json", "--no-session", "--approve",
+    "--no-extensions", "-e", harnessPath,
+    "--no-skills", "--no-prompt-templates", "--no-themes",
+    "--thinking", "off", "--provider", "ollama", "--model", modelId,
+    "--tools", "read,bash,edit,write",
+    prompt,
+  ];
+
+  return new Promise((resolve) => {
+    const child = spawn(piBin, args, {
+      cwd: existsSync(workerCwd) ? workerCwd : process.cwd(),
+      env: resolveEnvWithPath({ PI_CORTICAL_WORKER: "1", PI_CORTICAL_FAST: "1" }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let finalText = "";
+    let stderrBuf = "";
+    let toolsExecuted = 0;
+    let tokens = 0;
+    let buf = "";
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      buf += chunk.toString("utf-8");
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+        if (!line.startsWith("{")) continue;
+        try {
+          const evt = JSON.parse(line) as Record<string, unknown>;
+          if (evt.type === "tool_execution_end") toolsExecuted += 1;
+          if (evt.type === "turn_end" || evt.type === "message_end") {
+            const msg = (evt.message || {}) as Record<string, unknown>;
+            if (msg.role === "assistant") {
+              const parts = Array.isArray(msg.content) ? msg.content : [];
+              const txt = parts
+                .map((p: unknown) => (typeof p === "object" && p && (p as Record<string, unknown>).type === "text" ? String((p as Record<string, unknown>).text || "") : ""))
+                .join("\n")
+                .trim();
+              if (txt) finalText = txt;
+              const usage = msg.usage as Record<string, unknown> | undefined;
+              if (evt.type === "turn_end" && usage) {
+                tokens += Number(usage.totalTokens || Number(usage.input || 0) + Number(usage.output || 0));
+              }
+            }
+          }
+        } catch {
+          // Ignore non-JSON lines
+        }
+      }
+    });
+
+    child.stderr?.on("data", (c: Buffer) => {
+      stderrBuf += c.toString("utf-8");
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const ok = Boolean(finalText || toolsExecuted > 0) && (code === 0 || code === null);
+      resolve({
+        role,
+        model: modelId,
+        status: ok ? "completed" : "error",
+        toolsExecuted,
+        tokens,
+        summary: (finalText || stderrBuf || `Exit code ${code}`).slice(0, 1200),
+      });
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ role, model: modelId, status: "error", toolsExecuted, tokens, summary: String(err) });
+    });
+  });
 }
 
 function invokeCorticalCLI(args: string[]): Record<string, unknown> {
@@ -71,10 +198,7 @@ function invokeCorticalCLI(args: string[]): Record<string, unknown> {
     ["-m", "cortical.cli", "--skills-dir", skillsDir, ...args],
     {
       encoding: "utf-8",
-      env: {
-        ...process.env,
-        PYTHONPATH: pythonPath,
-      },
+      env: resolveEnvWithPath({ PYTHONPATH: pythonPath }),
       timeout: 14000,
     }
   );
@@ -334,8 +458,13 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
       if (!userPrompt) return undefined;
 
-      // A. Deterministic Weather & Visual Chrome Grounding
-      if (isWeatherQuery(userPrompt)) {
+      // A. Deterministic Weather & Visual Chrome Grounding (only for short direct user turns, never long/harness tasks)
+      const isHarnessOrTaskPrompt =
+        Boolean(activeTask) ||
+        userPrompt.length > 260 ||
+        userPrompt.includes("=== CORTICAL HARNESS") ||
+        userPrompt.includes("Obiettivo Task");
+      if (!isHarnessOrTaskPrompt && isWeatherQuery(userPrompt)) {
         const res = invokeCorticalCLI([
           "weather",
           "--query",
@@ -345,7 +474,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
         ctx.ui?.notify?.(`[Cortical Grounding] ${groundedSummary}`, "info");
-      } else if (isPageReadQuery(userPrompt)) {
+      } else if (!isHarnessOrTaskPrompt && isPageReadQuery(userPrompt)) {
         const mode = userPrompt.toLowerCase().includes("leggi") && !userPrompt.toLowerCase().includes("riassumi")
           ? "read"
           : "summarize";
@@ -353,7 +482,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
         ctx.ui?.notify?.(`[Cortical Chrome Reader] ${groundedSummary}`, "info");
-      } else if (isBrowserSearchQuery(userPrompt)) {
+      } else if (!isHarnessOrTaskPrompt && isBrowserSearchQuery(userPrompt)) {
         const res = invokeCorticalCLI(["chrome-search", "--prompt", userPrompt]);
         const groundedSummary = String(res.summary_it || JSON.stringify(res));
         pendingGroundedAnswer = groundedSummary;
@@ -468,13 +597,36 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         };
       }
 
-      // Parallel 3+1 Memory + Adaptive Skill Enhancement when working on a task or technical prompt
-      if (activeTask || lastUserText.split(/\s+/).length >= 6) {
+      // Parallel 3+1 Memory + Adaptive Skill Enhancement (only on fresh user turns without prior Python enhancement)
+      const lastMsgRole = payload.messages[payload.messages.length - 1]?.role;
+      const alreadyEnhanced =
+        lastUserText.includes("=== CORTICAL HARNESS") ||
+        lastUserText.includes("[CONTESTO SKILL/WIKI]") ||
+        process.env.PI_CORTICAL_WORKER === "1";
+      const modelStr = String((payload as Record<string, unknown>).model || "").toLowerCase();
+      const effortRaw = String(process.env.PI_EFFORT || "medium").toLowerCase();
+      const effort = effortRaw === "low" || effortRaw === "high" ? effortRaw : "medium";
+      const effortReasoning = effort === "high" ? "low" : "none";
+      const effortMaxTokens = effort === "low" ? 900 : effort === "high" ? 4096 : 2048;
+      const isLocalFast =
+        process.env.PI_CORTICAL_FAST === "1" ||
+        modelStr.includes("qwen") ||
+        modelStr.includes("ollama");
+      const basePatch = isLocalFast
+        ? {
+            ...payload,
+            reasoning_effort:
+              (payload as Record<string, unknown>).reasoning_effort ?? effortReasoning,
+            max_tokens:
+              (payload as Record<string, unknown>).max_tokens ?? effortMaxTokens,
+          }
+        : payload;
+      if (lastMsgRole === "user" && !alreadyEnhanced && (activeTask || lastUserText.split(/\s+/).length >= 6)) {
         const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", lastUserText]);
-        const enhancedSys = String(enh.enhanced_system_instructions || "");
+        const enhancedSys = String(enh.enhanced_system_instructions || "").slice(0, 1200);
         if (enhancedSys) {
           return {
-            ...payload,
+            ...basePatch,
             messages: [
               {
                 role: "system",
@@ -484,6 +636,9 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
             ],
           };
         }
+      }
+      if (basePatch !== payload) {
+        return basePatch;
       }
     } catch {
       // Ignore if CLI not reachable
@@ -535,6 +690,30 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
       });
     }
 
+    const reportSecurityBlock = (source: string, targetHost: string, reason: string) => {
+      try {
+        const base = process.env.CORTICAL_BASE_URL || "http://127.0.0.1:8765";
+        void fetch(`${base}/api/security/egress`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: process.env.PI_ACTIVE_SESSION_ID || activeTask?.episodeId || "",
+            role: process.env.PI_ACTIVE_ROLE || "agent",
+            model: process.env.PI_ACTIVE_MODEL || "",
+            source,
+            method: toolName,
+            target_host: targetHost,
+            target_url: String(toolArgs.command || toolArgs.path || "").slice(0, 320),
+            payload_excerpt: JSON.stringify(toolArgs).slice(0, 500),
+            verdict: "blocked",
+            reason,
+          }),
+        }).catch(() => {});
+      } catch {
+        // ignore telemetry errors
+      }
+    };
+
     try {
       const decision = invokeCorticalCLI([
         "check-permission",
@@ -545,6 +724,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
       ]) as unknown as PermissionVerdict;
 
       if (decision.verdict === "deny") {
+        reportSecurityBlock("harness_gate", decision.normalized_pattern, decision.reason);
         ctx.ui?.notify?.(
           `[Cortical Gate] BLOCKED ${decision.normalized_pattern}: ${decision.reason}`,
           "error"
@@ -555,24 +735,32 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         };
       }
 
-      if (decision.verdict === "ask" && ctx.ui?.confirm) {
-        const confirmed = await ctx.ui.confirm(
-          "[Cortical Adaptive Gate]",
-          `Approvare ${decision.normalized_pattern} (risk=${decision.risk_score}) e ricordare il pattern?`
-        );
-        invokeCorticalCLI([
-          "check-permission",
-          "--tool",
-          toolName,
-          "--args-json",
-          JSON.stringify(toolArgs),
-          confirmed ? "--approve" : "--deny",
-          ...(confirmed ? ["--remember"] : []),
-        ]);
-        if (!confirmed) {
+      const hasInteractiveUI = Boolean((ctx as Record<string, unknown>).hasUI) && Boolean(ctx.ui?.confirm);
+      if (decision.verdict === "ask") {
+        if (hasInteractiveUI && ctx.ui?.confirm) {
+          const confirmed = await ctx.ui.confirm(
+            "[Cortical Adaptive Gate]",
+            `Approvare ${decision.normalized_pattern} (risk=${decision.risk_score}) e ricordare il pattern?`
+          );
+          invokeCorticalCLI([
+            "check-permission",
+            "--tool",
+            toolName,
+            "--args-json",
+            JSON.stringify(toolArgs),
+            confirmed ? "--approve" : "--deny",
+            ...(confirmed ? ["--remember"] : []),
+          ]);
+          if (!confirmed) {
+            return {
+              block: true,
+              reason: `User declined tool pattern: ${decision.normalized_pattern}`,
+            };
+          }
+        } else if (decision.risk_score >= 0.75) {
           return {
             block: true,
-            reason: `User declined tool pattern: ${decision.normalized_pattern}`,
+            reason: `High-risk pattern requires interactive confirmation: ${decision.normalized_pattern}`,
           };
         }
       }
@@ -694,7 +882,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         create_skill: {
           type: "boolean",
           default: false,
-          description: "Se true, compila una nuova Skill (.pi/skills/learned-.../SKILL.md) dalle lezioni apprese.",
+          description: "Se true, compila una nuova Skill (.agents/skills/learned-.../SKILL.md) dalle lezioni apprese.",
         },
         touched_paths: { type: "array", items: { type: "string" } },
       },
@@ -742,12 +930,35 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     },
   });
 
-  // 5. Orchestrator Subagent Spawner with Parallel 3+1 Wiki Memory & Procedural Skills
+  // 5. Real Parallel Orchestrator Subagent Spawners (Ollama Zero-Cost)
+  async function executeDelegatedTask(
+    role: string,
+    goal: string,
+    model = "qwen3:8b"
+  ): Promise<SubagentRunResult> {
+    let enhText = "";
+    try {
+      const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", goal]);
+      enhText = String(enh.enhanced_system_instructions || "");
+    } catch {
+      enhText = "";
+    }
+    const res = await runPiWorkerAsync(role, goal, enhText, model);
+    if (activeTask) {
+      activeTask.steps.push({
+        type: "subagent",
+        title: `Subagente ${res.role} (${res.model} · ${res.toolsExecuted} tools · ${res.tokens} tok)`,
+        detail: res.summary.slice(0, 320),
+      });
+    }
+    return res;
+  }
+
   pi.registerTool?.({
     name: "delegate_subagent",
-    label: "Delegate Cortical Multi-Agent Role",
+    label: "Delegate Cortical Multi-Agent Role (Live Execution)",
     description:
-      "Avvia un ruolo specializzato (arch_analyst, code_implementer, reviewer, web_researcher) iniettando in parallelo il livello 3+1 della Wiki MCP e le Skill pertinenti.",
+      "Esegue davvero in background un sottoagente specializzato locale su Ollama (`arch_analyst`, `code_implementer`, `reviewer`, `web_researcher`) iniettando il livello 3+1 della Wiki MCP e le Skill.",
     parameters: {
       type: "object",
       properties: {
@@ -756,43 +967,63 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
           enum: ["arch_analyst", "code_implementer", "reviewer", "web_researcher"],
         },
         goal: { type: "string" },
-        wiki_path: { type: "string", default: "/" },
-        initial_depth: {
-          type: "string",
-          enum: ["light", "medium", "high", "max"],
-          default: "medium",
-        },
+        model: { type: "string", default: "qwen3:8b" },
       },
       required: ["role", "goal"],
     } as any,
     execute: async (_toolCallId, params) => {
       const args = (params || {}) as Record<string, unknown>;
-      const goal = String(args.goal || "");
-      let enhancement: Record<string, unknown> = {};
-      try {
-        enhancement = invokeCorticalCLI(["enhance-prompt", "--prompt", goal]);
-      } catch (err) {
-        enhancement = { warning: String(err) };
-      }
-
+      const res = await executeDelegatedTask(
+        String(args.role || "code_implementer"),
+        String(args.goal || ""),
+        String(args.model || "qwen3:8b")
+      );
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                orchestrator_dispatch: {
-                  role: args.role,
-                  goal,
-                  enhancement,
-                },
-              },
-              null,
-              2
-            ),
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  pi.registerTool?.({
+    name: "delegate_parallel_swarm",
+    label: "Run Parallel Local Subagents Swarm",
+    description:
+      "Avvia fino a 3 sottoagenti locali in parallelo reale su Ollama/pi e raccoglie i risultati verificati.",
+    parameters: {
+      type: "object",
+      properties: {
+        tasks: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string" },
+              goal: { type: "string" },
+              model: { type: "string" },
+            },
+            required: ["role", "goal"],
           },
-        ],
-        details: enhancement,
+        },
+      },
+      required: ["tasks"],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const rawTasks = Array.isArray((params as Record<string, unknown>)?.tasks)
+        ? ((params as Record<string, unknown>).tasks as Array<Record<string, unknown>>).slice(0, 3)
+        : [];
+      const results = await Promise.all(
+        rawTasks.map((t) =>
+          executeDelegatedTask(
+            String(t.role || "code_implementer"),
+            String(t.goal || ""),
+            String(t.model || "qwen3:8b")
+          )
+        )
+      );
+      return {
+        content: [{ type: "text", text: JSON.stringify({ swarm_results: results }, null, 2) }],
+        details: { swarm_results: results },
       };
     },
   });

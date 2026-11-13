@@ -32,7 +32,7 @@ from ..grounding import (
     read_active_chrome_page,
     visual_chrome_navigate_and_search,
 )
-from ..memory import MemoryCurator, is_explicit_task_request
+from ..memory import MemoryCurator, is_explicit_task_request, is_operational_escalation_request
 from ..permissions.gate import AdaptivePermissionGate
 from ..wiki.db import AccessContext, CorticalWikiDB
 
@@ -270,6 +270,7 @@ class CorticalVoiceEngine:
         stop_callback: Optional[Callable[[], None]] = None,
         duck_callback: Optional[Callable[[], None]] = None,
         memory_curator: Optional[MemoryCurator] = None,
+        sessions_status_fn: Optional[Callable[[], list[dict[str, Any]]]] = None,
     ) -> None:
         self.wiki_db = wiki_db
         self.curator = memory_curator or (MemoryCurator(wiki_db) if wiki_db else None)
@@ -280,6 +281,7 @@ class CorticalVoiceEngine:
         )
         self.stop_callback = stop_callback
         self.duck_callback = duck_callback
+        self.sessions_status_fn = sessions_status_fn
         self.pending_permission: Optional[tuple[str, dict[str, Any]]] = None
         self.active_background_tasks: dict[str, str] = {}
         self.last_spoken_text: str = ""
@@ -355,6 +357,7 @@ class CorticalVoiceEngine:
         tts_currently_speaking: bool = False,
         discourse_hints: Optional[dict[str, Any]] = None,
         preferred_lang: Optional[str] = None,
+        scope_id: str = "chat",
     ) -> VoiceRouteResult:
         """Routes a transcribed voice utterance: Acoustic Priority Guard -> Stop -> Permission -> Status -> System 1/2."""
         detected_lang = detect_language(transcript, default=preferred_lang or "it")
@@ -390,11 +393,14 @@ class CorticalVoiceEngine:
 
         elapsed = time.time() - self.last_spoken_at
         if is_self_echo(transcript, self.last_spoken_text, elapsed):
-            return VoiceRouteResult(
-                route="ignored_echo",
-                spoken_response="",
-                lang=cmd_lang,
-            )
+            norm_in = _normalize_phonetic_italian(transcript)
+            norm_out = _normalize_phonetic_italian(self.last_spoken_text)
+            if not (any(norm_in.startswith(st) for st in _USER_DISCOURSE_STARTERS) and not norm_out.startswith(norm_in)):
+                return VoiceRouteResult(
+                    route="ignored_echo",
+                    spoken_response="",
+                    lang=cmd_lang,
+                )
 
         # User is asking a genuine new question: duck/interrupt any ongoing speech
         if self.duck_callback:
@@ -443,12 +449,17 @@ class CorticalVoiceEngine:
 
         # 2. Subagent / Episode status check
         if any(p in cmd for p in ("a che punto", "stato dei lavori", "stato agenti", "progressi", "status update", "agent status", "how is it going", "active tasks")):
-            if self.active_background_tasks:
-                summary = ", ".join(f"{tid}: {st}" for tid, st in self.active_background_tasks.items())
+            live_working: dict[str, str] = dict(self.active_background_tasks)
+            if self.sessions_status_fn is not None:
+                for sess in self.sessions_status_fn():
+                    if sess.get("status") == "working":
+                        live_working[str(sess["session_id"])] = "working"
+            if live_working:
+                summary = ", ".join(f"{tid}: {st}" for tid, st in live_working.items())
                 spoken = (
-                    f"I have {len(self.active_background_tasks)} active tasks: {summary}."
+                    f"I have {len(live_working)} active tasks: {summary}."
                     if cmd_lang == "en"
-                    else f"Ho {len(self.active_background_tasks)} task attivi: {summary}."
+                    else f"Ho {len(live_working)} task attivi: {summary}."
                 )
                 self.record_spoken_output(spoken)
                 return VoiceRouteResult(
@@ -479,20 +490,27 @@ class CorticalVoiceEngine:
                 lang=cmd_lang,
             )
 
-        # 3. System 2: Explicit-Only Task Creation!
-        if force_task or is_explicit_task_request(cmd):
-            task_id = self.agentic_dispatch_fn(cmd)
+        # 3. System 2: Explicit or Operational Escalation Task Creation
+        eff_scope = (scope_id or "chat").strip() or "chat"
+        has_atts = bool(self.wiki_db and self.wiki_db.list_context_attachments(AccessContext(), scope_id=eff_scope))
+        if force_task or is_explicit_task_request(cmd) or is_operational_escalation_request(cmd, has_attachments=has_atts):
+            dispatch_goal = cmd
+            if self.curator and any(p in cmd for p in ("fallo tu", "fammelo tu", "eseguilo", "do it", "run it")):
+                recent = self.curator.get_recent_chat(limit=3, scope_id=eff_scope)
+                if recent:
+                    dispatch_goal = f"{cmd} (Riferito alla richiesta precedente: {recent[0]['user_text']})"
+            task_id = self.agentic_dispatch_fn(dispatch_goal)
             self.active_background_tasks[task_id] = "in_progress"
             spoken = (
-                f"I created explicit task {task_id}. You can track and archive it anytime."
+                f"I created task {task_id} and started the local agent. You can track, resume, or archive it anytime."
                 if cmd_lang == "en"
-                else f"Ho creato il task esplicito {task_id}. Puoi seguirlo e archiviarlo quando vuoi."
+                else f"Ho avviato il task {task_id} con l'agente locale. Puoi seguirlo, riprenderlo o archiviarlo quando vuoi."
             )
             self.record_spoken_output(spoken)
             return VoiceRouteResult(
                 route="system2_agentic",
                 spoken_response=spoken,
-                dispatched_task_goal=cmd,
+                dispatched_task_goal=dispatch_goal,
                 lang=cmd_lang,
             )
 
@@ -511,7 +529,7 @@ class CorticalVoiceEngine:
 
         curation_info = None
         if self.curator:
-            curation_info = self.curator.record_chat_turn(AccessContext(), cmd, answer)
+            curation_info = self.curator.record_chat_turn(AccessContext(), cmd, answer, scope_id=eff_scope)
 
         self.record_spoken_output(answer)
         return VoiceRouteResult(
