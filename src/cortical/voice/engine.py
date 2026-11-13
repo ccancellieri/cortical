@@ -32,7 +32,12 @@ from ..grounding import (
     read_active_chrome_page,
     visual_chrome_navigate_and_search,
 )
-from ..memory import MemoryCurator, is_explicit_task_request, is_operational_escalation_request
+from ..memory import (
+    MemoryCurator,
+    is_explicit_task_request,
+    is_operational_escalation_request,
+    is_vibe_coding_request,
+)
 from ..permissions.gate import AdaptivePermissionGate
 from ..wiki.db import AccessContext, CorticalWikiDB
 
@@ -271,6 +276,7 @@ class CorticalVoiceEngine:
         duck_callback: Optional[Callable[[], None]] = None,
         memory_curator: Optional[MemoryCurator] = None,
         sessions_status_fn: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        approvals_resolver_fn: Optional[Callable[[bool, bool, bool, str], Optional[str]]] = None,
     ) -> None:
         self.wiki_db = wiki_db
         self.curator = memory_curator or (MemoryCurator(wiki_db) if wiki_db else None)
@@ -282,6 +288,7 @@ class CorticalVoiceEngine:
         self.stop_callback = stop_callback
         self.duck_callback = duck_callback
         self.sessions_status_fn = sessions_status_fn
+        self.approvals_resolver_fn = approvals_resolver_fn
         self.pending_permission: Optional[tuple[str, dict[str, Any]]] = None
         self.active_background_tasks: dict[str, str] = {}
         self.last_spoken_text: str = ""
@@ -415,37 +422,62 @@ class CorticalVoiceEngine:
                 lang=cmd_lang,
             )
 
-        # 1. Voice approval/rejection for Adaptive Permission Gate
-        if self.pending_permission and any(
-            w in cmd for w in ("approva", "consenti", "autorizza", "rifiuta", "blocca", "nega", "approve", "allow", "authorize", "reject", "deny", "block")
+        # 1. Voice approval/rejection for ApprovalBroker or Adaptive Permission Gate
+        if any(
+            re.search(rf"\b{w}\b", cmd)
+            for w in ("approva", "consenti", "autorizza", "rifiuta", "blocca", "nega", "approve", "allow", "authorize", "reject", "deny", "block")
         ):
-            tool_name, args = self.pending_permission
-            approved = any(w in cmd for w in ("approva", "consenti", "autorizza", "approve", "allow", "authorize"))
-            remember = any(w in cmd for w in ("ricorda", "sempre", "remember", "always"))
-            self.pending_permission = None
-            if self.permission_gate:
-                dec = self.permission_gate.record_user_feedback(
-                    tool_name, args, approved=approved, remember_always=remember
-                )
-                if cmd_lang == "en":
-                    spoken = (
-                        f"Permission granted for {dec.normalized_pattern}."
-                        if approved
-                        else f"Operation {dec.normalized_pattern} blocked."
+            approved = any(re.search(rf"\b{w}\b", cmd) for w in ("approva", "consenti", "autorizza", "approve", "allow", "authorize"))
+            remember_session = any(re.search(rf"\b{w}\b", cmd) for w in ("sessione", "questa sessione", "session", "this session"))
+            remember_always = any(re.search(rf"\b{w}\b", cmd) for w in ("ricorda", "sempre", "remember", "always"))
+            if self.approvals_resolver_fn is not None:
+                resolved_label = self.approvals_resolver_fn(approved, remember_session, remember_always, transcript)
+                if resolved_label:
+                    if cmd_lang == "en":
+                        spoken = (
+                            f"Approved {resolved_label}."
+                            if approved
+                            else f"Denied {resolved_label} and sent your instruction."
+                        )
+                    else:
+                        spoken = (
+                            f"Approvato {resolved_label}."
+                            if approved
+                            else f"Negato {resolved_label}, istruzione inviata all'agente."
+                        )
+                    self.record_spoken_output(spoken)
+                    return VoiceRouteResult(
+                        route="permission_feedback",
+                        spoken_response=spoken,
+                        permission_updated="allow" if approved else "deny",
+                        lang=cmd_lang,
                     )
-                else:
-                    spoken = (
-                        f"Permesso accordato per {dec.normalized_pattern}."
-                        if approved
-                        else f"Operazione {dec.normalized_pattern} bloccata."
+            if self.pending_permission:
+                tool_name, args = self.pending_permission
+                self.pending_permission = None
+                if self.permission_gate:
+                    dec = self.permission_gate.record_user_feedback(
+                        tool_name, args, approved=approved, remember_always=remember_always
                     )
-                self.record_spoken_output(spoken)
-                return VoiceRouteResult(
-                    route="permission_feedback",
-                    spoken_response=spoken,
-                    permission_updated=dec.verdict,
-                    lang=cmd_lang,
-                )
+                    if cmd_lang == "en":
+                        spoken = (
+                            f"Permission granted for {dec.normalized_pattern}."
+                            if approved
+                            else f"Operation {dec.normalized_pattern} blocked."
+                        )
+                    else:
+                        spoken = (
+                            f"Permesso accordato per {dec.normalized_pattern}."
+                            if approved
+                            else f"Operazione {dec.normalized_pattern} bloccata."
+                        )
+                    self.record_spoken_output(spoken)
+                    return VoiceRouteResult(
+                        route="permission_feedback",
+                        spoken_response=spoken,
+                        permission_updated=dec.verdict,
+                        lang=cmd_lang,
+                    )
 
         # 2. Subagent / Episode status check
         if any(p in cmd for p in ("a che punto", "stato dei lavori", "stato agenti", "progressi", "status update", "agent status", "how is it going", "active tasks")):
@@ -490,11 +522,12 @@ class CorticalVoiceEngine:
                 lang=cmd_lang,
             )
 
-        # 3. System 2: Explicit or Operational Escalation Task Creation
+        # 3. System 2: Explicit, Vibe-Coding, or Operational Escalation Task Creation
         eff_scope = (scope_id or "chat").strip() or "chat"
         has_atts = bool(self.wiki_db and self.wiki_db.list_context_attachments(AccessContext(), scope_id=eff_scope))
-        if force_task or is_explicit_task_request(cmd) or is_operational_escalation_request(cmd, has_attachments=has_atts):
-            dispatch_goal = cmd
+        vibe_coding = is_vibe_coding_request(cmd)
+        if force_task or is_explicit_task_request(cmd) or vibe_coding or is_operational_escalation_request(cmd, has_attachments=has_atts):
+            dispatch_goal = transcript.strip() if vibe_coding and transcript.strip() else cmd
             if self.curator and any(p in cmd for p in ("fallo tu", "fammelo tu", "eseguilo", "do it", "run it")):
                 recent = self.curator.get_recent_chat(limit=3, scope_id=eff_scope)
                 if recent:

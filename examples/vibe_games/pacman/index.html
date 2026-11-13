@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pac-Man Game</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Pac-Man Game</h1>
+    <canvas id="gameCanvas" width="400" height="400"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const gridSize = 20;
+        const tile_size = canvas.width / gridSize;
+
+        const pacMan = {
+            x: 1,
+            y: 1,
+            radius: tile_size / 2,
+            color: 'yellow',
+            dx: 0,
+            dy: 0,
+            speed: 2
+        };
+
+        const walls = [
+            [0, 0, 18, 0],
+            [0, 1, 18, 1],
+            [0, 2, 18, 2],
+            [0, 3, 18, 3],
+            [0, 4, 18, 4],
+            [0, 5, 18, 5],
+            [0, 6, 18, 6],
+            [0, 7, 18, 7],
+            [0, 8, 18, 8],
+            [0, 9, 18, 9],
+            [0, 10, 18, 10],
+            [0, 11, 18, 11],
+            [0, 12, 18, 12],
+            [0, 13, 18, 13],
+            [0, 14, 18, 14],
+            [0, 15, 18, 15],
+            [0, 16, 18, 16],
+            [0, 17, 18, 17],
+            [0, 18, 18, 18],
+            [1, 0, 1, 18],
+            [18, 0, 18, 1],
+            [18, 1, 18, 2],
+            [18, 2, 18, 3],
+            [18, 3, 18, 4],
+            [18, 4, 18, 5],
+            [18, 5, 18, 6],
+            [18, 6, 18, 7],
+            [18, 7, 18, 8],
+            [18, 8, 18, 9],
+            [18, 9, 18, 10],
+            [18, 10, 18, 11],
+            [18, 11, 18, 12],
+            [18, 12, 18, 13],
+            [18, 13, 18, 14],
+            [18, 14, 18, 15],
+            [18, 15, 18, 16],
+            [18, 16, 18, 17],
+            [18, 17, 18, 18],
+            [19, 0, 19, 18],
+            [20, 0, 20, 18],
+            [21, 0, 21, 18],
+            [22, 0, 22, 18],
+            [23, 0, 23, 18],
+            [24, 0, 24, 18],
+            [25, 0, 25, 18],
+        ];
+
+        function drawGrid() {
+            ctx.fillStyle = 'black';
+            for (let i = 0; i < 20; i++) {
+                for (let j = 0; j < 20; j++) {
+                    ctx.fillRect(j * tile_size, i * tile_size, tile_size, tile_size);
+                }
+            }
+        }
+
+        function drawWalls() {
+            ctx.fillStyle = 'gray';
+            for (let i = 0; i < walls.length; i++) {
+                const [x1, y1, x2, y2] = walls[i];
+                for (let x = x1; x <= x2; x++) {
+                    for (let y = y1; y <= y2; y++) {
+                        ctx.fillRect(x * tile_size, y * tile_size, tile_size, tile_size);
+                    }
+                }
+            }
+        }
+
+        function drawPacMan() {
+            ctx.beginPath();
+            ctx.arc(pacMan.x * tile_size, pacMan.y * tile_size, pacMan.radius, 0, Math.PI * 2);
+            ctx.fillStyle = pacMan.color;
+            ctx.fill();
+            ctx.closePath();
+        }
+
+        function update() {
+            if (pacMan.dx === 1) {
+                pacMan.x += pacMan.speed;
+            } else if (pacMan.dx === -1) {
+                pacMan.x -= pacMan.speed;
+            } else if (pacMan.dy === 1) {
+                pacMan.y += pacMan.speed;
+            } else if (pacMan.dy === -1) {
+                pacMan.y -= pacMan.speed;
+            }
+
+            // Wall collision detection
+            for (let i = 0; i < walls.length; i++) {
+                const [x1, y1, x2, y2] = walls[i];
+                const nx = Math.floor(pacMan.x);
+                const ny = Math.floor(pacMan.y);
+
+                if (nx >= x1 && nx <= x2 && ny >= y1 && ny <= y2) {
+                    pacMan.x -= pacMan.dx * pacMan.speed;
+                    pacMan.y -= pacMan.dy * pacMan.speed;
+                }
+            }
+
+            drawGrid();
+            drawWalls();
+            drawPacMan();
+            requestAnimationFrame(update);
+        }
+
+        // Arrow key controls
+        document.addEventListener('keydown', (e) => {
+            switch (e.key) {
+                case 'ArrowUp':
+                    pacMan.dy = -1;
+                    pacMan.dx = 0;
+                    break;
+                case 'ArrowDown':
+                    pacMan.dy = 1;
+                    pacMan.dx = 0;
+                    break;
+                case 'ArrowLeft':
+                    pacMan.dx = -1;
+                    pacMan.dy = 0;
+                    break;
+                case 'ArrowRight':
+                    pacMan.dx = 1;
+                    pacMan.dy = 0;
+                    break;
+            }
+        });
+
+        update();
+    </script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tic-Tac-Toe</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 50px;
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(3, 100px);
+            grid-template-rows: repeat(3, 100px);
+            margin: 0 auto;
+        }
+        .cell {
+            width: 100px;
+            height: 100px;
+            font-size: 2em;
+            border: 2px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .cell:hover {
+            background-color: #f0f0f0;
+        }
+        .win {
+            background-color: yellow;
+        }
+        .score {
+            font-size: 1.2em;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 1em;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="score">Punteggio: <span id="score">0-0</span></div>
+    <div class="board" id="board">
+        <div class="cell" data-index="0"></div>
+        <div class="cell" data-index="1"></div>
+        <div class="cell" data-index="2"></div>
+        <div class="cell" data-index="3"></div>
+        <div class="cell" data-index="4"></div>
+        <div class="cell" data-index="5"></div>
+        <div class="cell" data-index="6"></div>
+        <div class="cell" data-index="7"></div>
+        <div class="cell" data-index="8"></div>
+    </div>
+    <button onclick="resetGame()">Reset</button>
+    <script>
+        const board = document.getElementById('board');
+        const cells = Array.from(board.getElementsByClassName('cell'));
+        const scoreDisplay = document.getElementById('score');
+        let player = 'X';
+        let isPlayer1Turn = true;
+        let gameOver = false;
+        let playerScore = 0;
+        let cpuScore = 0;
+        let currentPlayer = 'player';
+        const winningCombinations = [
+            [0, 1, 2], [3, 4, 5], [6, 7, 8],
+            [0, 3, 6], [1, 4, 7], [2, 5, 8],
+            [0, 4, 8], [2, 4, 6]
+        ];
+
+        function resetGame() {
+            cells.forEach(cell => {
+                cell.textContent = '';
+                cell.classList.remove('win');
+            });
+            gameOver = false;
+            player = 'X';
+            isPlayer1Turn = true;
+            currentPlayer = 'player';
+            scoreDisplay.textContent = `${playerScore}-${cpuScore}`;
+        }
+
+        function checkWin(player) {
+            for (const combo of winningCombinations) {
+                const [a, b, c] = combo;
+                if (cells[a].textContent === player && cells[b].textContent === player && cells[c].textContent === player) {
+                    cells[a].classList.add('win');
+                    cells[b].classList.add('win');
+                    cells[c].classList.add('win');
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function updateScore(player) {
+            if (player === 'X') {
+                playerScore++;
+            } else {
+                cpuScore++;
+            }
+            scoreDisplay.textContent = `${playerScore}-${cpuScore}`;
+        }
+
+        function makeMove(index) {
+            if (gameOver || cells[index].textContent !== '') return;
+            cells[index].textContent = player;
+            if (checkWin(player)) {
+                updateScore(player);
+                gameOver = true;
+                alert(`Player ${player} ha vinto!`);
+                return;
+            }
+            if (isPlayer1Turn) {
+                isPlayer1Turn = false;
+                currentPlayer = 'cpu';
+            } else {
+                isPlayer1Turn = true;
+                currentPlayer = 'player';
+            }
+            if (!gameOver) {
+                if (currentPlayer === 'cpu') {
+                    setTimeout(() => {
+                        const emptyCells = cells.filter(cell => cell.textContent === '');
+                        const randomIndex = Math.floor(Math.random() * emptyCells.length);
+                        const moveIndex = emptyCells[randomIndex].dataset.index;
+                        makeMove(moveIndex);
+                    }, 500);
+                }
+            }
+        }
+
+        cells.forEach(cell => {
+            cell.addEventListener('click', () => {
+                if (gameOver || currentPlayer !== 'player') return;
+                makeMove(cell.dataset.index);
+            });
+        });
+    </script>
+</body>
+</html>

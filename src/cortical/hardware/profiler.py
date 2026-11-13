@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 
 
 LOCAL_AGENT_MODEL_PRIORITY = (
+    "qwen3.8:27b-iq2_xs",
     "qwen3:14b",
     "qwen3:8b",
     "qwen2.5:14b",

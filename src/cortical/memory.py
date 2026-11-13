@@ -125,6 +125,80 @@ def is_explicit_task_request(text: str) -> bool:
     return any(trigger in norm for trigger in EXPLICIT_TASK_TRIGGERS)
 
 
+VIBE_CODING_QUESTION_PREFIXES = (
+    "come si ",
+    "come posso ",
+    "come funziona ",
+    "cos'è ",
+    "cos e ",
+    "spiegami ",
+    "perché ",
+    "perche ",
+    "what is ",
+    "how do i ",
+    "how does ",
+    "explain ",
+    "why ",
+)
+
+VIBE_CODING_TRIGGERS = (
+    "vibe code",
+    "vibecode",
+    "costruisci un ",
+    "costruisci una ",
+    "costruisci il ",
+    "crea un gioco",
+    "crea un videogioco",
+    "crea un'app",
+    "crea un app",
+    "crea una web app",
+    "crea uno script",
+    "crea un file",
+    "fammi un gioco",
+    "fammi un videogioco",
+    "fammi un'app",
+    "sviluppa un",
+    "programma un",
+    "scrivi il codice",
+    "scrivi un programma",
+    "scrivi uno script",
+    "implementa ",
+    "aggiungi la funzionalità",
+    "modifica il codice",
+    "fixa il bug",
+    "risolvi il bug",
+    "build a ",
+    "build an ",
+    "create a game",
+    "create an app",
+    "make a game",
+    "write a script",
+    "write code",
+    "implement ",
+    "fix the bug",
+)
+
+
+def is_vibe_coding_request(text: str) -> bool:
+    """Returns True when the user asks by voice/chat to build, code, or modify software."""
+    norm = re.sub(r"\s+", " ", (text or "").lower().strip())
+    if not norm or is_ephemeral_utterance(norm):
+        return False
+    if any(norm.startswith(p) for p in VIBE_CODING_QUESTION_PREFIXES):
+        return False
+    if any(trigger in norm for trigger in VIBE_CODING_TRIGGERS):
+        return True
+    # Action verb + software artifact noun
+    has_action = bool(re.search(r"\b(crea|costruisci|sviluppa|genera|scrivi|build|create|make|code|develop)\b", norm))
+    has_artifact = bool(
+        re.search(
+            r"\b(gioco|videogioco|tic\s*tac\s*toe|tris|puzzle|pacman|pac-man|snake|tetris|app|webapp|html|javascript|python|script|pagina web|componente|api|server|giocabile)\b",
+            norm,
+        )
+    )
+    return has_action and has_artifact
+
+
 OPERATIONAL_INSTALL_TRIGGERS = (
     "installa",
     "fallo tu",

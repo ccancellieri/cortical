@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Puzzle 15</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+        }
+        h1 {
+            margin-top: 20px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(4, 100px);
+            grid-gap: 5px;
+            margin: 20px auto;
+            padding: 10px;
+            background-color: #2a2a2a;
+            border-radius: 10px;
+        }
+        .tile {
+            background-color: #3a3a3a;
+            border: 2px solid #5a5a5a;
+            color: #ffffff;
+            font-size: 24px;
+            font-weight: bold;
+            line-height: 100px;
+            text-align: center;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .tile.empty {
+            background-color: #2a2a2a;
+            color: #777;
+        }
+        .controls {
+            margin-top: 20px;
+        }
+        .controls button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            background-color: #4a4a4a;
+            color: #ffffff;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .controls button:hover {
+            background-color: #6a6a6a;
+        }
+        .stats {
+            margin-top: 10px;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Puzzle 15</h1>
+    <div class="grid" id="grid"></div>
+    <div class="controls">
+        <button onclick="shuffleBoard()">Mescola</button>
+        <button onclick="resetBoard()">Reset</button>
+    </div>
+    <div class="stats">
+        <p>Mosse: <span id="moveCount">0</span></p>
+        <p>Tempo: <span id="timer">0</span>s</p>
+    </div>
+    <script>
+        const grid = document.getElementById('grid');
+        const moveCountDisplay = document.getElementById('moveCount');
+        const timerDisplay = document.getElementById('timer');
+        let board = [];
+        let emptyTileIndex = 15;
+        let moveCount = 0;
+        let startTime = 0;
+        let timerInterval;
+        let puzzleSolved = false;
+
+        function createBoard() {
+            for (let i = 0; i < 16; i++) {
+                const tile = document.createElement('div');
+                tile.className = 'tile';
+                tile.textContent = i === 15 ? '' : i + 1;
+                tile.style.display = 'flex';
+                tile.style.justifyContent = 'center';
+                tile.style.alignItems = 'center';
+                tile.addEventListener('click', () => handleTileClick(i));
+                grid.appendChild(tile);
+            }
+        }
+
+        function handleTileClick(index) {
+            if (puzzleSolved) return;
+            const tile = board[index];
+            const emptyTile = board[emptyTileIndex];
+            const row = Math.floor(index / 4);
+            const col = index % 4;
+            const emptyRow = Math.floor(emptyTileIndex / 4);
+            const emptyCol = emptyTileIndex % 4;
+
+            if (row === emptyRow) {
+                if (Math.abs(col - emptyCol) === 1) {
+                    swapTiles(index, emptyTileIndex);
+                    moveCount++;
+                    moveCountDisplay.textContent = moveCount;
+                    checkWin();
+                }
+            } else if (col === emptyCol) {
+                if (Math.abs(row - emptyRow) === 1) {
+                    swapTiles(index, emptyTileIndex);
+                    moveCount++;
+                    moveCountDisplay.textContent = moveCount;
+                    checkWin();
+                }
+            }
+        }
+
+        function swapTiles(index1, index2) {
+            const temp = board[index1];
+            board[index1] = board[index2];
+            board[index2] = temp;
+            renderBoard();
+        }
+
+        function renderBoard() {
+            for (let i = 0; i < 16; i++) {
+                const tile = grid.children[i];
+                tile.textContent = i === 15 ? '' : board[i] + '';
+                tile.classList.toggle('empty', i === 15);
+            }
+        }
+
+        function checkWin() {
+            let isSolved = true;
+            for (let i = 0; i < 16; i++) {
+                if (i === 15) continue;
+                if (board[i] !== i + 1) {
+                    isSolved = false;
+                    break;
+                }
+            }
+            if (isSolved && !puzzleSolved) {
+                puzzleSolved = true;
+                clearInterval(timerInterval);
+                alert('Hai vinto! Mosse: ' + moveCount + ' - Tempo: ' + timerDisplay.textContent + 's');
+            }
+        }
+
+        function shuffleBoard() {
+            if (puzzleSolved) {
+                resetBoard();
+                return;
+            }
+            clearInterval(timerInterval);
+            moveCount = 0;
+            moveCountDisplay.textContent = moveCount;
+            startTime = Date.now();
+            timerDisplay.textContent = 0;
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                timerDisplay.textContent = elapsed;
+            }, 1000);
+
+            let shuffled = [...Array(16).keys()].sort(() => Math.random() - 0.5);
+            let valid = false;
+            let tries = 0;
+            while (!valid && tries < 1000) {
+                valid = true;
+                for (let i = 0; i < 16; i++) {
+                    if (i === 15) continue;
+                    if (shuffled[i] !== i + 1) {
+                        const row = Math.floor(i / 4);
+                        const col = i % 4;
+                        const emptyRow = Math.floor(15 / 4);
+                        const emptyCol = 15 % 4;
+                        if (row === emptyRow && Math.abs(col - emptyCol) === 1) {
+                            continue;
+                        } else if (col === emptyCol && Math.abs(row - emptyRow) === 1) {
+                            continue;
+                        } else {
+                            valid = false;
+                            break;
+                        }
+                    }
+                }
+                tries++;
+            }
+            if (tries >= 1000) {
+                alert('Impossibile mescolare');
+                return;
+            }
+            board = shuffled;
+            emptyTileIndex = 15;
+            renderBoard();
+        }
+
+        function resetBoard() {
+            clearInterval(timerInterval);
+            moveCount = 0;
+            moveCountDisplay.textContent = moveCount;
+            startTime = Date.now();
+            timerDisplay.textContent = 0;
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                timerDisplay.textContent = elapsed;
+            }, 1000);
+            board = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            emptyTileIndex = 15;
+            renderBoard();
+        }
+
+        createBoard();
+        renderBoard();
+    </script>
+</body>
+</html>

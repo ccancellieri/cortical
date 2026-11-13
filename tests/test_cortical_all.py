@@ -1996,6 +1996,57 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(res_d["decision"], "deny")
         self.assertEqual(res_d["feedback"], "Usa unittest")
 
+    def test_31_voice_vibe_coding_and_voice_approval_broker(self) -> None:
+        from cortical.memory import is_vibe_coding_request
+        from cortical.server import CorticalLiveService
+        from cortical.wiki.db import AccessContext, CorticalWikiDB
+
+        # 1. Vibe-coding intent detection (actions -> True, pure questions -> False)
+        self.assertTrue(is_vibe_coding_request("Vibe code un videogioco tic tac toe in html"))
+        self.assertTrue(is_vibe_coding_request("Costruisci un puzzle scorrevole in javascript"))
+        self.assertTrue(is_vibe_coding_request("Build a Pac-Man game in HTML5 canvas"))
+        self.assertFalse(is_vibe_coding_request("Come si costruisce un videogioco in html?"))
+        self.assertFalse(is_vibe_coding_request("Che ore sono?"))
+
+        db = CorticalWikiDB(self.wiki_db_path)
+        db.ensure_workspace(AccessContext(), root_path="/", can_write=True)
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        svc.repo_root = self.root
+
+        # 2. Voice utterance with vibe-coding intent dispatches directly to system2_agentic
+        dispatched: list[str] = []
+        svc.voice_engine.agentic_dispatch_fn = lambda goal: (dispatched.append(goal) or "pi-voice-1")
+        st_v, res_v = svc.handle_api(
+            "POST",
+            "/api/voice",
+            {},
+            {"utterance": "Vibe code un videogioco tic tac toe locale", "speak": False, "from_mic": True, "lang": "it"},
+        )
+        self.assertEqual(st_v, 200)
+        self.assertEqual(res_v["route"], "system2_agentic")
+        self.assertEqual(len(dispatched), 1)
+        self.assertIn("tic tac toe", dispatched[0].lower())
+
+        # 3. Voice approval resolves pending ApprovalBroker request even when session_id is selected
+        req = svc.agent_mgr.approvals.request(
+            session_id="pi-voice-1",
+            tool="write",
+            args={"path": "examples/vibe_games/tic_tac_toe/index.html"},
+            role="Coordinator",
+            model="qwen3.8:27b-iq2_xs",
+        )
+        self.assertEqual(req["decision"], "pending")
+        st_a, res_a = svc.handle_api(
+            "POST",
+            "/api/voice",
+            {},
+            {"utterance": "approva questa sessione", "session_id": "pi-voice-1", "speak": False, "from_mic": True, "lang": "it"},
+        )
+        self.assertEqual(st_a, 200)
+        self.assertEqual(res_a["route"], "permission_feedback")
+        self.assertEqual(res_a["permission_updated"], "allow")
+        self.assertFalse(svc.agent_mgr.approvals.has_pending("pi-voice-1"))
+
 
 if __name__ == "__main__":
     unittest.main()

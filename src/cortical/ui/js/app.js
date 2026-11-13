@@ -27,6 +27,7 @@ import {
 import {
   audioState,
   setAudioResponses,
+  setMicMode,
   setVoiceTranscriptHandler,
   toggleAlwaysOnMic,
   toggleAudioResponses,
@@ -173,6 +174,9 @@ function wireEvents() {
     document.querySelector('.workspace')?.classList.toggle('sidebar-collapsed');
   });
   document.getElementById('btn-audio-toggle')?.addEventListener('click', toggleAudioResponses);
+  document.getElementById('mic-mode-select')?.addEventListener('change', (e) => {
+    setMicMode(e.target?.value || 'auto');
+  });
   document.getElementById('btn-always-on')?.addEventListener('click', toggleAlwaysOnMic);
   document.getElementById('btn-stop-top')?.addEventListener('click', triggerStopBargeIn);
   document.getElementById('btn-options-top')?.addEventListener('click', (e) => {

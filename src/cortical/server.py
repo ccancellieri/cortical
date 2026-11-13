@@ -2405,6 +2405,28 @@ class CorticalLiveService:
         def _on_duck() -> None:
             duck_native_tts(force_stop=True)
 
+        def _resolve_voice_approval(
+            approved: bool, remember_session: bool, remember_always: bool, raw_utterance: str
+        ) -> Optional[str]:
+            pending = self.agent_mgr.approvals.list_pending()
+            if not pending:
+                return None
+            target = pending[0]
+            if not approved:
+                decision = "deny"
+            elif remember_always:
+                decision = "allow_always"
+            elif remember_session:
+                decision = "allow_session"
+            else:
+                decision = "allow_once"
+            feedback = "" if approved else raw_utterance.strip()
+            aid = target.get("approval_id") or target.get("request_id") or ""
+            resolved = self.agent_mgr.approvals.resolve(aid, decision=decision, feedback=feedback)
+            if not resolved.get("ok"):
+                return None
+            return str(target.get("pattern") or target.get("tool") or aid)
+
         self.voice_engine = CorticalVoiceEngine(
             wiki_db=self.wiki_db,
             permission_gate=self.perm_gate,
@@ -2414,6 +2436,7 @@ class CorticalLiveService:
             duck_callback=_on_duck,
             memory_curator=self.memory_curator,
             sessions_status_fn=self.agent_mgr.list_sessions,
+            approvals_resolver_fn=_resolve_voice_approval,
         )
 
     def _discover_catalog(self) -> dict[str, Any]:
@@ -3345,9 +3368,17 @@ class CorticalLiveService:
             t0 = time.perf_counter()
 
             # Follow-up sent inside an open/reopened task continues THAT task in its own scope
-            # (unless the utterance is a barge-in stop command).
+            # (unless the utterance is a barge-in stop command or a voice approval for a pending request).
             is_stop_cmd = bool(re.search(r"\b(ferma|fermati|stop|basta|annulla)\b", utterance.lower()))
-            if session_id and utterance.strip() and not is_stop_cmd:
+            is_approval_cmd = bool(
+                session_id
+                and self.agent_mgr.approvals.has_pending(session_id)
+                and re.search(
+                    r"\b(approva|consenti|autorizza|rifiuta|blocca|nega|approve|allow|authorize|reject|deny|block)\b",
+                    utterance.lower(),
+                )
+            )
+            if session_id and utterance.strip() and not is_stop_cmd and not is_approval_cmd:
                 cont = self.agent_mgr.continue_session(
                     session_id,
                     utterance.strip(),

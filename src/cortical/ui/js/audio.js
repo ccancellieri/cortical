@@ -19,6 +19,7 @@ let assistantBaselineCentroidHz = 0;
 
 export const audioState = {
   alwaysOnActive: false,
+  micMode: 'auto', // 'auto' (1.4s) | 'vibe' (2.8s + live textarea) | 'dictate' (manual/voice send)
   recognition: null,
   micFinalBuffer: '',
   micInterimBuffer: '',
@@ -26,6 +27,7 @@ export const audioState = {
   micRestartTimer: null,
   micIsRecognizing: false,
   micNetworkErrors: 0,
+  micCaptureErrors: 0,
   acousticUserPriorityDetected: false,
   lastMicRms: 0,
   lastAssistantRms: 0,
@@ -33,6 +35,13 @@ export const audioState = {
   lastSpokenAtMs: 0,
   localTtsShieldUntilMs: 0,
 };
+
+export function setMicMode(mode) {
+  const allowed = new Set(['auto', 'vibe', 'dictate']);
+  audioState.micMode = allowed.has(mode) ? mode : 'auto';
+  const sel = document.getElementById('mic-mode-select');
+  if (sel && sel.value !== audioState.micMode) sel.value = audioState.micMode;
+}
 
 let onVoiceTranscriptCb = null;
 
@@ -304,7 +313,15 @@ export function isSelfEchoClient(candidate) {
   return overlap >= 0.45;
 }
 
-function flushMicTranscriptBuffer() {
+function mirrorBufferToComposer(preview) {
+  if (audioState.micMode === 'auto') return;
+  const pi = document.getElementById('prompt-input');
+  if (!pi) return;
+  pi.value = preview;
+  pi.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function flushMicTranscriptBuffer(forceSubmit = false) {
   if (audioState.micCommitTimer) {
     clearTimeout(audioState.micCommitTimer);
     audioState.micCommitTimer = null;
@@ -320,6 +337,20 @@ function flushMicTranscriptBuffer() {
     if (lt) lt.textContent = '🔇 Eco ignorato';
     return;
   }
+  if (audioState.micMode === 'dictate' && !forceSubmit) {
+    if (pi) {
+      pi.value = combined;
+      pi.dispatchEvent(new Event('input', { bubbles: true }));
+      pi.focus();
+    }
+    const lt = document.getElementById('live-transcript');
+    if (lt) lt.textContent = `📝 Dettato (${combined.split(/\s+/).length} parole)`;
+    return;
+  }
+  if (pi && audioState.micMode === 'vibe') {
+    pi.value = '';
+    pi.dispatchEvent(new Event('input', { bubbles: true }));
+  }
   const lt = document.getElementById('live-transcript');
   if (lt) {
     lt.textContent = `🗣️ "${combined}"`;
@@ -332,7 +363,8 @@ function flushMicTranscriptBuffer() {
 
 function scheduleMicCommit(delayMs) {
   if (audioState.micCommitTimer) clearTimeout(audioState.micCommitTimer);
-  audioState.micCommitTimer = setTimeout(flushMicTranscriptBuffer, delayMs);
+  const effectiveDelay = audioState.micMode === 'vibe' ? Math.max(delayMs, 2800) : delayMs;
+  audioState.micCommitTimer = setTimeout(() => flushMicTranscriptBuffer(false), effectiveDelay);
 }
 
 function startMicRecognizer() {
@@ -407,10 +439,17 @@ export function toggleAlwaysOnMic() {
           audioState.micFinalBuffer = `${audioState.micFinalBuffer} ${chunk}`.replace(/\s+/g, ' ').trim();
           audioState.micInterimBuffer = '';
           if (hasWakeOrBargeInWord(audioState.micFinalBuffer) && audioState.micFinalBuffer.split(/\s+/).length <= 4) {
-            flushMicTranscriptBuffer();
+            flushMicTranscriptBuffer(true);
             return;
           }
-          scheduleMicCommit(1250);
+          if (audioState.micMode === 'dictate' && /\b(invia comando|esegui adesso|avvia task|send now|run it now)\s*$/i.test(audioState.micFinalBuffer)) {
+            audioState.micFinalBuffer = audioState.micFinalBuffer.replace(/\b(invia comando|esegui adesso|avvia task|send now|run it now)\s*$/i, '').trim();
+            flushMicTranscriptBuffer(true);
+            return;
+          }
+          if (audioState.micMode !== 'dictate') {
+            scheduleMicCommit(1400);
+          }
         } else {
           currentInterim += `${chunk} `;
           if (isAssistantAudioPlaying() && !isSelfEchoClient(currentInterim)) {
@@ -426,12 +465,17 @@ export function toggleAlwaysOnMic() {
       }
       if (currentInterim.trim()) {
         audioState.micInterimBuffer = currentInterim.trim();
-        scheduleMicCommit(2200);
+        if (audioState.micMode !== 'dictate') {
+          scheduleMicCommit(2200);
+        }
       }
       const preview = `${audioState.micFinalBuffer} ${audioState.micInterimBuffer}`.replace(/\s+/g, ' ').trim();
-      if (preview && lt) {
-        lt.textContent = `🎙️ ${preview}`;
-        lt.title = preview;
+      if (preview) {
+        mirrorBufferToComposer(preview);
+        if (lt) {
+          lt.textContent = `🎙️ ${preview}`;
+          lt.title = preview;
+        }
       }
     };
 
