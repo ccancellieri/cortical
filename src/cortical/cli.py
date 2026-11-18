@@ -13,8 +13,10 @@ from .grounding import (
     ensure_chrome_debug_instance,
     extract_browser_intent,
     extract_page_read_intent,
+    extract_url_page_and_forms,
     extract_weather_intent,
     fetch_weather_forecast,
+    fill_form_in_chrome_or_playwright,
     format_page_reading_response,
     open_url_via_cdp_http,
     read_active_chrome_page,
@@ -23,6 +25,8 @@ from .grounding import (
 from .hardware.profiler import HardwareProfiler
 from .memory import MemoryCurator
 from .permissions.gate import AdaptivePermissionGate
+from .portability import export_cortical_bundle, import_cortical_bundle, list_usb_volumes
+from .remote_gateway import CorticalRemoteGateway
 from .server import run_live_server
 from .skills_hub import CorticalSkillHub
 from .voice.engine import CorticalVoiceEngine
@@ -66,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     # 2. crawl
     p_crawl = sub.add_parser("crawl", help="Run deterministic Merkle-tree delta crawler on a directory")
     p_crawl.add_argument("directory", help="Directory to index")
+    p_crawl.add_argument("--llm", action="store_true", help="Use local Ollama for 3-tier semantic concept summaries")
 
     # 3. navigate
     p_nav = sub.add_parser("navigate", help="Navigate Merkle tree at depth light|medium|high|max")
@@ -168,12 +173,105 @@ def main(argv: list[str] | None = None) -> int:
     p_cens.add_argument("--url", default="")
     p_cens.add_argument("--background", action="store_true")
 
+    # 21b. chrome-extract & chrome-fill (Structured DOM / Form Extraction & Filling)
+    p_cext = sub.add_parser("chrome-extract", help="Fetch a URL via Chrome CDP/Playwright/HTTP and extract text, links & form fields")
+    p_cext.add_argument("--url", required=True)
+
+    p_cfill = sub.add_parser("chrome-fill", help="Fill form fields and optional file upload on a URL via Chrome CDP/Playwright")
+    p_cfill.add_argument("--url", required=True)
+    p_cfill.add_argument("--fields-json", required=True)
+    p_cfill.add_argument("--upload", default="")
+    p_cfill.add_argument("--submit", action="store_true")
+
     # 22. serve (Live HTTP + Voice + Second Brain Daemon)
     p_serve = sub.add_parser("serve", help="Run the live Cortical HTTP, Voice & Second Brain service")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
 
+    # 23. gateway (Optional Remote Gateway Key, Accounts, Tunnel & Invite CLI)
+    p_gw = sub.add_parser("gateway", help="Manage optional Remote Gateway Key, Accounts (max_users), Tunnel & Invites")
+    p_gw.add_argument("action", choices=["status", "config", "expose", "stop", "invite", "duckdns"], default="status")
+    p_gw.add_argument("--port", type=int, default=8765)
+    p_gw.add_argument("--provider", default="auto", choices=["auto", "localhost.run", "cloudflared", "pinggy"])
+    p_gw.add_argument("--auth-enabled", choices=["true", "false"], default=None)
+    p_gw.add_argument("--allow-localhost", choices=["true", "false"], default=None)
+    p_gw.add_argument("--max-users", type=int, default=None)
+    p_gw.add_argument("--rotate-key", action="store_true")
+    p_gw.add_argument("--include-secret", action="store_true")
+    p_gw.add_argument("--email", default="ccancellieri@hotmail.com")
+    p_gw.add_argument("--public-url", default="")
+    p_gw.add_argument("--duckdns-domain", default="")
+    p_gw.add_argument("--duckdns-token", default=None)
+
+    # 24. export / import (Portable USB Migration Bundle)
+    p_exp = sub.add_parser("export", help="Export Cortical memory, tasks, chats & skills to a portable .tar.gz bundle (e.g. USB)")
+    p_exp.add_argument("--output", default="", help="Destination .tar.gz path or USB folder (e.g. /Volumes/USB)")
+    p_exp.add_argument("--volumes", action="store_true", help="List detected USB/external volumes and exit")
+
+    p_imp = sub.add_parser("import", help="Import a Cortical .tar.gz backup bundle onto this machine")
+    p_imp.add_argument("--input", required=True, help="Source .tar.gz bundle path")
+    p_imp.add_argument("--mode", default="merge", choices=["merge", "replace"])
+
+    p_tok = sub.add_parser("token-report", help="Generate zero-cloud-token local + remote usage & ROI report")
+    p_tok.add_argument("--episode-id", default=None, help="Filter local runs by Cortical episode_id")
+    p_tok.add_argument("--conversation-id", default=None, help="Filter remote transcript by conversation_id")
+    p_tok.add_argument("--brain-dir", default=None, help="Custom Antigravity brain directory path")
+    p_tok.add_argument("--narrative", action="store_true", help="Orchestrate concise ROI summary via local Ollama LLM")
+    p_tok.add_argument("--lang", default=None, help="Report language: auto, it, en, es")
+    p_tok.add_argument("--full", action="store_true", help="Print full multi-section global history instead of compact turn-only summary")
+    p_tok.add_argument("--html", nargs="?", const="html/token_report.html", default=None, help="Export static HTML dashboard (default: html/token_report.html)")
+    p_tok.add_argument("--open", action="store_true", help="Open generated HTML dashboard in default browser")
+    p_tok.add_argument("--json", action="store_true", help="Output raw JSON instead of Markdown")
+
+    p_wdb = sub.add_parser("wiki-dashboard", help="Export zero-server static Wiki Explorer & Maintenance HTML")
+    p_wdb.add_argument("--output", default="html/wiki.html", help="Destination HTML path")
+    p_wdb.add_argument("--open", action="store_true", help="Open generated Wiki HTML in default browser")
+
+    p_wap = sub.add_parser("wiki-apply", help="Apply offline maintenance JSON patch exported from static Wiki Dashboard")
+    p_wap.add_argument("patch", help="Path to wiki_maintenance_patch.json")
+
+    p_wdis = sub.add_parser("wiki-distill", help="Distill knowledge from a subtree/context/episode via local LLM and discard heavy L4 Max blobs")
+    p_wdis.add_argument("--target", required=True, help="Target ID or prefix (e.g. /src/cortical, root:private_notes, or episode_id)")
+    p_wdis.add_argument("--kind", default="subtree", choices=["subtree", "context_root", "episode", "topic"], help="Target kind")
+    p_wdis.add_argument("--keep-tier", default="l2", choices=["l1", "l2", "l3"], help="Tier depth to keep while discarding L4 Max")
+    p_wdis.add_argument("--no-llm", action="store_true", help="Skip local LLM call and use deterministic distillation")
+
+    p_san = sub.add_parser("sanitize", help="Strip metadata & pseudonymize/anonymize a file locally before cloud LLM use")
+    p_san.add_argument("file", help="Path to source file (.txt, .md, .docx, .xlsx, .pdf, etc.)")
+    p_san.add_argument("--profile", default=None, help="Privacy profile from cortical.config.json (max_security, low, medium, max_context, or custom)")
+    p_san.add_argument("--out", default=None, help="Optional output file path for sanitized text")
+    p_san.add_argument("--llm", action="store_true", help="Also rewrite GDPR quasi-identifiers via offline local LLM")
+    p_san.add_argument("--redact", action="store_true", help="Use [REDACTED] instead of consistent [PERSON_1]/[EMAIL_1] pseudonyms")
+    p_san.add_argument("--json", action="store_true", help="Output JSON summary (excluding local pseudonym map)")
+
+    p_set = sub.add_parser("settings-dashboard", help="Export zero-server static Configuration Form HTML (html/settings.html)")
+    p_set.add_argument("--output", default="html/settings.html", help="Destination HTML path")
+    p_set.add_argument("--open", action="store_true", help="Open generated settings HTML in default browser")
+
+    p_tpr = sub.add_parser("token-prune", help="Prune old granular agent_runs or reset counters")
+    p_tpr.add_argument("--days", type=int, default=90, help="Retention window in days (default: 90)")
+    p_tpr.add_argument("--reset", action="store_true", help="Reset all granular agent_runs counters")
+
+    p_loop = sub.add_parser("local-loop", help="Run multi-model iterative local reasoning loop with @wiki/@concept/@skill refs & privacy sanitization")
+    p_loop.add_argument("prompt", help="Task/question (supports @wiki:, @concept:, @skill:, @insight:, @root:, /local, /privacy:...)")
+    p_loop.add_argument("--models", default="", help="Comma-separated local models chain (default from cortical.config.json local_loop)")
+    p_loop.add_argument("--loops", type=int, default=3, help="Number of local refinement passes (default: 3)")
+    p_loop.add_argument("--privacy", default=None, help="Privacy profile (max_security, low, medium, max_context)")
+    p_loop.add_argument("--file", "--attach", dest="attach_files", action="append", default=None, help="Sensitive file(s) to sanitize locally (repeatable or comma-separated)")
+    p_loop.add_argument("--max-tokens", type=int, default=1200, help="Max output tokens per local pass (default: 1200)")
+    p_loop.add_argument("--context-chars", type=int, default=16000, help="Context character budget across attached files and Wiki refs (default: 16000)")
+    p_loop.add_argument("--timeout", type=float, default=90.0, help="Per-pass runner timeout in seconds (default: 90.0)")
+    p_loop.add_argument("--force-local", action="store_true", help="Block remote cloud forwarding even for complex tasks")
+    p_loop.add_argument("--json", action="store_true", help="Print full JSON result instead of Markdown summary")
+
     args = parser.parse_args(argv)
+    if ".cortical_data" in str(getattr(args, "db", "")):
+        try:
+            from .wiki_static import auto_apply_pending_wiki_patch
+
+            auto_apply_pending_wiki_patch(CorticalWikiDB(args.db), repo_root=Path("."))
+        except Exception:  # noqa: BLE001
+            pass
 
     if args.cmd == "doctor":
         profiler = HardwareProfiler()
@@ -183,9 +281,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "crawl":
         db = CorticalWikiDB(args.db)
-        crawler = DeterministicMerkleCrawler(db)
+        summarizer = None
+        if getattr(args, "llm", False):
+            from .wiki.crawler import make_ollama_3tier_summarizer
+
+            summarizer = make_ollama_3tier_summarizer()
+        crawler = DeterministicMerkleCrawler(db, summarizer=summarizer)
         stats = crawler.crawl_directory(args.directory)
-        print(json.dumps(dataclasses.asdict(stats), indent=2))
+        out = dataclasses.asdict(stats)
+        html_dir = Path("html")
+        if html_dir.is_dir() and ".cortical_data" in str(args.db):
+            from .wiki_static import export_static_wiki_dashboard
+
+            out["wiki_dashboard"] = export_static_wiki_dashboard(db, html_dir / "wiki.html")
+        print(json.dumps(out, indent=2))
         return 0
 
     if args.cmd == "navigate":
@@ -292,11 +401,13 @@ def main(argv: list[str] | None = None) -> int:
         hub = CorticalSkillHub(db, args.skills_dir)
         steps = json.loads(args.steps_json)
         goal = args.goal or f"Task {args.episode_id}"
+        use_local = bool(".cortical_data" in str(args.db))
         synth = hub.synthesize_task_discussion_3plus1(
             episode_id=args.episode_id,
             goal=goal,
             discussion_steps=steps,
             user_closing_notes=args.notes,
+            use_local_llm=use_local,
         )
         skill_eval = hub.evaluate_and_compile_skill(
             episode_id=args.episode_id,
@@ -304,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
             lessons_learned=synth["lessons_learned"],
             discussion_steps=steps,
             force_create=bool(args.force_skill),
+            use_local_llm=use_local,
         )
         arch = curator.archive_task(args.episode_id, user_closing_notes=synth["light"])
         print(
@@ -399,6 +511,22 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(res, indent=2))
         return 0 if res.get("active") else 1
 
+    if args.cmd == "chrome-extract":
+        res = extract_url_page_and_forms(args.url)
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if args.cmd == "chrome-fill":
+        fields = json.loads(args.fields_json)
+        res = fill_form_in_chrome_or_playwright(
+            args.url,
+            fields if isinstance(fields, dict) else {},
+            upload_file=args.upload,
+            submit=bool(args.submit),
+        )
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
     if args.cmd == "serve":
         run_live_server(
             host=args.host,
@@ -406,6 +534,227 @@ def main(argv: list[str] | None = None) -> int:
             wiki_db_path=args.db,
             perm_db_path=args.perm_db,
         )
+        return 0
+
+    if args.cmd == "gateway":
+        gw = CorticalRemoteGateway(args.db, local_port=args.port)
+        if args.action == "status":
+            print(json.dumps(gw.get_status(include_secret=bool(args.include_secret)), indent=2))
+            return 0
+        if args.action == "config":
+            upd: dict[str, object] = {}
+            if args.auth_enabled is not None:
+                upd["auth_enabled"] = args.auth_enabled == "true"
+            if args.allow_localhost is not None:
+                upd["allow_localhost_bypass"] = args.allow_localhost == "true"
+            if args.max_users is not None:
+                upd["max_users"] = args.max_users
+            if args.rotate_key:
+                upd["rotate_key"] = True
+            if args.duckdns_domain:
+                upd["duckdns_domain"] = args.duckdns_domain
+            if args.duckdns_token is not None:
+                upd["duckdns_token"] = args.duckdns_token
+            if args.public_url:
+                upd["public_gateway_url"] = args.public_url
+            print(json.dumps(gw.configure(upd), indent=2))
+            return 0
+        if args.action == "expose":
+            res = gw.start_tunnel(provider=args.provider, local_port=args.port)
+            print(json.dumps(res, indent=2))
+            return 0 if res.get("ok") else 1
+        if args.action == "stop":
+            print(json.dumps(gw.stop_tunnel(), indent=2))
+            return 0
+        if args.action == "duckdns":
+            res = gw.update_duckdns(
+                domain=args.duckdns_domain or None,
+                token=args.duckdns_token,
+            )
+            print(json.dumps(res, indent=2))
+            return 0 if res.get("ok") else 1
+        if args.action == "invite":
+            res = gw.send_access_email(
+                recipient_email=args.email,
+                base_public_url=args.public_url or None,
+            )
+            print(json.dumps(res, indent=2))
+            return 0
+
+    if args.cmd == "export":
+        if args.volumes:
+            print(json.dumps({"volumes": list_usb_volumes()}, indent=2))
+            return 0
+        res = export_cortical_bundle(
+            args.output or None,
+            wiki_db_path=args.db,
+            permissions_db_path=args.perm_db,
+            skills_dir=args.skills_dir,
+        )
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if args.cmd == "import":
+        res = import_cortical_bundle(
+            args.input,
+            mode=args.mode,
+            wiki_db_path=args.db,
+            permissions_db_path=args.perm_db,
+            skills_dir=args.skills_dir,
+        )
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if args.cmd == "token-report":
+        from .token_analytics import (
+            build_token_report,
+            export_static_token_dashboard,
+            format_token_report_markdown,
+        )
+
+        db = CorticalWikiDB(args.db)
+        report = build_token_report(
+            db,
+            episode_id=args.episode_id,
+            conversation_id=args.conversation_id,
+            brain_dir=Path(args.brain_dir) if args.brain_dir else None,
+            include_narrative=bool(args.narrative),
+            lang=getattr(args, "lang", None),
+        )
+        html_out = export_static_token_dashboard(report, Path(args.html)) if args.html else None
+        if html_out is not None and getattr(args, "open", False):
+            import webbrowser
+
+            webbrowser.open(html_out.resolve().as_uri())
+        if args.json:
+            if html_out is not None:
+                report["html_dashboard_path"] = str(html_out.resolve())
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(
+                format_token_report_markdown(
+                    report,
+                    dashboard_path=html_out,
+                    lang=getattr(args, "lang", None),
+                    turn_only=not getattr(args, "full", False),
+                )
+            )
+        return 0
+
+    if args.cmd == "wiki-dashboard":
+        from .wiki_static import export_static_wiki_dashboard
+
+        db = CorticalWikiDB(args.db)
+        res = export_static_wiki_dashboard(db, Path(args.output))
+        if getattr(args, "open", False):
+            import webbrowser
+
+            webbrowser.open(Path(args.output).resolve().as_uri())
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "wiki-apply":
+        from .wiki_static import apply_wiki_maintenance_patch, export_static_wiki_dashboard
+
+        db = CorticalWikiDB(args.db)
+        patch = json.loads(Path(args.patch).read_text(encoding="utf-8"))
+        res = apply_wiki_maintenance_patch(db, patch)
+        html_dir = Path("html")
+        if html_dir.is_dir() and ".cortical_data" in str(args.db):
+            res["wiki_dashboard"] = export_static_wiki_dashboard(db, html_dir / "wiki.html")
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "wiki-distill":
+        from .wiki_static import export_static_wiki_dashboard
+
+        db = CorticalWikiDB(args.db)
+        hub = CorticalSkillHub(db, args.skills_dir)
+        res = hub.distill_and_compact_knowledge(
+            target_kind=args.kind,
+            target_id=args.target,
+            keep_tier=args.keep_tier,
+            use_local_llm=not bool(args.no_llm),
+        )
+        html_dir = Path("html")
+        if html_dir.is_dir() and ".cortical_data" in str(args.db):
+            res["wiki_dashboard"] = export_static_wiki_dashboard(db, html_dir / "wiki.html")
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "sanitize":
+        from .privacy_sanitizer import sanitize_file, sanitize_with_profile
+
+        if getattr(args, "profile", None):
+            payload = sanitize_with_profile(Path(args.file), profile_name=args.profile)
+            txt = payload["sanitized_text"]
+        else:
+            res = sanitize_file(
+                Path(args.file),
+                redact=bool(args.redact),
+                use_local_llm=bool(args.llm),
+            )
+            payload = res.to_dict(include_map=False)
+            txt = res.sanitized_text
+        if args.out:
+            Path(args.out).write_text(txt, encoding="utf-8")
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(txt)
+        return 0
+
+    if args.cmd == "settings-dashboard":
+        from .settings_static import export_static_settings_dashboard
+
+        out_p = export_static_settings_dashboard(Path(args.output))
+        if getattr(args, "open", False):
+            import webbrowser
+
+            webbrowser.open(out_p.resolve().as_uri())
+        print(json.dumps({"output_path": str(out_p)}, indent=2))
+        return 0
+
+    if args.cmd == "token-prune":
+        from .token_analytics import prune_old_token_data
+
+        db = CorticalWikiDB(args.db)
+        res = prune_old_token_data(db, retention_days=args.days, reset_all=bool(args.reset))
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "local-loop":
+        db = CorticalWikiDB(args.db)
+        hub = CorticalSkillHub(db, args.skills_dir)
+        model_list = [m.strip() for m in str(args.models or "").split(",") if m.strip()] or None
+        attached: list[str] = []
+        for item in (args.attach_files or []):
+            for part in str(item).split(","):
+                if part.strip():
+                    attached.append(part.strip())
+        res = hub.run_multi_model_local_loop(
+            args.prompt,
+            models=model_list,
+            max_loops=int(args.loops),
+            privacy_profile=args.privacy,
+            attached_files=attached or None,
+            force_local_only=bool(args.force_local),
+            max_tokens=int(args.max_tokens),
+            context_budget_chars=int(args.context_chars),
+            timeout=float(args.timeout),
+        )
+        if args.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            print(f"### Cortical Multi-Model Local Loop (`{res['episode_id']}`)")
+            print(
+                f"- **Models:** {' → '.join(res['models_used'])} · **Tokens Offloaded:** `{res.get('total_local_tokens', 0):,}` "
+                f"in `{res.get('total_elapsed_sec', 0.0):.1f}s` · **Privacy:** `{res['privacy_profile']}` · **Completed Locally:** `{res['completed_locally']}`"
+            )
+            print(f"- **Distilled Insight (`{res['distilled_insight_id']}`):** {res['distilled_insight']}\n")
+            print(res["local_answer"])
+            if res["needs_remote_escalation"]:
+                print("\n---\n" + res["sanitized_remote_prompt"])
         return 0
 
     return 1

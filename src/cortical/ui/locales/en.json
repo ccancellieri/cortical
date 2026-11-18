@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "code": "en",
+    "label": "🇬🇧 EN",
+    "toggleBtn": "🇬🇧 Lang: EN",
+    "nextBtn": "🇪🇸 ES"
+  },
+  "nav": {
+    "workspace": "💬 Workspace",
+    "concepts": "🧠 Concepts",
+    "studio": "⚙️ Studio & Safety",
+    "gatewayBtn": "🌐 Gateway"
+  },
+  "topbar": {
+    "initializing": "Initializing...",
+    "audioOn": "🔊 Audio: ON",
+    "audioOff": "🔇 Audio: OFF",
+    "micOff": "🎤 Mic",
+    "micOn": "🟢 Mic ON",
+    "micDenied": "🎤 Denied",
+    "listening": "Listening...",
+    "listeningShort": "🎙️ Listening",
+    "micDeniedStatus": "🚫 Mic denied",
+    "noMicStatus": "⚠️ No microphone detected",
+    "micBusyRetry": "⚠️ Mic busy, retrying...",
+    "liveReady": "Ready",
+    "duckNormal": "🔊 100%",
+    "duckLow": "🔉 14% Duck",
+    "stop": "🛑 Stop",
+    "guide": "📖 Guide",
+    "close": "✕ Close",
+    "guideTitle": "📖 Cortical v0.4 Interactive Guide (IT / EN / ES)",
+    "tooltipHint": "💡 Click to open the interactive guide",
+    "ttsVoiceLabel": "Neural Voice (IT / EN / ES)",
+    "chromeProfileLabel": "Chrome Session (Browser Agent)",
+    "chromeProfilePlaceholder": "e.g. Default, Profile 1 or email"
+  },
+  "sidebar": {
+    "newChat": "+ 💬 Chat",
+    "newTask": "+ 🤖 Task",
+    "searchPlaceholder": "🔍 Search chats or tasks...",
+    "filterAll": "All",
+    "filterChats": "💬 Chats",
+    "filterTasks": "🤖 Tasks",
+    "loadMore": "Load more..."
+  },
+  "workspace": {
+    "promptPlaceholder": "Write a message, drop a file, or press ⌘+Enter to launch a Task...",
+    "sendBtn": "Send ↵",
+    "runTaskBtn": "🚀 Run as Task",
+    "attachPc": "📎 Local File",
+    "attachWorkspace": "📂 Workspace",
+    "attachCatalog": "🧩 Skill / MCP",
+    "generalChat": "General Chat"
+  },
+  "portability": {
+    "title": "💾 USB Migration & Backup (Another PC)",
+    "subtitle": "Export Second Brain memory, tasks, chats, skills, and Chrome profile into a single .tar.gz bundle.",
+    "volumeLabel": "USB Drive / Target Path",
+    "refreshVolumes": "🔄 Refresh USB",
+    "exportUsb": "💾 Export to USB / File",
+    "downloadBundle": "⬇️ Download Bundle (.tar.gz)",
+    "importModeMerge": "Merge with existing data",
+    "importModeReplace": "Replace all data",
+    "importBtn": "📥 Import Bundle",
+    "noVolumes": "No USB drive detected (will save under backups/)",
+    "exportDone": "Bundle exported to {path} ({size} KB)",
+    "importDone": "Import completed ({mode})!"
+  }
+}

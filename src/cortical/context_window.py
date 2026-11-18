@@ -7,11 +7,126 @@ serializing chunks into multiple chat messages while tracking token occupancy.
 
 from __future__ import annotations
 
+import json
+import os
+import platform
 import re
+import subprocess
+import time
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Optional
+
+DEFAULT_MAX_CONTEXT_WINDOW = 200000
+
+_MODEL_METADATA_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MODEL_CONTEXT_PROVIDERS: list[Callable[[str], Optional[dict[str, Any]]]] = []
+
+
+def get_configured_max_context_window(max_ctx: Optional[int] = None) -> int:
+    """Returns the configurable global context cap (default 200k tokens)."""
+    raw = max_ctx if max_ctx is not None else os.environ.get("CORTICAL_MAX_CONTEXT_WINDOW", DEFAULT_MAX_CONTEXT_WINDOW)
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = DEFAULT_MAX_CONTEXT_WINDOW
+    return max(4096, min(262144, val))
+
+
+def register_model_context_provider(provider_fn: Callable[[str], Optional[dict[str, Any]]]) -> None:
+    """Registers a pluggable metadata resolver `(model_id) -> {context_length, parameter_size, ...}`."""
+    if provider_fn not in _MODEL_CONTEXT_PROVIDERS:
+        _MODEL_CONTEXT_PROVIDERS.append(provider_fn)
+
+
+def discover_active_ollama_model(
+    base_url: Optional[str] = None,
+    timeout: float = 0.8,
+) -> Optional[str]:
+    """Auto-discovers the currently loaded (`/api/ps`) or first available (`/api/tags`) Ollama model."""
+    root = (base_url or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip().rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    for ep in ("/api/ps", "/api/tags"):
+        try:
+            req = urllib.request.Request(f"{root}{ep}", method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models") or []
+            if models:
+                name = str(models[0].get("name") or models[0].get("model") or "").strip()
+                if name:
+                    return name
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def inspect_ollama_model_metadata(
+    model_id: str,
+    base_url: Optional[str] = None,
+    timeout: float = 1.0,
+    cache_ttl_sec: float = 60.0,
+) -> dict[str, Any]:
+    """Queries Ollama `/api/show` to auto-discover native `context_length` and `parameter_size`."""
+    mid = str(model_id or "").strip()
+    if not mid:
+        return {}
+    now = time.time()
+    cached = _MODEL_METADATA_CACHE.get(mid)
+    if cached and (now - cached[0]) < cache_ttl_sec:
+        return dict(cached[1])
+
+    for prov in _MODEL_CONTEXT_PROVIDERS:
+        try:
+            res = prov(mid)
+            if isinstance(res, dict) and res:
+                _MODEL_METADATA_CACHE[mid] = (now, res)
+                return dict(res)
+        except Exception:  # noqa: BLE001
+            continue
+
+    root = (base_url or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip().rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    meta: dict[str, Any] = {}
+    try:
+        req = urllib.request.Request(
+            f"{root}/api/show",
+            data=json.dumps({"model": mid}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        details = data.get("details") or {}
+        if details.get("parameter_size"):
+            meta["parameter_size"] = str(details["parameter_size"])
+        model_info = data.get("model_info") or {}
+        for k, v in model_info.items():
+            if str(k).endswith(".context_length") and isinstance(v, (int, float)) and int(v) > 0:
+                meta["context_length"] = int(v)
+                break
+        params_txt = str(data.get("parameters") or "")
+        m_ctx = re.search(r"num_ctx\s+(\d+)", params_txt)
+        if m_ctx and "context_length" not in meta:
+            meta["context_length"] = int(m_ctx.group(1))
+    except Exception:  # noqa: BLE001
+        pass
+    _MODEL_METADATA_CACHE[mid] = (now, meta)
+    return meta
 
 
 DEFAULT_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "qwen3.5:9b": 131072,
+    "qwen3.5:9b-q3_k_xl": 131072,
+    "hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q3_K_XL": 131072,
+    "qwen3.5:14b": 131072,
+    "qwen3.5:4b": 131072,
+    "gemma3:12b": 131072,
+    "devstral-small-2": 65536,
+    "qwen3.8:27b-iq2_xxs": 32768,
+    "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS": 32768,
     "qwen3.8:27b-iq2_xs": 32768,
     "qwen3.8:27b": 32768,
     "qwen3:8b": 32768,
@@ -27,30 +142,145 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(s) + 3) // 4)
 
 
-def clamp_context_window(value: Any, fallback: int = 32768) -> int:
-    """Clamps a configured context window to a safe operational range."""
+def clamp_context_window(
+    value: Any,
+    fallback: int = 32768,
+    max_ctx: Optional[int] = None,
+) -> int:
+    """Clamps a configured context window to `[2048, max_ctx]` (default cap 200k)."""
+    cap = get_configured_max_context_window(max_ctx)
     try:
         num = int(value)
     except (TypeError, ValueError):
-        return fallback
-    return max(2048, min(262144, num))
+        return min(fallback, cap)
+    return max(2048, min(cap, num))
 
 
 def get_model_context_window(
-    model_id: str,
+    model_id: str = "",
     configured_windows: Optional[dict[str, Any]] = None,
     fallback: int = 32768,
+    max_ctx: Optional[int] = None,
+    auto_discover: bool = True,
 ) -> int:
-    """Resolves the configured context window (in tokens) for a given model."""
+    """Resolves context window for `model_id` via config, pluggable `/api/show`, or defaults (<= 200k)."""
+    cap = get_configured_max_context_window(max_ctx)
     mid = str(model_id or "").strip()
+    if not mid and auto_discover:
+        mid = discover_active_ollama_model() or ""
     if configured_windows and mid in configured_windows:
-        return clamp_context_window(configured_windows[mid], fallback=fallback)
+        return clamp_context_window(configured_windows[mid], fallback=fallback, max_ctx=cap)
+    for prov in _MODEL_CONTEXT_PROVIDERS:
+        try:
+            res = prov(mid)
+            if isinstance(res, dict) and res.get("context_length"):
+                return clamp_context_window(res["context_length"], fallback=fallback, max_ctx=cap)
+        except Exception:  # noqa: BLE001
+            continue
     if mid in DEFAULT_MODEL_CONTEXT_WINDOWS:
-        return DEFAULT_MODEL_CONTEXT_WINDOWS[mid]
+        return min(cap, DEFAULT_MODEL_CONTEXT_WINDOWS[mid])
+    if auto_discover and mid:
+        meta = inspect_ollama_model_metadata(mid)
+        if meta.get("context_length"):
+            return clamp_context_window(meta["context_length"], fallback=fallback, max_ctx=cap)
     low = mid.lower()
+    if "qwen3.5" in low:
+        return min(cap, 131072)
     if "qwen3" in low or "qwen2.5" in low or "llama3" in low or "gemma" in low:
-        return 32768
-    return fallback
+        return min(cap, 32768)
+    return min(cap, fallback)
+
+
+def get_system_memory_snapshot() -> dict[str, float]:
+    """Returns real system RAM total and reclaimable/available GB without external dependencies."""
+    total_gb = 16.0
+    avail_gb = 6.0
+    try:
+        sys_name = platform.system()
+        if sys_name == "Darwin":
+            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], timeout=1.0).decode().strip())
+            total_gb = round(mem_bytes / (1024 ** 3), 2)
+            vm_out = subprocess.check_output(["vm_stat"], timeout=1.0).decode()
+            ps_m = re.search(r"page size of (\d+) bytes", vm_out)
+            page_bytes = int(ps_m.group(1)) if ps_m else 16384
+            counts = dict(re.findall(r"Pages (free|inactive|speculative|purgeable):\s+(\d+)", vm_out))
+            avail_pages = sum(int(counts.get(k, 0)) for k in ("free", "inactive", "purgeable"))
+            avail_gb = round((avail_pages * page_bytes) / (1024 ** 3), 2)
+        elif sys_name == "Linux" and os.path.exists("/proc/meminfo"):
+            txt = open("/proc/meminfo", encoding="utf-8").read()
+            m_tot = re.search(r"MemTotal:\s+(\d+)\s+kB", txt)
+            m_avail = re.search(r"MemAvailable:\s+(\d+)\s+kB", txt)
+            if m_tot:
+                total_gb = round(int(m_tot.group(1)) / (1024 ** 2), 2)
+            if m_avail:
+                avail_gb = round(int(m_avail.group(1)) / (1024 ** 2), 2)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ram_total_gb": total_gb, "ram_available_gb": avail_gb}
+
+
+def compute_dynamic_num_ctx(
+    base_ctx: int = 32768,
+    model_id: str = "",
+    *,
+    ram_available_gb: Optional[float] = None,
+    kv_quantized: Optional[bool] = None,
+    max_ctx: Optional[int] = None,
+    model_metadata: Optional[dict[str, Any]] = None,
+) -> int:
+    """Auto-scales `num_ctx` from active/discovered model metadata & live RAM headroom (cap 200k)."""
+    cap = get_configured_max_context_window(max_ctx)
+    eff_model = str(model_id or "").strip() or (discover_active_ollama_model() or "qwen3:8b")
+    meta = dict(model_metadata) if model_metadata is not None else inspect_ollama_model_metadata(eff_model)
+    avail = float(ram_available_gb if ram_available_gb is not None else get_system_memory_snapshot()["ram_available_gb"])
+    if kv_quantized is None:
+        kv_quantized = os.environ.get("OLLAMA_KV_CACHE_TYPE", "").strip().lower() in {"q8_0", "q4_0"}
+
+    low = eff_model.lower()
+    param_txt = str(meta.get("parameter_size") or "").lower()
+    param_b = 0.0
+    m_b = re.search(r"(\d+(?:\.\d+)?)\s*b", param_txt or low)
+    if m_b:
+        param_b = float(m_b.group(1))
+
+    discovered_ctx = int(meta.get("context_length") or 0)
+
+    # Rough KV cost (GB per 16k tokens FP16 vs quantized q8_0/q4_0)
+    if (0 < param_b <= 4.5) or "1.5b" in low or "1.2b" in low or "4b" in low:
+        kv_gb_per_16k = 0.25 if kv_quantized else 0.5
+        native_cap = discovered_ctx or 131072
+    elif "qwen3.5" in low:
+        # Hybrid Gated DeltaNet architecture compresses KV overhead significantly
+        kv_gb_per_16k = 0.45 if kv_quantized else 0.9
+        native_cap = discovered_ctx or 131072
+    elif "gemma3" in low or (10.0 <= param_b <= 13.0):
+        kv_gb_per_16k = 0.7 if kv_quantized else 1.4
+        native_cap = discovered_ctx or 131072
+    elif param_b >= 24.0 or "27b" in low or "32b" in low or "devstral" in low:
+        kv_gb_per_16k = 1.6 if kv_quantized else 3.2
+        native_cap = discovered_ctx or 32768
+    elif param_b >= 13.5 or "14b" in low:
+        kv_gb_per_16k = 1.1 if kv_quantized else 2.2
+        native_cap = discovered_ctx or 40960
+    else:
+        # 7B / 8B / 9B sweet spot
+        kv_gb_per_16k = 0.9 if kv_quantized else 1.8
+        native_cap = discovered_ctx or 40960
+
+    native_cap = min(cap, max(4096, native_cap))
+    os_reserve_gb = 2.0
+    headroom = max(0.3, avail - os_reserve_gb)
+    max_safe_ctx = int((headroom / max(0.2, kv_gb_per_16k)) * 16384)
+    # Round to clean 4096-token steps inside [4096, native_cap]
+    step = 4096
+    safe_stepped = max(4096, min(native_cap, (max_safe_ctx // step) * step))
+    target = clamp_context_window(base_ctx, fallback=32768, max_ctx=cap)
+    if target > safe_stepped:
+        return safe_stepped
+    # If machine has abundant spare RAM (> 2x KV budget), allow scaling up toward min(native_cap, target + 8192)
+    if headroom >= kv_gb_per_16k * 2.5 and target < safe_stepped:
+        return min(safe_stepped, max(target, min(native_cap, target + 8192)))
+    return max(4096, min(target, safe_stepped))
 
 
 def split_into_paragraphs(text: str, max_para_tokens: int = 900) -> list[str]:

@@ -1313,3 +1313,163 @@
     grid-template-columns: 1fr;
   }
 }
+
+.composer-card {
+  position: relative;
+}
+
+.composer-suggest-popover {
+  display: none;
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 10px;
+  box-shadow: 0 -10px 28px rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  padding: 6px;
+}
+
+.composer-suggest-popover.open {
+  display: block;
+}
+
+.suggest-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.suggest-item:hover,
+.suggest-item.active {
+  background: rgba(56, 189, 248, 0.16);
+}
+
+.suggest-item .suggest-meta {
+  font-size: 0.7rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 55%;
+}
+
+/* Split Task Inspector: Macro-Blocks Infographic (left) + Detailed Step Stream (right) */
+.stage-split-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.stage-split-body .stream-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.task-macro-panel {
+  width: 310px;
+  flex: 0 0 310px;
+  border-right: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.55);
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.macro-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.macro-card-title {
+  font-size: 0.71rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+
+.pipeline-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  font-size: 0.77rem;
+  color: var(--muted);
+  border-left: 3px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.pipeline-step.done {
+  color: var(--text);
+  border-left-color: #22c55e;
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.pipeline-step.active {
+  color: #fff;
+  border-left-color: var(--accent);
+  background: rgba(56, 189, 248, 0.14);
+  font-weight: 600;
+}
+
+.pipeline-step.warn {
+  color: #fbbf24;
+  border-left-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.macro-kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.macro-kpi {
+  background: rgba(2, 6, 23, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+}
+
+.macro-kpi-val {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.macro-kpi-lbl {
+  font-size: 0.67rem;
+  color: var(--muted);
+}
+
+@media (max-width: 1120px) {
+  .stage-split-body {
+    flex-direction: column;
+  }
+  .task-macro-panel {
+    width: 100%;
+    flex: 0 0 auto;
+    max-height: 210px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}

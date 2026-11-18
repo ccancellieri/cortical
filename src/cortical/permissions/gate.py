@@ -183,6 +183,17 @@ class AdaptivePermissionGate:
         if exe_name in SAFE_READONLY_COMMANDS or head_two in SAFE_READONLY_COMMANDS:
             return (f"bash:readonly:{exe_name}", 0.1)
 
+        # Safe local preview (`open ...index.html` or `open http://127.0.0.1...`) without shell chaining
+        if exe_name == "open" and not any(sep in cmd for sep in ("&&", ";", "|", "`", "$(")):
+            low_cmd = cmd.lower()
+            if ".html" in low_cmd or "http://127.0.0.1" in low_cmd or "http://localhost" in low_cmd:
+                return ("bash:local_open:open", 0.12)
+
+        # Safe directory creation inside workspace (no parent traversal or system roots)
+        if exe_name == "mkdir" and not any(sep in cmd for sep in ("&&", ";", "|", "`", "$(")):
+            if ".." not in cmd and not any(sys_p in cmd for sys_p in ("/etc/", "/System/", "/usr/", "/var/")):
+                return ("bash:dev:mkdir", 0.15)
+
         joined_tail = " ".join(eff_tokens[1:4])
         if (exe_name in {"python", "python3"} and "unittest" in joined_tail) or (
             exe_name == "node" and "--check" in joined_tail

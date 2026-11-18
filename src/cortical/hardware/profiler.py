@@ -21,9 +21,13 @@ from typing import Any, Callable, Optional
 
 
 LOCAL_AGENT_MODEL_PRIORITY = (
-    "qwen3.8:27b-iq2_xs",
-    "qwen3:14b",
+    "qwen3.5:9b",
+    "qwen3.5:14b",
     "qwen3:8b",
+    "gemma3:12b",
+    "qwen3:14b",
+    "qwen3.5:4b",
+    "qwen3.8:27b-iq2_xxs",
     "qwen2.5:14b",
     "qwen2.5-coder:14b",
     "qwen2.5:7b",
@@ -109,6 +113,7 @@ class HardwareProfiler:
 
     KNOWN_ENDPOINTS = {
         "llama_server_8080": ("127.0.0.1", 8080, "http://127.0.0.1:8080/v1"),
+        "unsloth_studio_8888": ("127.0.0.1", 8888, "http://127.0.0.1:8888/v1"),
         "whisper_server_8081": ("127.0.0.1", 8081, "http://127.0.0.1:8081/inference"),
         "whisper_server_18183": ("127.0.0.1", 18183, "http://127.0.0.1:18183/inference"),
         "ollama_11434": ("127.0.0.1", 11434, "http://127.0.0.1:11434/v1"),

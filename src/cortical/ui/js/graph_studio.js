@@ -473,11 +473,11 @@ export async function loadModelsConfig() {
     const roles = Array.isArray(d.roles) && d.roles.length
       ? d.roles
       : [
-          { id: 'coordinator', label: 'Coordinator (Orchestrazione)', model: (d.role_models || {}).coordinator_model || 'qwen3.8:27b-iq2_xs', context_window: 32768, effort: 'medium', builtin: true },
-          { id: 'analyst', label: 'Analyst (Ricerca & Piano)', model: (d.role_models || {}).analyst_model || 'qwen3.8:27b-iq2_xs', context_window: 32768, effort: 'medium', builtin: true },
-          { id: 'implementer', label: 'Implementer (Codice & Azione)', model: (d.role_models || {}).implementer_model || 'qwen3.8:27b-iq2_xs', context_window: 32768, effort: 'medium', builtin: true },
-          { id: 'reviewer', label: 'Reviewer (Verifica & Test)', model: (d.role_models || {}).reviewer_model || 'qwen3.8:27b-iq2_xs', context_window: 16384, effort: 'medium', builtin: true },
-          { id: 'chat', label: 'Chat Generale (Conversazione)', model: (d.role_models || {}).chat_model || 'qwen3.8:27b-iq2_xs', context_window: 32768, effort: 'medium', builtin: true },
+          { id: 'coordinator', label: 'Coordinator (Orchestrazione)', model: (d.role_models || {}).coordinator_model || 'qwen3.8:27b-iq2_xxs', context_window: 32768, effort: 'medium', builtin: true },
+          { id: 'analyst', label: 'Analyst (Ricerca & Piano)', model: (d.role_models || {}).analyst_model || 'qwen3.8:27b-iq2_xxs', context_window: 32768, effort: 'medium', builtin: true },
+          { id: 'implementer', label: 'Implementer (Codice & Azione)', model: (d.role_models || {}).implementer_model || 'qwen3.8:27b-iq2_xxs', context_window: 32768, effort: 'medium', builtin: true },
+          { id: 'reviewer', label: 'Reviewer (Verifica & Test)', model: (d.role_models || {}).reviewer_model || 'qwen3.8:27b-iq2_xxs', context_window: 16384, effort: 'medium', builtin: true },
+          { id: 'chat', label: 'Chat Generale (Conversazione)', model: (d.role_models || {}).chat_model || 'qwen3.8:27b-iq2_xxs', context_window: 32768, effort: 'medium', builtin: true },
         ];
 
     if (newRoleModelSel) {
@@ -490,7 +490,7 @@ export async function loadModelsConfig() {
     }
 
     roleBox.innerHTML = roles.map((r) => {
-      const cur = r.model || avail[0] || 'qwen3.8:27b-iq2_xs';
+      const cur = r.model || avail[0] || 'qwen3.8:27b-iq2_xxs';
       const opts = Array.from(new Set([...avail, cur])).map((m) =>
         `<option value="${escapeHtml(m)}" ${m === cur ? 'selected' : ''}>${escapeHtml(m)}</option>`
       ).join('');
@@ -615,7 +615,7 @@ export async function addCustomRoleAction() {
   await apiPost('/api/roles/add', {
     id,
     label: (labelEl?.value || '').trim() || id,
-    model: (modelEl?.value || '').trim() || 'qwen3.8:27b-iq2_xs',
+    model: (modelEl?.value || '').trim() || 'qwen3.8:27b-iq2_xxs',
     context_window: parseInt(ctxEl?.value || '16384', 10) || 16384,
   });
   if (idEl) idEl.value = '';

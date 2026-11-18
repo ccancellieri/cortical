@@ -26,6 +26,7 @@ from ..grounding import (
 )
 from ..memory import MemoryCurator
 from ..permissions.gate import AdaptivePermissionGate
+from ..remote_gateway import CorticalRemoteGateway
 from ..skills_hub import CorticalSkillHub
 from .crawler import DeterministicMerkleCrawler
 from .db import AccessContext, CorticalWikiDB, DepthTier
@@ -278,6 +279,121 @@ MCP_TOOLS = [
             "required": ["title", "sections"],
         },
     },
+    {
+        "name": "wiki_gateway_status",
+        "description": "Inspect optional Cortical Remote Gateway status, max_users limit, registered accounts, and active tunnel/domain URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "include_secret": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "wiki_gateway_configure",
+        "description": "Configure optional Remote Gateway authentication (`auth_enabled`, `allow_localhost_bypass`, `max_users`, `rotate_key`, DuckDNS).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "auth_enabled": {"type": "boolean"},
+                "allow_localhost_bypass": {"type": "boolean"},
+                "max_users": {"type": "integer"},
+                "rotate_key": {"type": "boolean", "default": False},
+                "duckdns_domain": {"type": "string"},
+                "duckdns_token": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "wiki_gateway_expose",
+        "description": "Expose or stop the optional internet HTTPS tunnel (`localhost.run`, `cloudflared`, `pinggy`) and optionally update DuckDNS.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "restart", "stop"], "default": "start"},
+                "provider": {"type": "string", "enum": ["auto", "localhost.run", "cloudflared", "pinggy"], "default": "auto"},
+                "local_port": {"type": "integer", "default": 8765},
+                "update_duckdns": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "wiki_gateway_invite_user",
+        "description": "Register or invite a user within the `max_users` cap and send/prepare the password creation link.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "default": "ccancellieri@hotmail.com"},
+                "public_url": {"type": "string", "default": ""},
+            },
+        },
+    },
+    {
+        "name": "wiki_bundle_export",
+        "description": "Export Cortical Second Brain memory, tasks, chats, and skills to a portable .tar.gz bundle (USB migration).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "output_path": {"type": "string", "default": ""},
+            },
+        },
+    },
+    {
+        "name": "wiki_bundle_import",
+        "description": "Import a Cortical .tar.gz migration bundle (merge or replace).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "archive_path": {"type": "string"},
+                "mode": {"type": "string", "enum": ["merge", "replace"], "default": "merge"},
+            },
+            "required": ["archive_path"],
+        },
+    },
+    {
+        "name": "privacy_read_sanitized",
+        "description": "Read a local file after stripping metadata, pseudonymizing sensitive identifiers locally, and optionally rewriting GDPR quasi-identifiers via offline local LLM.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "use_local_llm": {"type": "boolean", "default": False},
+                "redact": {"type": "boolean", "default": False},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "wiki_resolve_references",
+        "description": "Resolve universal @wiki:, @concept:, @skill:, @insight:, @task:, @root:, cortical://, and /tier:/privacy:/local directives from any prompt.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "default_tier": {"type": "string", "enum": ["l1", "l2", "l3", "max"], "default": "l2"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "cortical_local_loop",
+        "description": (
+            "Execute an iterative multi-model local LLM reasoning loop using grounded 4-tier Wiki knowledge, "
+            "Skills, and Privacy Sanitizer. Completes tasks offline when possible or produces a clean sanitized_remote_prompt."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "models": {"type": "array", "items": {"type": "string"}},
+                "max_loops": {"type": "integer", "default": 2},
+                "privacy_profile": {"type": "string", "default": "medium"},
+                "attached_files": {"type": "array", "items": {"type": "string"}},
+                "force_local_only": {"type": "boolean", "default": False},
+            },
+            "required": ["prompt"],
+        },
+    },
 ]
 
 
@@ -317,8 +433,89 @@ class CorticalWikiMCPServer:
                 "id": req_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "cortical-wiki-mcp", "version": "0.1.0"},
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                    "serverInfo": {"name": "cortical-wiki-mcp", "version": "0.2.0"},
+                },
+            }
+
+        if method == "resources/list":
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"resources": self._list_mcp_resources()}}
+
+        if method == "resources/templates/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "resourceTemplates": [
+                        {"uriTemplate": "cortical://node/{path}", "name": "Wiki 4-Tier Node", "mimeType": "text/markdown"},
+                        {"uriTemplate": "cortical://private/{alias}", "name": "Privacy-Gated Context Alias", "mimeType": "text/markdown"},
+                        {"uriTemplate": "cortical://concept/{slug}", "name": "Domain Knowledge Concept", "mimeType": "text/markdown"},
+                        {"uriTemplate": "cortical://skill/{skill_id}", "name": "Cortical Procedural Skill", "mimeType": "text/markdown"},
+                        {"uriTemplate": "cortical://insight/{insight_id}", "name": "Distilled Memory Insight", "mimeType": "text/markdown"},
+                        {"uriTemplate": "cortical://task/{episode_id}", "name": "Task Episode 3+1 Synthesis", "mimeType": "text/markdown"},
+                    ]
+                },
+            }
+
+        if method == "resources/read":
+            uri = str(params.get("uri") or "").strip()
+            resolved = self.skill_hub.resolve_wiki_references(uri, default_tier="l2")
+            items = resolved.get("resolved") or []
+            body = (
+                resolved.get("context_markdown")
+                if items
+                else f"Resource not found in Wiki DB: `{uri}`"
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"contents": [{"uri": uri, "mimeType": "text/markdown", "text": body}]},
+            }
+
+        if method == "prompts/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "prompts": [
+                        {
+                            "name": "cortical-local",
+                            "description": "Run a multi-model local Cortical reasoning loop before (or instead of) calling remote cloud LLMs.",
+                            "arguments": [
+                                {"name": "prompt", "description": "Task or question (can include @wiki:/@concept:/@skill: refs)", "required": True},
+                                {"name": "privacy_profile", "description": "max_security | low | medium | max_context", "required": False},
+                            ],
+                        },
+                        {
+                            "name": "cortical-wiki",
+                            "description": "Inject compact 4-tier Wiki knowledge for @wiki:, @concept:, @skill:, @insight:, or @root: references.",
+                            "arguments": [
+                                {"name": "reference", "description": "e.g. @concept:merkle-context-compression or @wiki:/src/cortical/cli.py", "required": True},
+                                {"name": "tier", "description": "l1 | l2 | l3 | max", "required": False},
+                            ],
+                        },
+                        {
+                            "name": "cortical-sanitize",
+                            "description": "Sanitize & pseudonymize a local sensitive file offline using Cortical Privacy Sanitizer.",
+                            "arguments": [
+                                {"name": "file_path", "description": "Path to local file", "required": True},
+                                {"name": "profile", "description": "max_security | low | medium", "required": False},
+                            ],
+                        },
+                    ]
+                },
+            }
+
+        if method == "prompts/get":
+            p_name = str(params.get("name") or "")
+            p_args = params.get("arguments") or {}
+            text_out = self._render_mcp_prompt(p_name, p_args)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "description": f"Cortical prompt `{p_name}`",
+                    "messages": [{"role": "user", "content": {"type": "text", "text": text_out}}],
                 },
             }
 
@@ -359,6 +556,12 @@ class CorticalWikiMCPServer:
         }
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
+        try:
+            from ..wiki_static import auto_apply_pending_wiki_patch
+
+            auto_apply_pending_wiki_patch(self.db, repo_root=self.repo_root)
+        except Exception:  # noqa: BLE001
+            pass
         ctx = AccessContext(
             tenant_id=args.get("tenant_id", "default"),
             workspace_id=args.get("workspace_id", "main"),
@@ -576,7 +779,122 @@ class CorticalWikiMCPServer:
                 "bytes": len(raw_md.encode("utf-8")),
                 "tiers_indexed": ["light", "medium", "high", "max"],
             }
+        if name == "wiki_gateway_status":
+            gw = CorticalRemoteGateway(self.db)
+            return gw.get_status(include_secret=bool(args.get("include_secret", False)))
+        if name == "wiki_gateway_configure":
+            gw = CorticalRemoteGateway(self.db)
+            return gw.configure(args)
+        if name == "wiki_gateway_expose":
+            gw = CorticalRemoteGateway(self.db)
+            action = str(args.get("action") or "start").lower()
+            if action == "stop":
+                return gw.stop_tunnel()
+            res = gw.start_tunnel(
+                provider=str(args.get("provider") or "auto"),
+                local_port=int(args.get("local_port") or 8765),
+                force=(action == "restart"),
+            )
+            if args.get("update_duckdns"):
+                res["duckdns"] = gw.update_duckdns()
+            return res
+        if name == "wiki_gateway_invite_user":
+            gw = CorticalRemoteGateway(self.db)
+            return gw.send_access_email(
+                recipient_email=str(args.get("email") or "ccancellieri@hotmail.com"),
+                base_public_url=str(args.get("public_url") or "") or None,
+            )
+        if name == "wiki_bundle_export":
+            from ..portability import export_cortical_bundle
+
+            return export_cortical_bundle(
+                args.get("output_path") or None,
+                wiki_db_path=self.db.db_path,
+            )
+        if name == "wiki_bundle_import":
+            from ..portability import import_cortical_bundle
+
+            return import_cortical_bundle(
+                args["archive_path"],
+                mode=str(args.get("mode") or "merge"),
+                wiki_db_path=self.db.db_path,
+            )
+        if name == "privacy_read_sanitized":
+            from ..privacy_sanitizer import sanitize_file
+
+            res = sanitize_file(
+                Path(args["file_path"]),
+                redact=bool(args.get("redact", False)),
+                use_local_llm=bool(args.get("use_local_llm", False)),
+            )
+            return res.to_dict(include_map=False)
+        if name == "wiki_resolve_references":
+            return self.skill_hub.resolve_wiki_references(
+                args["prompt"],
+                default_tier=str(args.get("default_tier") or "l2"),
+                ctx=ctx,
+            )
+        if name == "cortical_local_loop":
+            return self.skill_hub.run_multi_model_local_loop(
+                args["prompt"],
+                models=args.get("models"),
+                max_loops=int(args.get("max_loops") or 2),
+                privacy_profile=args.get("privacy_profile"),
+                attached_files=args.get("attached_files"),
+                force_local_only=bool(args.get("force_local_only", False)),
+                ctx=ctx,
+            )
         raise ValueError(f"Unknown tool: {name}")
+
+    def _list_mcp_resources(self) -> list[dict[str, str]]:
+        from ..skills_hub import _KNOWLEDGE_DOMAIN_MAP
+
+        resources: list[dict[str, str]] = [
+            {"uri": "cortical://root/workspace", "name": "@root:workspace", "description": "Reconciled workspace files index (L1)", "mimeType": "text/markdown"},
+            {"uri": "cortical://root/private_notes", "name": "@root:private_notes", "description": "Sanitized high-privacy context notes (L1)", "mimeType": "text/markdown"},
+        ]
+        for cid, _ in _KNOWLEDGE_DOMAIN_MAP:
+            slug = cid.split(":", 1)[-1]
+            resources.append({"uri": f"cortical://concept/{slug}", "name": f"@concept:{slug}", "description": f"Domain knowledge concept: {cid}", "mimeType": "text/markdown"})
+        ctx = AccessContext()
+        with self.db._connect() as conn:
+            for r in conn.execute("SELECT item_ref, label, depth_tier, metadata_json FROM scoped_context_attachments WHERE tenant_id = ? AND workspace_id = ? LIMIT 15", (ctx.tenant_id, ctx.workspace_id)).fetchall():
+                alias = str(r["label"] or Path(str(r["item_ref"] or "item")).name)
+                prof = str(r["depth_tier"] or "low")
+                resources.append({"uri": f"cortical://private/{alias}", "name": f"@private:{alias} (🔒 {prof})", "description": f"Privacy-gated context alias ({r['item_ref']})", "mimeType": "text/markdown"})
+            for r in conn.execute("SELECT skill_id, description FROM learned_skills_registry WHERE tenant_id = ? AND workspace_id = ? LIMIT 15", (ctx.tenant_id, ctx.workspace_id)).fetchall():
+                resources.append({"uri": f"cortical://skill/{r['skill_id']}", "name": f"@skill:{r['skill_id']}", "description": str(r["description"] or "")[:100], "mimeType": "text/markdown"})
+            for r in conn.execute("SELECT insight_id, insight_text FROM memory_insights WHERE tenant_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 15", (ctx.tenant_id, ctx.workspace_id)).fetchall():
+                resources.append({"uri": f"cortical://insight/{r['insight_id']}", "name": f"@insight:{r['insight_id']}", "description": str(r["insight_text"] or "")[:100], "mimeType": "text/markdown"})
+            for r in conn.execute("SELECT path, summary_light FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND node_type = 'file' ORDER BY path ASC LIMIT 30", (ctx.tenant_id, ctx.workspace_id)).fetchall():
+                p = str(r["path"]).lstrip("/")
+                resources.append({"uri": f"cortical://node/{p}", "name": f"@wiki:/{p}", "description": str(r["summary_light"] or "")[:100], "mimeType": "text/markdown"})
+        return resources
+
+    def _render_mcp_prompt(self, name: str, arguments: dict[str, Any]) -> str:
+        if name == "cortical-wiki":
+            ref = str(arguments.get("reference") or "")
+            tier = str(arguments.get("tier") or "l2")
+            res = self.skill_hub.resolve_wiki_references(ref, default_tier=tier)
+            return res.get("context_markdown") or f"No Wiki match found for `{ref}`."
+        if name == "cortical-sanitize":
+            from ..privacy_sanitizer import sanitize_with_profile
+
+            fp = Path(str(arguments.get("file_path") or ""))
+            prof = str(arguments.get("profile") or "low")
+            out = sanitize_with_profile(fp, profile_name=prof)
+            return f"=== SANITIZED CONTEXT ({prof}) ===\n{out.get('sanitized_text', '')}"
+        # Default: cortical-local
+        usr_p = str(arguments.get("prompt") or "")
+        prof = str(arguments.get("privacy_profile") or "medium")
+        loop_res = self.skill_hub.run_multi_model_local_loop(usr_p, privacy_profile=prof)
+        return (
+            f"=== CORTICAL MULTI-MODEL LOCAL LOOP ({', '.join(loop_res['models_used'])}) ===\n"
+            f"Completed locally: {loop_res['completed_locally']} | Action: {loop_res['recommended_action']}\n"
+            f"Insight: {loop_res['distilled_insight']}\n\n"
+            f"--- Local Answer ---\n{loop_res['local_answer']}\n\n"
+            f"--- Sanitized Remote Brief (if escalation needed) ---\n{loop_res['sanitized_remote_prompt']}"
+        )
 
 
 def main() -> None:

@@ -239,18 +239,75 @@ def load_chrome_profile_preference() -> dict[str, Any]:
     return default
 
 
+def _is_system_chrome_running() -> bool:
+    """Returns True if Google Chrome main browser process is currently running."""
+    try:
+        sys_name = platform.system()
+        if sys_name == "Darwin":
+            res = subprocess.run(["pgrep", "-x", "Google Chrome"], capture_output=True, text=True, timeout=1.5)
+            return res.returncode == 0 and bool(res.stdout.strip())
+        if sys_name == "Linux":
+            res = subprocess.run(["pgrep", "-f", "chrome"], capture_output=True, text=True, timeout=1.5)
+            return res.returncode == 0 and bool(res.stdout.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _resolve_system_profile_match(query: str, system_dir: Optional[Path] = None) -> Optional[dict[str, Any]]:
+    """Matches an email, profile directory name, or display name against Chrome Local State."""
+    needle = (query or "").strip().lower()
+    if not needle:
+        return None
+    sys_dir = Path(system_dir) if system_dir else get_system_chrome_user_data_dir()
+    local_state = sys_dir / "Local State"
+    try:
+        if not local_state.exists():
+            return None
+        raw = json.loads(local_state.read_text(encoding="utf-8"))
+        cache = ((raw.get("profile") or {}).get("info_cache")) or {}
+        for dir_name, info in cache.items():
+            if not isinstance(info, dict):
+                continue
+            email = str(info.get("user_name") or "").strip()
+            pname = str(info.get("name") or "").strip()
+            if needle in (dir_name.lower(), email.lower(), pname.lower()):
+                return {
+                    "mode": "system_chrome",
+                    "profile_directory": dir_name,
+                    "user_data_dir": str(sys_dir),
+                    "email": email,
+                }
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def save_chrome_profile_preference(pref: dict[str, Any]) -> dict[str, Any]:
     """Persists Chrome profile preference to ~/.cortical_data/chrome_profile.json."""
     cfg_path = get_chrome_profile_config_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     current = load_chrome_profile_preference()
+
+    # Resolve email/name lookup (e.g. ccancellieri@gmail.com -> Default)
+    lookup = str(pref.get("email") or pref.get("profile_directory") or "").strip()
+    if "@" in lookup or pref.get("mode") == "system_chrome":
+        matched = _resolve_system_profile_match(lookup)
+        if matched:
+            current.update(matched)
+
     for key in ("mode", "profile_directory", "user_data_dir", "email"):
         if key in pref and pref[key] is not None:
-            current[key] = str(pref[key]).strip()
+            val = str(pref[key]).strip()
+            if val or key != "user_data_dir":
+                current[key] = val
+
     if current.get("mode") == "cortical_isolated" and not pref.get("user_data_dir"):
         current["user_data_dir"] = str(get_chrome_debug_profile_dir())
     elif current.get("mode") == "system_chrome" and not pref.get("user_data_dir"):
         current["user_data_dir"] = str(get_system_chrome_user_data_dir())
+        if not current.get("profile_directory"):
+            current["profile_directory"] = "Default"
     cfg_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
     return current
 
@@ -313,6 +370,7 @@ def discover_chrome_profiles(system_dir: Optional[Path] = None) -> dict[str, Any
         "selected": load_chrome_profile_preference(),
         "tcc_restricted": tcc_restricted,
         "error": error_detail,
+        "chrome_running": _is_system_chrome_running(),
         "debug_port_active": bool(probe_chrome_debug_port()),
     }
 
@@ -503,7 +561,11 @@ def open_url_in_chrome(
     port: Optional[int] = None,
     ensure_debug: bool = True,
 ) -> bool:
-    """Opens a URL in Chrome, reusing an active remote-debugging session or spawning an isolated one."""
+    """Opens a URL in Chrome, reusing an active debug session or the configured system Chrome profile."""
+    pref = load_chrome_profile_preference()
+    mode = str(pref.get("mode") or "cortical_isolated")
+    profile_dir_name = str(pref.get("profile_directory") or "").strip()
+
     if ensure_debug:
         dbg = ensure_chrome_debug_instance(port=port, background=background)
         if dbg.get("active"):
@@ -519,13 +581,19 @@ def open_url_in_chrome(
             if background:
                 cmd.append("-g")
             cmd.extend(["-a", "Google Chrome", url])
+            if mode == "system_chrome" and profile_dir_name:
+                cmd.extend(["--args", f"--profile-directory={profile_dir_name}"])
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         if sys_name == "Linux":
             for browser in ("google-chrome", "chromium", "xdg-open"):
                 if shutil.which(browser):
+                    launch_cmd = [browser]
+                    if mode == "system_chrome" and profile_dir_name and browser != "xdg-open":
+                        launch_cmd.append(f"--profile-directory={profile_dir_name}")
+                    launch_cmd.append(url)
                     subprocess.Popen(
-                        [browser, url],
+                        launch_cmd,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
@@ -541,6 +609,16 @@ def extract_weather_intent(text: str) -> Optional[dict[str, Any]]:
     weather_kw = (
         "meteo",
         "che tempo fa",
+        "che tempo farà",
+        "che tempo fara",
+        "il tempo domani",
+        "il tempo di domani",
+        "tempo domani",
+        "tempo di domani",
+        "il tempo oggi",
+        "il tempo di oggi",
+        "il tempo dopodomani",
+        "il tempo a ",
         "previsioni",
         "temperatura",
         "pioverà",
@@ -551,6 +629,23 @@ def extract_weather_intent(text: str) -> Optional[dict[str, Any]]:
         "will it rain",
     )
     if not any(w in norm for w in weather_kw):
+        return None
+    strong_weather_kw = (
+        "meteo",
+        "previsioni",
+        "weather",
+        "forecast",
+        "che tempo",
+        "il tempo domani",
+        "il tempo di domani",
+        "tempo domani",
+        "tempo di domani",
+        "il tempo oggi",
+        "il tempo di oggi",
+        "il tempo dopodomani",
+        "il tempo a ",
+    )
+    if not any(w in norm for w in strong_weather_kw) and len(norm.split()) > 14:
         return None
 
     lang = detect_language(text)
@@ -575,8 +670,13 @@ def extract_weather_intent(text: str) -> Optional[dict[str, Any]]:
         )
         if m:
             candidate = m.group(1).strip()
-            skip_words = {"oggi", "domani", "dopodomani", "adesso", "ora", "today", "tomorrow", "now"}
-            if candidate not in skip_words:
+            skip_words = {
+                "oggi", "domani", "dopodomani", "adesso", "ora", "today", "tomorrow", "now",
+                "più", "piu", "meno", "prima", "dopo", "questo", "quello", "fare", "andare",
+                "uscire", "partire", "lavoro", "pranzo", "cena", "sera", "mattina", "notte",
+                "pomeriggio", "weekend", "settimana",
+            }
+            if candidate not in skip_words and len(candidate) >= 3:
                 city = " ".join(part.capitalize() for part in candidate.split())
 
     open_browser = any(w in norm for w in ("chrome", "browser", "apri", "cerca", "procedi", "open", "search"))
@@ -810,6 +910,11 @@ def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
             "su chrome",
             "con chrome",
             "fai una ricerca",
+            "fammi una ricerca",
+            "ricerca su internet",
+            "cerca su internet",
+            "cerca online",
+            "cerca sul web",
             "cercami",
             "vai in ",
             "vai su ",
@@ -864,7 +969,7 @@ def extract_browser_intent(text: str) -> Optional[dict[str, Any]]:
 
     if not query:
         m_ricerca = re.search(
-            r"\b(?:fai\s+una\s+ricerca(?:\s+per\s+me)?|do\s+a\s+search(?:\s+for\s+me)?)(?:\s+(?:su|in|on)\s+(?:[a-z0-9._-]+))?\s*(?:,|su|di|per|for|about)?\s+(.+)$",
+            r"\b(?:fai\s+una\s+ricerca(?:\s+per\s+me)?|fammi\s+una\s+ricerca(?:\s+per\s+me)?|ricerca(?:\s+su\s+internet|\s+online|\s+sul\s+web)?|do\s+a\s+search(?:\s+for\s+me)?)(?:\s+(?:su\s+internet|sul\s+web|online|(?:su|in|on)\s+[a-z0-9._-]+))?\s*(?:,|riguardo(?:\s+(?:a|al|allo|alla|il|lo|la|i|gli|le))?|su|di|per|for|about|che)?\s+(.+)$",
             raw,
             flags=re.IGNORECASE,
         )
@@ -1263,3 +1368,241 @@ def format_page_reading_response(
     sec_note = f" Le sezioni principali trattano: {', '.join(headings[:5])}." if headings else ""
     extra = f" Inoltre: {paragraphs[1][:260]}" if len(paragraphs) > 1 else ""
     return f"Concetti chiave dalla pagina {title}: {lead}.{sec_note}{extra}".replace("..", ".")
+
+
+class _FormAndLinkParser(html.parser.HTMLParser):
+    """Lightweight HTML extractor for readable text, links, and form fields without heavy deps."""
+
+    def __init__(self, base_url: str = "") -> None:
+        super().__init__()
+        self.base_url = base_url
+        self._skip_depth = 0
+        self._in_title = False
+        self.title = ""
+        self.text_parts: list[str] = []
+        self.links: list[dict[str, str]] = []
+        self.forms: list[dict[str, Any]] = []
+        self._cur_href = ""
+        self._cur_link_txt: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        t = tag.lower()
+        amap = {k.lower(): (v or "") for k, v in attrs}
+        if t in {"script", "style", "noscript", "svg"}:
+            self._skip_depth += 1
+            return
+        if t == "title":
+            self._in_title = True
+        elif t == "a" and amap.get("href"):
+            self._cur_href = urllib.parse.urljoin(self.base_url, amap["href"])
+            self._cur_link_txt = []
+        elif t in {"input", "textarea", "select"}:
+            ftype = amap.get("type", "text" if t == "input" else t).lower()
+            if ftype in {"hidden", "submit", "button"}:
+                return
+            self.forms.append({
+                "tag": t,
+                "type": ftype,
+                "name": amap.get("name", ""),
+                "id": amap.get("id", ""),
+                "placeholder": amap.get("placeholder", ""),
+                "aria_label": amap.get("aria-label", ""),
+                "required": "required" in amap,
+            })
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in {"script", "style", "noscript", "svg"} and self._skip_depth > 0:
+            self._skip_depth -= 1
+            return
+        if t == "title":
+            self._in_title = False
+        elif t == "a" and self._cur_href:
+            label = " ".join(self._cur_link_txt).strip()
+            if label and self._cur_href.startswith(("http://", "https://")) and len(self.links) < 20:
+                self.links.append({"text": label[:100], "url": self._cur_href})
+            self._cur_href = ""
+            self._cur_link_txt = []
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        clean = " ".join(data.split())
+        if not clean:
+            return
+        if self._in_title and not self.title:
+            self.title = clean
+        if self._cur_href:
+            self._cur_link_txt.append(clean)
+        self.text_parts.append(clean)
+
+
+def _launch_playwright_browser(p: Any, cdp: Any) -> Any:
+    """Connects to active Chrome CDP (:9222) if open, otherwise uses system Chrome channel or Chromium."""
+    if cdp:
+        return p.chromium.connect_over_cdp(f"http://127.0.0.1:{get_chrome_debug_port()}")
+    try:
+        return p.chromium.launch(channel="chrome", headless=True)
+    except Exception:
+        return p.chromium.launch(headless=True)
+
+
+def extract_url_page_and_forms(url: str, timeout: float = 15.0) -> dict[str, Any]:
+    """Fetches a URL (Playwright/Chrome CDP or HTTP fallback) and extracts clean text, links, and form fields."""
+    target = str(url or "").strip()
+    if not target.startswith(("http://", "https://")):
+        return {"ok": False, "error": f"invalid_url:{target}"}
+
+    # 1. Try Playwright (connect over CDP :9222 if active, else system Chrome headless) for JS-rendered pages
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+
+        cdp = probe_chrome_debug_port()
+        with sync_playwright() as p:
+            browser = _launch_playwright_browser(p, cdp)
+            try:
+                ctx = browser.contexts[0] if cdp and browser.contexts else browser.new_context()
+                page = ctx.new_page()
+                page.goto(target, wait_until="domcontentloaded", timeout=int(timeout * 1000))
+                page.wait_for_timeout(1200)
+                data = page.evaluate("""() => {
+                    const forms = Array.from(document.querySelectorAll('input, textarea, select')).map(el => {
+                        const tp = (el.getAttribute('type') || el.tagName).toLowerCase();
+                        if (['hidden','submit','button'].includes(tp)) return null;
+                        const lbl = el.labels && el.labels[0] ? el.labels[0].innerText.trim() : '';
+                        return {
+                            tag: el.tagName.toLowerCase(),
+                            type: tp,
+                            name: el.name || '',
+                            id: el.id || '',
+                            label: lbl || el.getAttribute('aria-label') || el.placeholder || '',
+                            required: !!el.required
+                        };
+                    }).filter(Boolean);
+                    const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 20).map(a => ({
+                        text: (a.innerText || '').trim().slice(0, 100),
+                        url: a.href
+                    })).filter(l => l.text && l.url.startsWith('http'));
+                    return {
+                        title: document.title || '',
+                        url: location.href,
+                        text: (document.body ? document.body.innerText : '').slice(0, 4500),
+                        forms: forms.slice(0, 40),
+                        links
+                    };
+                }""")
+                return {"ok": True, "via": "playwright_cdp" if cdp else "playwright", **data}
+            finally:
+                if not cdp:
+                    browser.close()
+    except Exception:
+        pass
+
+    # 2. Fast clean HTTP + HTMLParser fallback
+    try:
+        req = urllib.request.Request(target, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X) Cortical/0.4"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            html_body = resp.read().decode("utf-8", errors="ignore")
+        parser = _FormAndLinkParser(base_url=target)
+        parser.feed(html_body)
+        return {
+            "ok": True,
+            "via": "http_parser",
+            "title": parser.title,
+            "url": target,
+            "text": "\n".join(parser.text_parts)[:4500],
+            "forms": parser.forms[:40],
+            "links": parser.links[:20],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "url": target, "error": str(exc)}
+
+
+def fill_form_in_chrome_or_playwright(
+    url: str,
+    fields: dict[str, str],
+    *,
+    upload_file: str = "",
+    submit: bool = False,
+) -> dict[str, Any]:
+    """Fills web form inputs & optional file upload via Chrome CDP (:9222) or Playwright Chromium."""
+    target = str(url or "").strip()
+    if not target.startswith(("http://", "https://")):
+        return {"ok": False, "error": f"invalid_url:{target}"}
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"playwright_not_available:{exc}"}
+
+    cdp = probe_chrome_debug_port()
+    filled: list[str] = []
+    missing: list[str] = []
+    with sync_playwright() as p:
+        browser = _launch_playwright_browser(p, cdp)
+        try:
+            ctx = browser.contexts[0] if cdp and browser.contexts else browser.new_context()
+            page = ctx.new_page()
+            page.goto(target, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(1200)
+            for key, val in (fields or {}).items():
+                k = str(key).strip()
+                v = str(val)
+                loc = None
+                for selector in (
+                    f"[name='{k}']",
+                    f"#{k}",
+                    f"[id*='{k}' i]",
+                    f"[placeholder*='{k}' i]",
+                    f"[aria-label*='{k}' i]",
+                ):
+                    try:
+                        cand = page.locator(selector).first
+                        if cand.count() > 0:
+                            loc = cand
+                            break
+                    except Exception:
+                        continue
+                if loc is None:
+                    try:
+                        cand = page.get_by_label(k, exact=False).first
+                        if cand.count() > 0:
+                            loc = cand
+                    except Exception:
+                        pass
+                if loc is not None:
+                    tag = loc.evaluate("el => el.tagName.toLowerCase()")
+                    if tag == "select":
+                        loc.select_option(label=v)
+                    else:
+                        loc.fill(v)
+                    filled.append(k)
+                else:
+                    missing.append(k)
+
+            uploaded = False
+            if upload_file and Path(upload_file).expanduser().is_file():
+                f_loc = page.locator("input[type='file']").first
+                if f_loc.count() > 0:
+                    f_loc.set_input_files(str(Path(upload_file).expanduser().resolve()))
+                    uploaded = True
+
+            submitted = False
+            if submit:
+                sub_btn = page.locator("button[type='submit'], input[type='submit']").first
+                if sub_btn.count() > 0:
+                    sub_btn.click()
+                    page.wait_for_timeout(1500)
+                    submitted = True
+
+            return {
+                "ok": True,
+                "via": "playwright_cdp" if cdp else "playwright",
+                "final_url": page.url,
+                "filled": filled,
+                "missing": missing,
+                "uploaded": uploaded,
+                "submitted": submitted,
+            }
+        finally:
+            if not cdp:
+                browser.close()

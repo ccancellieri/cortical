@@ -342,6 +342,18 @@ class MemoryCurator:
                 conn.execute(
                     "ALTER TABLE chat_buffer ADD COLUMN scope_id TEXT NOT NULL DEFAULT 'chat'"
                 )
+        self.purge_legacy_fallback_turns()
+
+    def purge_legacy_fallback_turns(self) -> int:
+        """Removes polluted legacy fallback/nag assistant turns from chat_buffer."""
+        with self.db._connect() as conn:
+            cur = conn.execute(
+                """DELETE FROM chat_buffer
+                   WHERE lower(assistant_text) LIKE '%se vuoi che diventi un task operativo%'
+                      OR lower(assistant_text) LIKE '%if you want an operational multi-agent task%'
+                      OR lower(trim(assistant_text)) IN ('/no_think', '/think')"""
+            )
+            return int(cur.rowcount or 0)
 
     def evaluate_turn(self, user_text: str, assistant_text: str) -> CurationDecision:
         if is_ephemeral_utterance(user_text):
@@ -388,6 +400,7 @@ class MemoryCurator:
         user_or_assistant: str,
         assistant_optional: Optional[str] = None,
         scope_id: str = "chat",
+        allow_durable: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Stores turn in per-chat rolling buffer (`max_chat_turns`) and curates durable insights."""
         if isinstance(ctx_or_user, AccessContext):
@@ -400,7 +413,14 @@ class MemoryCurator:
             assistant_text = user_or_assistant
 
         eff_scope = (scope_id or "chat").strip() or "chat"
-        decision = self.evaluate_turn(user_text, assistant_text)
+        if allow_durable is False:
+            decision = CurationDecision(
+                worth_saving=False,
+                category="ephemeral",
+                distilled_insight="",
+            )
+        else:
+            decision = self.evaluate_turn(user_text, assistant_text)
         now = time.time()
         with self.db._connect() as conn:
             conn.execute(
@@ -451,9 +471,26 @@ class MemoryCurator:
 
             insight_id = None
             if decision.worth_saving and decision.distilled_insight:
-                insight_id = "ins-" + hashlib.sha256(
-                    decision.distilled_insight.encode("utf-8")
-                ).hexdigest()[:10]
+                new_words = set(re.findall(r"[a-z0-9]{3,}", decision.distilled_insight.lower()))
+                existing_rows = conn.execute(
+                    """SELECT insight_id, insight_text FROM memory_insights
+                       WHERE tenant_id = ? AND workspace_id = ?
+                       ORDER BY created_at DESC LIMIT 100""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+                matched_id = None
+                if new_words:
+                    for er in existing_rows:
+                        old_words = set(re.findall(r"[a-z0-9]{3,}", str(er["insight_text"] or "").lower()))
+                        if not old_words:
+                            continue
+                        jaccard = len(new_words & old_words) / len(new_words | old_words)
+                        if jaccard >= 0.80:
+                            matched_id = str(er["insight_id"])
+                            break
+                insight_id = matched_id or (
+                    "ins-" + hashlib.sha256(decision.distilled_insight.encode("utf-8")).hexdigest()[:10]
+                )
                 conn.execute(
                     """INSERT OR REPLACE INTO memory_insights(
                            insight_id, tenant_id, workspace_id, category,

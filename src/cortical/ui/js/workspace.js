@@ -129,12 +129,17 @@ export function appendStreamCard(type, metaLeft, metaRight, title, detail) {
 export function renderChatMessages(messages, chatObj) {
   const stream = document.getElementById('agent-stream');
   if (!stream) return;
-  const title = chatObj?.title || (store.activeChatId === 'chat' ? 'Chat Generale' : store.activeChatId);
+  const chatId = chatObj?.chat_id || store.activeChatId || 'chat';
+  const isGeneral = chatId === 'chat';
+  const title = chatObj?.title || (isGeneral ? 'Chat Generale' : store.activeChatId);
   if (!messages || !messages.length) {
+    const emptyDesc = isGeneral
+      ? 'Spazio informale per discussioni rapide e funzioni di servizio (non registrate nella Wiki o nei task):'
+      : 'Ogni chat e ogni task ha allegati e memoria isolati. Scrivi qui sotto, trascina file nel box o usa un avvio rapido:';
     stream.innerHTML = `
       <div class="empty-state-card">
         <h3>💬 ${escapeHtml(title)}</h3>
-        <p>Ogni chat e ogni task ha allegati e memoria isolati. Scrivi qui sotto, trascina file nel box o usa un avvio rapido:</p>
+        <p>${escapeHtml(emptyDesc)}</p>
         <div class="quick-start-grid">
           <button type="button" class="quick-start-btn" data-empty-action="attach-ws">
             <strong>📂 Allega dal Workspace</strong>
@@ -154,7 +159,16 @@ export function renderChatMessages(messages, chatObj) {
     return;
   }
 
-  stream.innerHTML = messages
+  const headerBanner = isGeneral
+    ? `
+      <div class="step-card" style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px; padding:8px 12px; background:rgba(15,23,42,0.55); border:1px solid var(--border);">
+        <span style="font-size:0.77rem; color:var(--muted);">💬 Discussioni e funzionalità informali (non registrate nella Wiki)</span>
+        <button type="button" class="btn btn-ghost btn-sm" data-action="delete-chat" data-chat-id="chat">🧹 Pulisci Chat</button>
+      </div>
+    `
+    : '';
+
+  stream.innerHTML = headerBanner + messages
     .map((m) => `
       <div class="chat-turn">
         <div class="msg-bubble msg-user">
@@ -218,6 +232,11 @@ export async function submitComposer(actionMode = 'auto', micText = undefined) {
   const speak = store.audioResponsesEnabled;
   const voice = document.getElementById('tts-voice')?.value || 'auto';
   const utteranceLang = detectLangClient(text);
+
+  if (!fromMic && text.startsWith('/')) {
+    const handled = await handleSlashCommand(text, depth, speak, effort);
+    if (handled) return;
+  }
 
   if (mode === 'task') {
     const spCard = appendStreamCard('system', 'SPAWN TASK', 'avvio...', `🤖 Avvio nuovo task: "${text}"`, 'Inizializzazione agente locale...');
@@ -303,13 +322,17 @@ export async function submitComposer(actionMode = 'auto', micText = undefined) {
   }
 }
 
-export async function spawnAgentSession(goal, depth, speak, effortOverride) {
+export async function spawnAgentSession(goal, depth, speak, effortOverride, extraOpts = {}) {
   const effort = effortOverride || document.getElementById('agent-effort')?.value || store.effort || 'medium';
+  const chkLoop = document.getElementById('chk-auto-loop');
+  const autoLoop = typeof extraOpts.auto_loop === 'boolean' ? extraOpts.auto_loop : (chkLoop ? Boolean(chkLoop.checked) : true);
   const sess = await apiPost('/api/agents/spawn', {
     goal,
     wiki_depth: depth,
     effort,
     speak: Boolean(speak),
+    auto_loop: autoLoop,
+    parallel: typeof extraOpts.parallel === 'boolean' ? extraOpts.parallel : undefined,
     source_scope_id: store.selectedSessionId || store.activeChatId || 'chat',
   });
   await selectSession(sess.session_id);
@@ -357,12 +380,15 @@ export function createNewChat() {
 
 export function deleteChat(event, chatId) {
   if (event) event.stopPropagation();
-  if (!chatId || chatId === 'chat') return;
+  if (!chatId) return;
+  const isGeneral = chatId === 'chat';
   openTaskActionModal({
-    title: '🗑️ Elimina Chat',
-    desc: 'Confermi l\'eliminazione definitiva di questa chat, della sua cronologia e dei suoi allegati?',
+    title: isGeneral ? '🧹 Pulisci Chat Generale' : '🗑️ Elimina Chat',
+    desc: isGeneral
+      ? 'Vuoi svuotare la cronologia informale della Chat Generale?'
+      : 'Confermi l\'eliminazione definitiva di questa chat, della sua cronologia e dei suoi allegati?',
     showInput: false,
-    confirmLabel: '🗑️ Elimina Chat',
+    confirmLabel: isGeneral ? '🧹 Svuota Chat' : '🗑️ Elimina Chat',
     confirmDanger: true,
     onConfirm: async () => {
       await apiPost('/api/chats/delete', { chat_id: chatId });
@@ -384,6 +410,7 @@ export async function selectChat(chatId = 'chat') {
   store.forceStreamRender = false;
   if (onStageSwitchCb) onStageSwitchCb('stream');
   renderTaskBanner(null);
+  renderTaskMacroPanel(null);
 
   try {
     const data = await apiGet(`/api/chats?scope_id=${encodeURIComponent(store.activeChatId)}`);
@@ -573,7 +600,7 @@ function renderContextAgentsBar(activeSess, sessions, globalTokenSummary, contex
   if (popBody) {
     const ctxBanner = `
       <div style="margin-bottom:8px; padding:8px; border-radius:6px; background:rgba(56,189,248,0.08); border:1px solid rgba(56,189,248,0.25); font-size:0.74rem;">
-        <div><b>📊 Contesto (${escapeHtml(scopeLabel)}):</b> ${usedTok} / ${winTok} tok (<b>${occPct}%</b>) · <code>${escapeHtml(contextTelemetry?.active_model || 'qwen3.8:27b-iq2_xs')}</code></div>
+        <div><b>📊 Contesto (${escapeHtml(scopeLabel)}):</b> ${usedTok} / ${winTok} tok (<b>${occPct}%</b>) · <code>${escapeHtml(contextTelemetry?.active_model || 'qwen3.8:27b-iq2_xxs')}</code></div>
         <div style="color:var(--muted); margin-top:2px;">Strategia attiva: <code>${escapeHtml(contextTelemetry?.strategy || 'direct')}</code> · Chunk: ${contextTelemetry?.chunks_count || 1} · Thinking: <code>${escapeHtml(curThink)}</code></div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px;">
           <label style="display:flex; flex-direction:column; gap:2px; font-size:0.68rem; color:var(--muted);">
@@ -641,6 +668,89 @@ function taskStatusMeta(active) {
     completed: { text: 'COMPLETATO', cls: 'open' },
   };
   return map[st] || { text: 'APERTO', cls: 'open' };
+}
+
+export function renderTaskMacroPanel(active) {
+  const panel = document.getElementById('task-macro-panel');
+  if (!panel) return;
+  if (!active || !active.session_id) {
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    return;
+  }
+  panel.style.display = 'flex';
+  const steps = active.steps || [];
+  const counts = { read: 0, write: 0, bash: 0, wiki: 0 };
+  const touchedFiles = [];
+  const seenFiles = new Set();
+
+  steps.forEach((st) => {
+    const title = String(st.title || '').toLowerCase();
+    const metaTool = String(st.meta?.tool || '').toLowerCase();
+    if (metaTool === 'read' || title.startsWith('pi:read') || title.startsWith('read (')) counts.read += 1;
+    if (metaTool === 'write' || metaTool === 'edit' || title.startsWith('pi:write') || title.startsWith('pi:edit')) counts.write += 1;
+    if (metaTool === 'bash' || title.startsWith('pi:bash') || title.startsWith('bash (')) counts.bash += 1;
+    if (title.includes('wiki_search')) counts.wiki += 1;
+    let p = st.meta?.path || '';
+    if (!p && title.startsWith('pi:')) {
+      const m = String(st.detail || '').match(/"path"\s*:\s*"([^"]+)"/);
+      if (m) p = m[1];
+    }
+    if (p && !seenFiles.has(p)) {
+      seenFiles.add(p);
+      touchedFiles.push(p);
+    }
+  });
+
+  const hasVerify = steps.some((st) => String(st.title || '').includes('Verifica') || (counts.write > 0 && counts.bash > 0));
+  const stVal = String(active.status || 'open');
+  const isDone = stVal === 'completed';
+  const isWarn = ['needs_input', 'awaiting_approval', 'blocked', 'stalled', 'stopped'].includes(stVal);
+  const isWorking = stVal === 'working';
+
+  const phaseCls = (doneCond, activeCond, warnCond = false) =>
+    warnCond ? 'warn' : doneCond ? 'done' : activeCond ? 'active' : '';
+
+  const p1 = phaseCls(counts.wiki > 0 || steps.length > 0, isWorking && steps.length <= 1);
+  const p2 = phaseCls(counts.write > 0 || isDone, (isWorking || counts.read > 0) && counts.write === 0 && !isDone);
+  const p3 = phaseCls(counts.write > 0 && (hasVerify || isDone), (isWorking && counts.write > 0 && !hasVerify) || stVal === 'awaiting_approval', stVal === 'awaiting_approval');
+  const p4 = phaseCls(hasVerify && isDone, isWorking && hasVerify);
+  const p5 = phaseCls(isDone, false, isWarn);
+
+  const totTok = active.token_summary?.total_tokens || active.total_tokens || 0;
+  const elapsed = active.token_summary?.elapsed_sec ? `${Number(active.token_summary.elapsed_sec).toFixed(1)}s` : (active.elapsed_sec ? `${Number(active.elapsed_sec).toFixed(1)}s` : '—');
+  const modelName = active.model || active.token_summary?.model || 'qwen3:8b';
+  const attCount = (store.cachedAttachments || []).length;
+
+  panel.innerHTML = `
+    <div class="macro-card">
+      <div class="macro-card-title">📊 Pipeline Task (Macroblocchi)</div>
+      <div class="pipeline-step ${p1}"><span>🧠</span><span>1. Contesto &amp; Skill (${attCount} allegati)</span></div>
+      <div class="pipeline-step ${p2}"><span>🔎</span><span>2. Analisi Workspace (${counts.read} read · ${counts.bash} bash)</span></div>
+      <div class="pipeline-step ${p3}"><span>✏️</span><span>3. Codice &amp; File (${counts.write} write/edit)</span></div>
+      <div class="pipeline-step ${p4}"><span>🔁</span><span>4. Loop Verifica &amp; Test</span></div>
+      <div class="pipeline-step ${p5}"><span>${isDone ? '✅' : isWarn ? '⏸️' : '⏳'}</span><span>5. ${escapeHtml(active.status_label || stVal)}</span></div>
+    </div>
+
+    <div class="macro-card">
+      <div class="macro-card-title">⚡ Telemetria &amp; Risparmio</div>
+      <div class="macro-kpi-grid">
+        <div class="macro-kpi"><div class="macro-kpi-val">${totTok.toLocaleString()}</div><div class="macro-kpi-lbl">Token Locali (0 cloud)</div></div>
+        <div class="macro-kpi"><div class="macro-kpi-val">${escapeHtml(elapsed)}</div><div class="macro-kpi-lbl">Durata</div></div>
+        <div class="macro-kpi"><div class="macro-kpi-val">${steps.length}</div><div class="macro-kpi-lbl">Step Totali</div></div>
+        <div class="macro-kpi"><div class="macro-kpi-val" style="font-size:0.74rem;">${escapeHtml(modelName)}</div><div class="macro-kpi-lbl">Modello Attivo</div></div>
+      </div>
+    </div>
+
+    <div class="macro-card">
+      <div class="macro-card-title">📁 File Toccati (${touchedFiles.length})</div>
+      ${
+        touchedFiles.length
+          ? touchedFiles.slice(0, 8).map((f) => `<div style="font-family:var(--mono); font-size:0.71rem; color:var(--text-soft); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(f)}">• ${escapeHtml(f.split('/').pop())}</div>`).join('')
+          : '<div style="font-size:0.74rem; color:var(--muted);">Nessun file toccato finora</div>'
+      }
+    </div>
+  `;
 }
 
 export function renderTaskBanner(active) {
@@ -755,28 +865,76 @@ export async function fetchFilteredAgentRuns(episodeId, reset = true) {
   }
 }
 
+function formatApprovalDecisionLabel(decision, status) {
+  const key = String(decision || status || '').trim();
+  const labels = {
+    allow_once: '✓ Consentito (1 volta)',
+    allow_session: '✓ Consentito per questa sessione',
+    allow_always: '★ Sempre consentito',
+    allowed: '✓ Consentito',
+    deny: "✕ Negato dall'utente",
+    denied: "✕ Negato dall'utente",
+    expired: '⏱️ Scaduto',
+  };
+  return labels[key] || key || 'Completato';
+}
+
+function extractPlayableExampleLinksHtml(text) {
+  const raw = String(text || '');
+  const matches = raw.match(/examples\/vibe_games\/[A-Za-z0-9_\-/]+\.html|examples\/[A-Za-z0-9_\-/]+\.html/g) || [];
+  const unique = [...new Set(matches.map((m) => `/${m.replace(/^\/+/, '')}`))];
+  if (!unique.length) return '';
+  const links = unique.slice(0, 3).map((href) => {
+    const label = href.includes('sliding_puzzle')
+      ? 'Puzzle 15'
+      : (href.includes('tic_tac_toe') ? 'Tic-Tac-Toe' : (href.includes('pacman') ? 'Pac-Man' : (href.includes('snake') ? 'Snake' : 'Gioco HTML')));
+    return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" class="btn btn-sm" style="text-decoration:none;">🎮 Apri e Gioca (${escapeHtml(label)})</a>`;
+  }).join('');
+  return `<div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">${links}<a href="/examples/vibe_games/index.html" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="text-decoration:none;">🕹️ Arcade Hub (Tutti i Giochi)</a></div>`;
+}
+
 function renderApprovalCardHtml(pa) {
   if (!pa) return '';
   const isPending = pa.status === 'pending';
+  const isAllowed = pa.status === 'allowed';
   const riskPct = Math.round(Number(pa.risk || 0) * 100);
-  const borderCol = isPending ? 'rgba(251,191,36,0.75)' : (pa.status === 'allowed' ? 'rgba(34,197,94,0.45)' : 'rgba(239,68,68,0.45)');
+  const borderCol = isPending
+    ? 'rgba(251,191,36,0.75)'
+    : (isAllowed ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)');
+  const bgCol = isPending
+    ? 'rgba(15,23,42,0.85)'
+    : (isAllowed ? 'rgba(20,83,45,0.28)' : 'rgba(127,29,29,0.25)');
+  const decLabel = formatApprovalDecisionLabel(pa.decision, pa.status);
+  const headerHtml = isPending
+    ? `🔐 Richiesta Approvazione Tool: <code>${escapeHtml(pa.tool || 'bash')}</code>`
+    : (isAllowed
+      ? `✅ Comando Autorizzato: <code>${escapeHtml(pa.tool || 'bash')}</code>`
+      : `⛔ Comando Rifiutato: <code>${escapeHtml(pa.tool || 'bash')}</code>`);
+  const pillStyle = isPending
+    ? ''
+    : (isAllowed
+      ? 'background:rgba(34,197,94,0.2); border-color:rgba(34,197,94,0.6); color:#86efac;'
+      : 'background:rgba(239,68,68,0.2); border-color:rgba(239,68,68,0.6); color:#fca5a5;');
+  const pillText = isPending
+    ? `⏳ In attesa · ${pa.pattern || ''} (${riskPct}%)`
+    : decLabel;
   return `
-    <div class="step-card" style="border:1.5px solid ${borderCol}; background:rgba(15,23,42,0.85); margin:8px 0; padding:10px 12px; border-radius:10px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
-        <span style="font-weight:700; font-size:0.82rem;">🔐 Approvazione Tool: <code>${escapeHtml(pa.tool || 'bash')}</code></span>
-        <span class="status-pill">${escapeHtml(pa.pattern || '')} · rischio ${riskPct}%</span>
+    <div class="step-card" data-approval-card="${escapeHtml(pa.approval_id)}" style="border:1.5px solid ${borderCol}; background:${bgCol}; margin:8px 0; padding:10px 12px; border-radius:10px; transition:border-color 0.15s, background 0.15s;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
+        <span data-apr-header style="font-weight:700; font-size:0.82rem;">${headerHtml}</span>
+        <span data-apr-pill class="status-pill" style="${pillStyle}">${escapeHtml(pillText)}</span>
       </div>
       <pre class="step-detail" style="margin:0 0 8px 0; padding:8px; background:rgba(2,6,23,0.65); border-radius:6px; white-space:pre-wrap;">${escapeHtml(pa.summary || '')}</pre>
-      ${pa.reason ? `<div style="font-size:0.72rem; color:var(--muted); margin-bottom:8px;">${escapeHtml(pa.reason)}</div>` : ''}
+      ${pa.reason && isPending ? `<div style="font-size:0.72rem; color:var(--muted); margin-bottom:8px;">${escapeHtml(pa.reason)}</div>` : ''}
       ${isPending ? `
-        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+        <div data-apr-actions style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
           <button type="button" class="btn btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_once">✓ Consenti</button>
           <button type="button" class="btn btn-ghost btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_session">✓ Questa sessione</button>
           <button type="button" class="btn btn-ghost btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="allow_always">★ Sempre</button>
           <button type="button" class="btn btn-danger btn-sm" data-apr-id="${escapeHtml(pa.approval_id)}" data-apr-decision="deny">✕ Nega</button>
           <input type="text" id="apr-fb-${escapeHtml(pa.approval_id)}" placeholder="Feedback opzionale se neghi..." style="flex:1; min-width:170px; font-size:0.74rem;" />
         </div>
-      ` : `<div style="font-size:0.74rem; color:var(--muted);">Esito: <b>${escapeHtml(pa.decision || pa.status)}</b>${pa.feedback ? ` · ${escapeHtml(pa.feedback)}` : ''}</div>`}
+      ` : `<div data-apr-actions style="font-size:0.76rem; color:${isAllowed ? '#86efac' : '#fca5a5'}; font-weight:600;">${isAllowed ? `✅ Azione confermata (${escapeHtml(decLabel)}) — il comando è stato sbloccato ed eseguito.` : `⛔ Azione bloccata (${escapeHtml(decLabel)}).`}${pa.feedback ? ` · ${escapeHtml(pa.feedback)}` : ''}</div>`}
     </div>
   `;
 }
@@ -850,21 +1008,24 @@ function renderTaskStreamHtml(active, pendingApprovals = []) {
           return `<div style="font-size:0.74rem; color:var(--muted); padding:2px 6px;">${escapeHtml(st.title)}</div>`;
         }
         if (typ === 'output') {
+          const playLinks = extractPlayableExampleLinksHtml(st.detail || '');
           return `
             <div class="final-report-card">
               <div class="step-meta"><span>✅ ${escapeHtml(st.title)}</span><span>${escapeHtml(st.timestamp || '')}</span></div>
               <div class="final-report-prose">${formatProseHtml(st.detail || '')}</div>
+              ${playLinks}
             </div>
           `;
         }
         const icon = typ === 'tool_call' ? '🔧' : (typ === 'tool_result' ? '📦' : (typ === 'subagent' ? '🤖' : '🧠'));
+        const stepPlayLinks = typ === 'tool_result' ? extractPlayableExampleLinksHtml(st.detail || '') : '';
         return `
           <details class="tool-trace">
             <summary class="tool-trace-summary">
               <span>${icon} <b>${escapeHtml(typ.toUpperCase())}</b> · ${escapeHtml(st.title)}</span>
               <span style="color:var(--muted); flex-shrink:0;">${escapeHtml(st.timestamp || '')}</span>
             </summary>
-            ${st.detail ? `<div class="tool-trace-body"><pre class="step-detail">${escapeHtml(st.detail)}</pre></div>` : ''}
+            ${st.detail ? `<div class="tool-trace-body"><pre class="step-detail">${escapeHtml(st.detail)}</pre>${stepPlayLinks}</div>` : ''}
           </details>
         `;
       }).join('')
@@ -922,7 +1083,7 @@ export async function refreshAgents() {
       store.taskQuery,
       store.taskHasMore,
       data.total,
-      visibleChats.map((c) => [c.chat_id, c.title, c.turn_count || 0]),
+      visibleChats.map((c) => [c.chat_id, c.title, c.message_count ?? c.turn_count ?? 0]),
       visibleSessions.map((s) => [s.session_id, s.status, s.lifecycle_state, (s.steps || []).length, s.token_summary?.total_tokens || 0]),
     ]);
 
@@ -933,6 +1094,7 @@ export async function refreshAgents() {
         .map((c) => {
           const cidEsc = escapeHtml(c.chat_id);
           const isActiveChat = !store.selectedSessionId && c.chat_id === store.activeChatId;
+          const msgCount = c.message_count ?? c.turn_count ?? 0;
           return `
             <div class="roster-card chat-card ${isActiveChat ? 'active' : ''}" data-chat-id="${cidEsc}">
               <div class="roster-card-top">
@@ -940,12 +1102,16 @@ export async function refreshAgents() {
                 <span class="status-pill status-open">CHAT</span>
               </div>
               <div class="roster-meta-row">
-                <span class="roster-meta">${c.turn_count || 0} messaggi</span>
-                ${c.chat_id !== 'chat' ? `
+                <span class="roster-meta">${msgCount} messaggi</span>
+                ${c.chat_id === 'chat' ? (msgCount > 0 ? `
+                  <div class="roster-hover-actions">
+                    <button type="button" class="mini-action-btn" data-action="delete-chat" data-chat-id="${cidEsc}" title="Pulisci Chat Generale">🧹</button>
+                  </div>
+                ` : '') : `
                   <div class="roster-hover-actions">
                     <button type="button" class="mini-action-btn danger" data-action="delete-chat" data-chat-id="${cidEsc}" title="Elimina chat">🗑️</button>
                   </div>
-                ` : ''}
+                `}
               </div>
             </div>
           `;
@@ -1002,10 +1168,15 @@ export async function refreshAgents() {
       }
       const actSig = active.current_activity ? `${active.current_activity.tool}:${active.current_activity.summary}` : '';
       const aprSig = (data.pending_approvals || []).map((p) => `${p.approval_id}:${p.status}`).join(',');
-      const streamSig = `${active.session_id}:${active.status}:${active.lifecycle_state}:${(active.steps || []).length}:${(active.runs || []).length}:${active.token_summary?.total_tokens || 0}:${actSig}:${aprSig}:${active.updated_at || ''}`;
+      const stepAprSig = (active.steps || [])
+        .filter((s) => s.type === 'approval' && s.meta?.approval)
+        .map((s) => `${s.meta.approval.approval_id}:${s.meta.approval.status}:${s.meta.approval.decision}`)
+        .join(',');
+      const streamSig = `${active.session_id}:${active.status}:${active.lifecycle_state}:${(active.steps || []).length}:${(active.runs || []).length}:${active.token_summary?.total_tokens || 0}:${actSig}:${aprSig}:${stepAprSig}:${active.updated_at || ''}`;
       if (store.forceStreamRender || streamSig !== store.lastStreamSig) {
         store.lastStreamSig = streamSig;
         store.forceStreamRender = false;
+        renderTaskMacroPanel(active);
         const stream = document.getElementById('agent-stream');
         if (stream) {
           stream.innerHTML = renderTaskStreamHtml(active, data.pending_approvals || []);
@@ -1031,16 +1202,60 @@ export async function updateScopePreferences(scopeId, patch) {
   await refreshAgents();
 }
 
-export async function resolveApprovalAction(approvalId, decision) {
+export async function resolveApprovalAction(approvalId, decision, triggerBtn = null) {
   if (!approvalId) return;
   const fb = (document.getElementById(`apr-fb-${approvalId}`)?.value || '').trim();
-  await apiPost('/api/approvals/resolve', { approval_id: approvalId, decision, feedback: fb });
-  store.forceStreamRender = true;
-  await refreshAgents();
+  const isDeny = decision === 'deny';
+  const decLabel = formatApprovalDecisionLabel(decision, isDeny ? 'denied' : 'allowed');
+
+  // Optimistic DOM update for instant 0ms user feedback
+  const card = triggerBtn?.closest?.('[data-approval-card]') || document.querySelector(`[data-approval-card="${CSS.escape(approvalId)}"]`);
+  if (card) {
+    card.querySelectorAll('button, input').forEach((el) => { el.disabled = true; });
+    card.style.borderColor = isDeny ? 'rgba(239,68,68,0.75)' : 'rgba(34,197,94,0.75)';
+    card.style.background = isDeny ? 'rgba(127,29,29,0.25)' : 'rgba(20,83,45,0.28)';
+    const hdr = card.querySelector('[data-apr-header]');
+    if (hdr) {
+      hdr.textContent = isDeny
+        ? '⛔ Approvazione Negata — blocco comando in corso...'
+        : '✅ Approvazione Confermata — sblocco comando in corso...';
+    }
+    const pill = card.querySelector('[data-apr-pill]');
+    if (pill) {
+      pill.textContent = decLabel;
+      pill.style.background = isDeny ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)';
+      pill.style.borderColor = isDeny ? 'rgba(239,68,68,0.6)' : 'rgba(34,197,94,0.6)';
+      pill.style.color = isDeny ? '#fca5a5' : '#86efac';
+    }
+    const actionsRow = card.querySelector('[data-apr-actions]');
+    if (actionsRow) {
+      actionsRow.innerHTML = `<span style="font-size:0.76rem; font-weight:600; color:${isDeny ? '#fca5a5' : '#86efac'};">${isDeny ? `⛔ Blocco confermato (${escapeHtml(decLabel)}).` : `✅ Azione confermata (${escapeHtml(decLabel)}) — esecuzione sbloccata.`}</span>`;
+    }
+  }
+
+  // Optimistically sync in-memory loadedSessions so polling preserves resolved state
+  for (const s of (store.loadedSessions || [])) {
+    for (const st of (s.steps || [])) {
+      if (st.type === 'approval' && st.meta?.approval?.approval_id === approvalId) {
+        st.meta.approval.status = isDeny ? 'denied' : 'allowed';
+        st.meta.approval.decision = decision;
+        if (fb) st.meta.approval.feedback = fb;
+      }
+    }
+  }
+
+  try {
+    await apiPost('/api/approvals/resolve', { approval_id: approvalId, decision, feedback: fb });
+  } catch (err) {
+    console.warn('resolveApprovalAction failed:', err);
+  } finally {
+    store.forceStreamRender = true;
+    await refreshAgents();
+  }
 }
 
 export function bindAgentRunsControls() {
-  const main = document.getElementById('stage-chat');
+  const main = document.getElementById('stage-stream');
   if (main && !main.dataset.runsBound) {
     main.dataset.runsBound = '1';
     main.addEventListener('click', (e) => {
@@ -1049,9 +1264,14 @@ export function bindAgentRunsControls() {
         stopSingleAgentRun(stopBtn.getAttribute('data-stop-run'), stopBtn.getAttribute('data-sid'));
         return;
       }
+      const delChatBtn = e.target.closest('[data-action="delete-chat"]');
+      if (delChatBtn) {
+        deleteChat(e, delChatBtn.getAttribute('data-chat-id') || 'chat');
+        return;
+      }
       const aprBtn = e.target.closest('[data-apr-decision]');
       if (aprBtn) {
-        resolveApprovalAction(aprBtn.getAttribute('data-apr-id'), aprBtn.getAttribute('data-apr-decision'));
+        resolveApprovalAction(aprBtn.getAttribute('data-apr-id'), aprBtn.getAttribute('data-apr-decision'), aprBtn);
       }
     });
     main.addEventListener('change', (e) => {
@@ -1118,4 +1338,304 @@ export async function triggerStopBargeIn() {
 export async function openNativePiTerminal() {
   const d = await apiPost('/api/agents/open-terminal', {});
   appendStreamCard('subagent', 'TERMINAL', d.platform || 'CLI', 'Apertura sessione interattiva `pi`', JSON.stringify(d, null, 2));
+}
+
+const HARNESS_SLASH_COMMANDS = [
+  { cmd: '/skill', insert: '/skill ', desc: 'Importa/allega una Skill nel contesto attivo' },
+  { cmd: '/task', insert: '/task ', desc: 'Avvia un nuovo Task operativo locale' },
+  { cmd: '/loop', insert: '/loop ', desc: 'Avvia Task in Swarm Parallelo + Loop Verifica/Test' },
+  { cmd: '/plan', insert: '/plan ', desc: 'Pianifica architettura senza modificare file' },
+  { cmd: '/review', insert: '/review', desc: 'Esegue verifica e test sulle modifiche correnti' },
+  { cmd: '/test', insert: '/test', desc: 'Esegue la suite unitaria (.venv)' },
+  { cmd: '/diff', insert: '/diff', desc: 'Mostra git status e diff --stat del workspace' },
+  { cmd: '/compact', insert: '/compact', desc: 'Compatta la memoria del contesto attivo' },
+  { cmd: '/export', insert: '/export', desc: 'Esporta bundle USB (.tar.gz) di memoria, task e skill' },
+  { cmd: '/clear', insert: '/clear', desc: 'Crea una nuova chat pulita' },
+  { cmd: '/help', insert: '/help', desc: 'Mostra tutti i comandi / e le menzioni @' },
+];
+
+async function handleSlashCommand(rawText, depth, speak, effort) {
+  const parts = rawText.trim().split(/\s+/);
+  const cmd = (parts[0] || '').toLowerCase();
+  const rest = rawText.trim().slice(cmd.length).trim();
+  const scopeId = activeScopeId();
+
+  if (cmd === '/skill') {
+    const skills = await ensureCatalogLoadedForSuggest();
+    if (!rest) {
+      const names = skills.map((s) => `\`${s.name || s.id}\``).join(', ');
+      appendStreamCard('system', 'HARNESS /skill', 'catalogo', 'Skill disponibili', names || 'Nessuna skill trovata.');
+      return true;
+    }
+    const q = rest.toLowerCase();
+    const match = skills.find((s) => String(s.name || s.id).toLowerCase() === q)
+      || skills.find((s) => String(s.name || s.id).toLowerCase().includes(q));
+    if (!match) {
+      appendStreamCard('system', 'HARNESS /skill', 'non trovata', `Skill "${rest}" non trovata`, 'Usa `/` per vedere le skill disponibili.');
+      return true;
+    }
+    await apiPost('/api/context/attach', {
+      scope_id: scopeId,
+      item_type: 'skill',
+      item_ref: match.ref || match.path || match.id || match.name,
+      label: match.name || match.id,
+      depth_tier: 'medium',
+    });
+    await loadScopedContext(scopeId);
+    appendStreamCard('assistant', 'SKILL IMPORTATA', scopeId, `⚡ ${match.name || match.id}`, `Skill collegata al contesto attivo (\`${scopeId}\`).`);
+    return true;
+  }
+  if (cmd === '/task' && rest) {
+    await spawnAgentSession(rest, depth, speak, effort);
+    return true;
+  }
+  if (cmd === '/loop' && rest) {
+    await spawnAgentSession(rest, depth, speak, effort, { auto_loop: true, parallel: true });
+    return true;
+  }
+  if (cmd === '/plan' && rest) {
+    await spawnAgentSession(`Pianifica in dettaglio senza modificare file: ${rest}`, depth, speak, 'high', { auto_loop: false });
+    return true;
+  }
+  if (cmd === '/review') {
+    await spawnAgentSession(rest || 'Verifica il codice, controlla la sintassi/test del workspace e segnala o correggi eventuali errori.', depth, speak, effort, { auto_loop: true });
+    return true;
+  }
+  if (cmd === '/export') {
+    const res = await apiPost('/api/portability/export', {});
+    appendStreamCard('assistant', 'USB EXPORT', 'OK', `💾 Bundle esportato (${Math.round((res.size_bytes || 0) / 1024)} KB)`, `Percorso: \`${res.archive_path}\` (${res.files_archived} file)`);
+    return true;
+  }
+  if (cmd === '/clear') {
+    await createNewChat();
+    return true;
+  }
+  if (['/diff', '/test', '/compact', '/help'].includes(cmd)) {
+    const res = await apiPost('/api/harness/command', { command: rawText, scope_id: scopeId });
+    appendStreamCard('assistant', `HARNESS ${cmd}`, res.ok ? 'OK' : 'ERR', rawText, res.output || JSON.stringify(res));
+    return true;
+  }
+  return false;
+}
+
+async function ensureCatalogLoadedForSuggest() {
+  if ((store.cachedCatalog?.skills || []).length > 0) return store.cachedCatalog.skills;
+  try {
+    const d = await apiGet('/api/catalog');
+    store.cachedCatalog = d;
+    return d.skills || [];
+  } catch {
+    return [];
+  }
+}
+
+export function bindComposerAutocomplete() {
+  const input = document.getElementById('prompt-input');
+  const pop = document.getElementById('composer-suggest-popover');
+  if (!input || !pop || input.dataset.acBound) return;
+  input.dataset.acBound = '1';
+
+  let items = [];
+  let activeIdx = 0;
+  let triggerMode = ''; // '/' | '@'
+  let triggerStart = 0;
+
+  const hidePop = () => {
+    pop.classList.remove('open');
+    pop.innerHTML = '';
+    items = [];
+    triggerMode = '';
+  };
+
+  const renderItems = () => {
+    if (!items.length) {
+      hidePop();
+      return;
+    }
+    pop.innerHTML = items.slice(0, 12).map((it, idx) => (
+      `<div class="suggest-item ${idx === activeIdx ? 'active' : ''}" data-ac-idx="${idx}">`
+      + `<span><b>${escapeHtml(it.title)}</b></span>`
+      + `<span class="suggest-meta">${escapeHtml(it.subtitle || '')}</span>`
+      + `</div>`
+    )).join('');
+    pop.classList.add('open');
+  };
+
+  const applySelection = async (it) => {
+    if (!it) return;
+    if (it.action === 'attach_skill') {
+      input.value = '';
+      autoResizeComposer();
+      hidePop();
+      await handleSlashCommand(`/skill ${it.skillName}`, 'medium', false, 'medium');
+      return;
+    }
+    const before = input.value.slice(0, triggerStart);
+    const after = input.value.slice(input.selectionStart || input.value.length);
+    input.value = `${before}${it.insert}${after}`;
+    const pos = (before + it.insert).length;
+    input.setSelectionRange(pos, pos);
+    autoResizeComposer();
+    hidePop();
+    input.focus();
+  };
+
+  input.addEventListener('input', async () => {
+    const val = input.value;
+    const caret = input.selectionStart || val.length;
+    const upto = val.slice(0, caret);
+
+    // 1. Slash command or /skill autocomplete
+    if (upto.startsWith('/')) {
+      triggerMode = '/';
+      triggerStart = 0;
+      const lower = upto.toLowerCase();
+      const skills = await ensureCatalogLoadedForSuggest();
+      if (lower.startsWith('/skill ')) {
+        const q = lower.slice(7).trim();
+        items = skills
+          .filter((s) => !q || String(s.name || s.id).toLowerCase().includes(q))
+          .map((s) => ({
+            title: `⚡ /skill ${s.name || s.id}`,
+            subtitle: s.description || 'Allega skill al contesto attivo',
+            action: 'attach_skill',
+            skillName: s.name || s.id,
+          }));
+      } else {
+        const q = lower.slice(1).trim();
+        const cmdMatches = HARNESS_SLASH_COMMANDS
+          .filter((c) => !q || c.cmd.slice(1).includes(q) || c.desc.toLowerCase().includes(q))
+          .map((c) => ({ title: c.cmd, subtitle: c.desc, insert: c.insert }));
+        const skillMatches = q
+          ? skills
+              .filter((s) => String(s.name || s.id).toLowerCase().includes(q))
+              .slice(0, 6)
+              .map((s) => ({
+                title: `⚡ Importa Skill: ${s.name || s.id}`,
+                subtitle: 'Allega subito al contesto',
+                action: 'attach_skill',
+                skillName: s.name || s.id,
+              }))
+          : [];
+        items = [...cmdMatches, ...skillMatches];
+      }
+      activeIdx = 0;
+      renderItems();
+      return;
+    }
+
+    // 2. @ mention autocomplete (tasks, chats, skills)
+    const m = upto.match(/(^|\s)@([^\s]*)$/);
+    if (m) {
+      triggerMode = '@';
+      triggerStart = upto.length - m[2].length - 1;
+      const q = m[2].toLowerCase();
+      const taskItems = (store.loadedSessions || [])
+        .filter((s) => !q || s.session_id.toLowerCase().includes(q) || String(s.title || s.goal || '').toLowerCase().includes(q))
+        .slice(0, 8)
+        .map((s) => ({
+          title: `🤖 @${s.session_id}`,
+          subtitle: s.title || s.goal || s.status,
+          insert: `@${s.session_id} `,
+        }));
+      const chatItems = (store.loadedChats || [])
+        .filter((c) => !q || c.chat_id.toLowerCase().includes(q) || String(c.title || '').toLowerCase().includes(q))
+        .slice(0, 4)
+        .map((c) => ({
+          title: `💬 @${c.chat_id}`,
+          subtitle: c.title || c.chat_id,
+          insert: `@${c.chat_id} `,
+        }));
+      items = [...taskItems, ...chatItems];
+      activeIdx = 0;
+      renderItems();
+      return;
+    }
+    hidePop();
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (!pop.classList.contains('open') || !items.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      activeIdx = (activeIdx + 1) % Math.min(items.length, 12);
+      renderItems();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const maxLen = Math.min(items.length, 12);
+      activeIdx = (activeIdx - 1 + maxLen) % maxLen;
+      renderItems();
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      applySelection(items[activeIdx]);
+    } else if (e.key === 'Escape') {
+      hidePop();
+    }
+  });
+
+  pop.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-ac-idx]');
+    if (!row) return;
+    const idx = Number(row.getAttribute('data-ac-idx'));
+    applySelection(items[idx]);
+  });
+}
+
+export function closeTokenReportModal() {
+  document.getElementById('token-report-modal-overlay')?.classList.remove('open');
+}
+
+export async function openTokenReportModal(withNarrative = false) {
+  const overlay = document.getElementById('token-report-modal-overlay');
+  const body = document.getElementById('token-report-body');
+  if (!overlay || !body) return;
+  overlay.classList.add('open');
+  body.innerHTML = `<div style="color:var(--muted);">⏳ Calcolo statistiche locali + remote (0 token cloud)${withNarrative ? ' + analisi LLM locale' : ''}...</div>`;
+  try {
+    const ep = store.activeScopeType === 'task' && store.activeScopeId ? `&episode_id=${encodeURIComponent(store.activeScopeId)}` : '';
+    const data = await apiGet(`/api/tokens/report?narrative=${withNarrative ? '1' : '0'}${ep}`);
+    const g = data.global_stats || {};
+    const rem = g.remote || {};
+    const loc = g.local || {};
+    const roi = g.roi || {};
+    const mem = g.memory_and_skills || {};
+    const tasks = (data.per_task || []).slice(0, 8);
+    const chats = (data.per_chat || []).slice(0, 8);
+    const insight = data.local_llm_insight;
+    const exp = data.explanations || {};
+
+    body.innerHTML = `
+      <div class="macro-kpi-grid" style="margin-bottom:12px;">
+        <div class="macro-kpi" title="${escapeHtml(exp.local_offload || '')} ${escapeHtml(exp.memory_saved || '')}"><div class="macro-kpi-val">${Number(roi.estimated_cloud_tokens_saved || 0).toLocaleString()}</div><div class="macro-kpi-lbl">Token Cloud Risparmiati ⓘ</div></div>
+        <div class="macro-kpi" title="${escapeHtml(exp.cloud_savings_usd || '')} | ${escapeHtml(exp.offload_share || '')}"><div class="macro-kpi-val">~$${Number(roi.estimated_usd_saved || 0).toFixed(2)}</div><div class="macro-kpi-lbl">Risparmio (${Number(roi.cloud_offload_share_pct || 0).toFixed(1)}% offload) ⓘ</div></div>
+        <div class="macro-kpi" title="${escapeHtml(exp.local_offload || '')}"><div class="macro-kpi-val">${Number(loc.total_tokens || 0).toLocaleString()}</div><div class="macro-kpi-lbl">Token Locali (${loc.run_count || 0} run · ${Number(loc.total_elapsed_sec || 0).toFixed(1)}s) ⓘ</div></div>
+        <div class="macro-kpi" title="${escapeHtml(exp.remote_usage || '')}"><div class="macro-kpi-val">${Number(rem.active_tokens || 0).toLocaleString()}</div><div class="macro-kpi-lbl">Cloud Attivi (${rem.chat_count || 0} chat · cache ${Number(rem.cache_hit_pct || 0).toFixed(1)}%) ⓘ</div></div>
+      </div>
+      <div style="padding:8px 10px; border:1px solid var(--border); border-radius:8px; margin-bottom:12px; background:rgba(15,23,42,0.45);" title="${escapeHtml(exp.memory_saved || '')}">
+        <b>Second Brain 3+1 &amp; Skill:</b> ${mem.episodes_total || 0} task (${mem.episodes_archived || 0} archiviati) · ${mem.syntheses_3plus1 || 0} sintesi 3+1 · ${mem.memory_insights || 0} insight · ${mem.learned_skills || 0} skill (${mem.skill_uses || 0} usi) · ~${Number(mem.estimated_memory_tokens_saved || 0).toLocaleString()} token contesto risparmiati.
+      </div>
+      ${insight && insight.text ? `<div style="padding:8px 10px; border:1px solid var(--accent); border-radius:8px; margin-bottom:12px; white-space:pre-wrap;"><b>🧠 Analista Locale (${escapeHtml(insight.source || 'local')}):</b>\n${escapeHtml(insight.text)}</div>` : ''}
+      <div style="font-weight:700; color:var(--muted); margin-bottom:4px;">TOP TASK CORTICAL (LOCALI)</div>
+      <div style="margin-bottom:12px; display:flex; flex-direction:column; gap:4px;">
+        ${tasks.length ? tasks.map((t) => `<div style="padding:5px 8px; border:1px solid var(--border); border-radius:6px; display:flex; justify-content:space-between; gap:8px;"><span><code>${escapeHtml(t.episode_id)}</code> · ${escapeHtml(t.goal || '')}</span><span style="white-space:nowrap;"><b>${Number(t.local_total_tokens || 0).toLocaleString()}</b> tok (${t.run_count} run · ${Number(t.elapsed_sec || 0).toFixed(1)}s)</span></div>`).join('') : '<div style="color:var(--muted);">Nessun run locale registrato.</div>'}
+      </div>
+      <div style="font-weight:700; color:var(--muted); margin-bottom:4px;">CHAT REMOTE RECENTI (${rem.measured_chat_count || 0} misurate / ${rem.estimated_chat_count || 0} stimate)</div>
+      <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:12px;">
+        ${chats.length ? chats.map((c) => `<div style="padding:5px 8px; border:1px solid var(--border); border-radius:6px; display:flex; justify-content:space-between; gap:8px;"><span><code>${escapeHtml((c.conversation_id || '').slice(0, 8))}</code> (${escapeHtml(c.source)}) ${c.uses_cortical ? '⚡' : ''} · ${escapeHtml(c.title || '')}</span><span style="white-space:nowrap;">in ${Number(c.input_tokens || 0).toLocaleString()} · out ${Number(c.output_tokens || 0).toLocaleString()} (~$${Number(c.estimated_cost_usd || 0).toFixed(2)})</span></div>`).join('') : '<div style="color:var(--muted);">Nessun transcript remoto trovato.</div>'}
+      </div>
+      <details style="border-top:1px solid var(--border); padding-top:8px; color:var(--muted); font-size:0.74rem;">
+        <summary style="cursor:pointer; font-weight:700;">📐 Note Metodologiche &amp; Formule (0 token cloud)</summary>
+        <ul style="margin:6px 0 0 16px; padding:0; display:flex; flex-direction:column; gap:3px;">
+          <li><b>[1] Remote:</b> ${escapeHtml(exp.remote_usage || '')}</li>
+          <li><b>[2] Locale &amp; Tempo:</b> ${escapeHtml(exp.local_offload || '')}</li>
+          <li><b>[3] Memoria 3+1:</b> ${escapeHtml(exp.memory_saved || '')}</li>
+          <li><b>[4] Risparmio USD:</b> ${escapeHtml(exp.cloud_savings_usd || '')}</li>
+          <li><b>[5] Quota Offload:</b> ${escapeHtml(exp.offload_share || '')}</li>
+        </ul>
+      </details>
+    `;
+  } catch (err) {
+    body.innerHTML = `<div style="color:#fca5a5;">Errore caricamento Token Report: ${escapeHtml(err.message)}</div>`;
+  }
 }

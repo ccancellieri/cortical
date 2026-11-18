@@ -10,9 +10,12 @@ Features:
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import json
 import os
 import re
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,20 +59,50 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _extract_python_ast_summary(raw_text: str) -> tuple[str, list[str], list[str]]:
+    """Extracts module docstring, symbol signatures, and docstrings via stdlib `ast`."""
+    try:
+        tree = ast.parse(raw_text)
+    except SyntaxError:
+        return ("", [], [])
+    mod_doc = (ast.get_docstring(tree) or "").strip().splitlines()[0] if ast.get_docstring(tree) else ""
+    defs: list[str] = []
+    docs: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            cdoc = (ast.get_docstring(node) or "").strip().splitlines()[0] if ast.get_docstring(node) else ""
+            methods = [n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))][:8]
+            sig = f"class {node.name}({', '.join(methods)})" if methods else f"class {node.name}"
+            defs.append(sig)
+            if cdoc:
+                docs.append(f"{node.name}: {cdoc[:100]}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [a.arg for a in node.args.args if a.arg != "self"][:5]
+            prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+            defs.append(f"{prefix}{node.name}({', '.join(args)})")
+            fdoc = (ast.get_docstring(node) or "").strip().splitlines()[0] if ast.get_docstring(node) else ""
+            if fdoc:
+                docs.append(f"{node.name}: {fdoc[:100]}")
+    return (mod_doc, defs, docs)
+
+
 def deterministic_extractive_summarizer(
     rel_path: str, raw_text: str, node_type: str = "file"
 ) -> dict[str, str]:
-    """Fast, deterministic 3-tier synthesis (`light`, `medium`, `high`) without LLM latency."""
+    """Fast, deterministic 3-tier synthesis (`light`, `medium`, `high`) using AST + headings."""
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
     headings = [ln.lstrip("# ").strip() for ln in lines if ln.startswith("#")]
-    code_defs = [
+    mod_doc, ast_defs, ast_docs = (
+        _extract_python_ast_summary(raw_text) if rel_path.endswith(".py") and node_type == "file" else ("", [], [])
+    )
+    code_defs = ast_defs or [
         ln.strip()
         for ln in lines
         if re.match(r"^(class|def|async def|export|function|interface|type)\s+", ln)
     ]
 
     title = headings[0] if headings else Path(rel_path).name
-    first_para = next(
+    first_para = mod_doc or next(
         (ln for ln in lines if not ln.startswith("#") and len(ln) > 15),
         lines[0] if lines else "Empty node",
     )
@@ -78,12 +111,13 @@ def deterministic_extractive_summarizer(
     light = f"[{node_type.upper()}] {rel_path} — {title}: {first_para[:160]}"
 
     # Tier 2: MEDIUM (~250 tokens)
-    outline = ", ".join((headings[1:6] + code_defs[:6])[:8]) or "standard content"
+    outline = ", ".join((headings[1:6] + code_defs[:8])[:10]) or "standard content"
+    doc_notes = "; ".join(ast_docs[:6]) if ast_docs else " ".join(lines[:6])[:500]
     medium_lines = [
         f"Path: {rel_path} ({node_type})",
         f"Title: {title}",
         f"Structure: {outline}",
-        "Key Excerpt: " + " ".join(lines[:6])[:600],
+        f"Key Summary: {doc_notes[:600]}",
     ]
     medium = "\n".join(medium_lines)
 
@@ -91,10 +125,12 @@ def deterministic_extractive_summarizer(
     high_lines = [
         f"=== HIGH-DEPTH SYNTHESIS: {rel_path} ===",
         f"Headings: {', '.join(headings[:15]) or 'None'}",
-        f"Symbols/Definitions: {', '.join(code_defs[:20]) or 'None'}",
-        "Detailed Content Digest:",
-        "\n".join(lines[:45])[:3200],
+        f"Symbols/Definitions: {', '.join(code_defs[:25]) or 'None'}",
     ]
+    if ast_docs:
+        high_lines.append("Docstrings:\n" + "\n".join(f"- {d}" for d in ast_docs[:20]))
+    high_lines.append("Detailed Content Digest:")
+    high_lines.append("\n".join(lines[:45])[:3000])
     high = "\n".join(high_lines)
 
     return {
@@ -102,6 +138,53 @@ def deterministic_extractive_summarizer(
         "medium": medium,
         "high": high,
     }
+
+
+def make_ollama_3tier_summarizer(
+    model: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> SummarizerFn:
+    """Returns a local-Ollama 3-tier concept summarizer with deterministic AST fallback."""
+    chosen = model or os.environ.get("CORTICAL_CRAWL_MODEL", "qwen3.5:9b-q3_k_xl")
+    root = (base_url or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").strip().rstrip("/")
+
+    def _summarize(rel_path: str, raw_text: str, node_type: str = "file") -> dict[str, str]:
+        base = deterministic_extractive_summarizer(rel_path, raw_text, node_type)
+        if node_type != "file" or len(raw_text) < 200:
+            return base
+        prompt = (
+            f"File: {rel_path}\nSintetizza in JSON con chiavi `light` (max 35 parole), "
+            f"`medium` (max 140 parole: scopo, simboli, dipendenze) e `high` (max 350 parole):\n\n"
+            f"{base['high'][:2800]}"
+        )
+        try:
+            req = urllib.request.Request(
+                f"{root}/api/chat",
+                data=json.dumps({
+                    "model": chosen,
+                    "stream": False,
+                    "think": False,
+                    "format": "json",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "options": {"temperature": 0.1, "num_predict": 450},
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                txt = (json.loads(resp.read().decode("utf-8")).get("message") or {}).get("content", "")
+            parsed = json.loads(txt)
+            if isinstance(parsed, dict) and parsed.get("light") and parsed.get("medium"):
+                return {
+                    "light": str(parsed["light"])[:400],
+                    "medium": str(parsed["medium"])[:1400],
+                    "high": str(parsed.get("high") or base["high"])[:3600],
+                }
+        except Exception:  # noqa: BLE001
+            pass
+        return base
+
+    return _summarize
 
 
 @dataclass

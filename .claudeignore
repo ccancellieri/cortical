@@ -1,0 +1,4 @@
+# >>> cortical-privacy-vault >>>
+.cortical_data/private_notes/
+.cortical_data/private_vault/
+# <<< cortical-privacy-vault <<<

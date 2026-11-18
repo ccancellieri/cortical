@@ -204,11 +204,11 @@ def _extract_skill_procedure_blocks(
     verified_cmds: list[str] = []
 
     for idx, st in enumerate(steps[:8], start=1):
-        title = str(st.get("title") or "Step").strip()
+        title = str(st.get("title") or st.get("tool") or "Step").strip()
         detail = re.sub(r"\s+", " ", str(st.get("detail") or "")).strip()
         meta = st.get("meta") if isinstance(st.get("meta"), dict) else {}
-        cmd = str(meta.get("command") or "").strip()
-        fpath = str(meta.get("path") or "").strip()
+        cmd = str(meta.get("command") or st.get("command") or "").strip()
+        fpath = str(meta.get("path") or st.get("path") or "").strip()
 
         if fpath and fpath not in touched_files:
             touched_files.append(fpath)
@@ -217,6 +217,10 @@ def _extract_skill_procedure_blocks(
 
         if detail and detail.lower() != title.lower():
             proc_lines.append(f"{idx}. **{title}** — {detail[:180]}")
+        elif fpath:
+            proc_lines.append(f"{idx}. **{title}** — `{fpath}`")
+        elif cmd:
+            proc_lines.append(f"{idx}. **{title}** — `{cmd}`")
         else:
             proc_lines.append(f"{idx}. {title}")
 
@@ -226,6 +230,90 @@ def _extract_skill_procedure_blocks(
         else "1. Consulta la Wiki MCP a livello `medium`.\n2. Applica il pattern verificato.\n3. Verifica con test single-shot."
     )
     return (proc_text, touched_files[:8], verified_cmds[:5])
+
+
+_KNOWLEDGE_DOMAIN_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("concept:merkle-context-compression", ("merkle", "wiki", "fts5", "subtree", "tier", "crawl", "readme", "contesto")),
+    ("concept:local-privacy-gdpr-sanitizer", ("privacy", "gdpr", "sanitizer", "anonym", "pseudonym", "metadata", "redact")),
+    ("concept:zero-token-roi-analytics", ("token", "analytics", "roi", "transcript", "cost", "cache", "report", "savings")),
+    ("concept:local-llm-runner-autoscaler", ("ollama", "runner", "llama", "mlx", "context_window", "num_ctx", "vram", "model")),
+    ("concept:adaptive-permission-gate", ("permission", "rbac", "acl", "gate", "security", "bash", "sandbox")),
+    ("concept:cortical-modular-architecture", ("cortical", "config", "unittest", "architecture", "architettura", "settings", "module")),
+)
+
+
+def _infer_knowledge_concepts(
+    text: str,
+    touched_files: list[str],
+    wiki_db: CorticalWikiDB,
+    ctx: AccessContext,
+) -> dict[str, Any]:
+    """Maps skill text & touched files to canonical Knowledge Concepts, Wiki Nodes & Memory Insights."""
+    hay = f"{text} {' '.join(touched_files)}".lower()
+    concepts: list[str] = []
+    for cid, kws in _KNOWLEDGE_DOMAIN_MAP:
+        if any(k in hay for k in kws):
+            concepts.append(cid)
+    if not concepts:
+        concepts.append("concept:cortical-modular-architecture")
+
+    terms = extract_terms(hay)
+    wiki_paths: list[str] = []
+    insight_refs: list[tuple[str, str]] = []
+    with wiki_db._connect() as conn:
+        for fp in touched_files:
+            norm_p = "/" + fp.lstrip("/")
+            row = conn.execute(
+                "SELECT path FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND (path = ? OR path LIKE ?)",
+                (ctx.tenant_id, ctx.workspace_id, norm_p, f"%{fp.lstrip('/')}"),
+            ).fetchone()
+            wp = str(row["path"]) if row else norm_p
+            if wp not in wiki_paths:
+                wiki_paths.append(wp)
+
+        if len(wiki_paths) < 5 and terms:
+            try:
+                rows = conn.execute(
+                    """SELECT path, summary_light FROM merkle_nodes
+                       WHERE tenant_id = ? AND workspace_id = ? AND node_type = 'file' LIMIT 120""",
+                    (ctx.tenant_id, ctx.workspace_id),
+                ).fetchall()
+                scored_nodes: list[tuple[int, str]] = []
+                for r in rows:
+                    p = str(r["path"])
+                    nt = extract_terms(f"{p} {r['summary_light']}")
+                    ov = len(terms & nt)
+                    if ov >= 2:
+                        scored_nodes.append((ov, p))
+                scored_nodes.sort(key=lambda x: x[0], reverse=True)
+                for _, p in scored_nodes[:5]:
+                    if p not in wiki_paths:
+                        wiki_paths.append(p)
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            irows = conn.execute(
+                """SELECT insight_id, insight_text FROM memory_insights
+                   WHERE tenant_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 80""",
+                (ctx.tenant_id, ctx.workspace_id),
+            ).fetchall()
+            scored_ins: list[tuple[int, str, str]] = []
+            for r in irows:
+                itxt = str(r["insight_text"] or "")
+                ov = len(terms & extract_terms(itxt))
+                if ov >= 2:
+                    scored_ins.append((ov, str(r["insight_id"]), itxt[:160]))
+            scored_ins.sort(key=lambda x: x[0], reverse=True)
+            insight_refs = [(iid, txt) for _, iid, txt in scored_ins[:4]]
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "concepts": concepts[:4],
+        "wiki_paths": wiki_paths[:6],
+        "insights": insight_refs,
+    }
 
 
 @dataclass
@@ -687,9 +775,14 @@ class CorticalSkillHub:
                         f"### [ALLEGATO {itype.upper()}] {ilabel} (`{att.get('item_ref', '')}`)\n{att.get('summary_preview', '')}"
                     )
 
+        # Resolve any explicit @wiki:/@concept:/@skill:/@insight:/@task:/@root: or cortical:// references
+        resolved_refs = self.resolve_wiki_references(prompt, default_tier=depth.value, ctx=access_ctx)
+
         # Fetch non-lossy 3+1 Wiki context at the chosen tier
         hits = self.wiki_db.search(access_ctx, query=prompt, depth=depth, limit=3)
         wiki_sections: list[str] = []
+        if resolved_refs.get("context_markdown"):
+            wiki_sections.append(resolved_refs["context_markdown"])
         if attached_blocks:
             wiki_sections.extend(attached_blocks)
         if hits:
@@ -743,6 +836,9 @@ class CorticalSkillHub:
         )
 
         proc_names = [s.name for s in selected_skills if s.kind != "memory_tier"]
+        learned_ids = [s.skill_id for s in selected_skills if s.skill_id.startswith("learned-")]
+        if learned_ids:
+            self.record_skill_usage(learned_ids, helpful=True, ctx=access_ctx)
         return PromptEnhancementResult(
             original_prompt=prompt,
             recommended_wiki_depth=depth.value,
@@ -809,8 +905,10 @@ class CorticalSkillHub:
         discussion_steps: Optional[list[dict[str, Any]]] = None,
         user_closing_notes: str = "",
         ctx: Optional[AccessContext] = None,
+        use_local_llm: bool = False,
+        llm_fn: Optional[Callable[[str], str]] = None,
     ) -> dict[str, str]:
-        """Synthesizes a task's discussion at 3+1 levels (L1 Light, L2 Medium, L3 High, +1 Max) in parallel."""
+        """Synthesizes a task's discussion at 3+1 levels (L1 Light, L2 Medium, L3 High, +1 Max), optionally refined by local LLM."""
         access_ctx = ctx or AccessContext()
         # Handle 2-arg call `synthesize_task_discussion_3plus1(ep_id, notes)`
         if goal and discussion_steps is None and not user_closing_notes:
@@ -826,14 +924,12 @@ class CorticalSkillHub:
             raw_lines.append(f"\n## Note Finali & Lezioni Apprese\n{user_closing_notes}")
         tier_max = "\n".join(raw_lines)
 
-        # L1 Light (~50 tokens): 1-2 sentence executive trace
         lessons = user_closing_notes.strip() or (
             resolved_steps[-1].get("detail", "")[:180] if resolved_steps else resolved_goal
         )
         lessons_clean = re.sub(r"\s+", " ", lessons).strip()[:200]
         tier_l1 = f"[L1 LIGHT] Task '{resolved_goal[:70]}' completato. Lezione chiave: {lessons_clean}"
 
-        # L2 Medium (~250 tokens): Goal + Key Steps + Outcome
         step_titles = [f"• {st.get('title', '')}" for st in resolved_steps[:6] if st.get("title")]
         tier_l2 = (
             f"[L2 MEDIUM] Task {episode_id} — Obiettivo: {resolved_goal}\n"
@@ -842,7 +938,6 @@ class CorticalSkillHub:
             + f"\nLezione consolidata: {lessons_clean}"
         )
 
-        # L3 High (~1000 tokens): Detailed technical synthesis
         detailed_steps = [
             f"### Step {i+1}: {st.get('title', '')}\n{str(st.get('detail', ''))[:300]}"
             for i, st in enumerate(resolved_steps[:8])
@@ -853,6 +948,30 @@ class CorticalSkillHub:
             + "\n\n".join(detailed_steps)
             + f"\n\n### Lezioni Apprese\n{lessons_clean}"
         )
+
+        if use_local_llm or llm_fn is not None:
+            try:
+                from .config import invoke_configured_runner
+
+                synth_prompt = (
+                    "Synthesize this engineering discussion into strict JSON with keys `light` (<=35 words), "
+                    "`medium` (<=140 words), and `high` (<=320 words), highlighting durable architectural lessons:\n\n"
+                    + tier_max[:3200]
+                )
+                raw_resp = (
+                    llm_fn(synth_prompt)
+                    if llm_fn is not None
+                    else invoke_configured_runner(synth_prompt, max_tokens=500, timeout=25.0)
+                )
+                m_json = re.search(r"\{.*\}", raw_resp or "", re.DOTALL)
+                parsed = json.loads(m_json.group(0) if m_json else raw_resp)
+                if isinstance(parsed, dict) and parsed.get("light") and parsed.get("medium"):
+                    tier_l1 = f"[L1 LIGHT] {str(parsed['light']).strip()[:240]}"
+                    tier_l2 = f"[L2 MEDIUM] {str(parsed['medium']).strip()[:1200]}"
+                    if parsed.get("high"):
+                        tier_l3 = f"[L3 HIGH] {str(parsed['high']).strip()[:3200]}"
+            except Exception:  # noqa: BLE001
+                pass
 
         with self.wiki_db._connect() as conn:
             conn.execute(
@@ -897,8 +1016,10 @@ class CorticalSkillHub:
         force_create: bool = False,
         ctx: Optional[AccessContext] = None,
         user_closing_notes: str = "",
+        use_local_llm: bool = False,
+        llm_fn: Optional[Callable[[str], str]] = None,
     ) -> SkillEvaluationResult:
-        """Evaluates whether a completed task warrants creating a reusable Skill (`SKILL.md`) for the future."""
+        """Evaluates whether an episode yields durable knowledge & compiles/evolves a concept-linked Skill."""
         access_ctx = ctx or AccessContext()
         if user_closing_notes and not lessons_learned:
             lessons_learned = user_closing_notes
@@ -913,8 +1034,19 @@ class CorticalSkillHub:
         combined = f"{goal} {lessons_learned}".strip()
         terms = extract_terms(combined)
 
-        # Heuristic + LLM check: create a skill if force_create is True OR if the task encodes a reusable
-        # engineering pattern/procedure (at least 5 meaningful terms and actionable keywords).
+        from .config import invoke_configured_runner, load_cortical_config
+
+        sk_cfg = (load_cortical_config().get("skills") or {})
+        if not force_create and not bool(sk_cfg.get("auto_compile", True)):
+            return SkillEvaluationResult(
+                episode_id=episode_id,
+                should_create_skill=False,
+                reason="Auto-compilazione skill disabilitata da configurazione (`skills.auto_compile = false`).",
+            )
+        min_terms = int(sk_cfg.get("min_terms", 4))
+        consol_overlap = int(sk_cfg.get("consolidation_overlap", 3))
+        consol_jacc = float(sk_cfg.get("consolidation_jaccard", 0.30))
+
         reusable_signals = (
             "pattern", "procedura", "regola", "standard", "workflow", "architettura",
             "sempre", "quando", "skill", "pipeline", "test", "verifica", "mcp", "wiki",
@@ -922,7 +1054,7 @@ class CorticalSkillHub:
         )
         norm = combined.lower()
         is_worthy = force_create or (
-            len(terms) >= 4 and any(sig in norm for sig in reusable_signals)
+            len(terms) >= min_terms and any(sig in norm for sig in reusable_signals)
         )
 
         if not is_worthy:
@@ -933,42 +1065,121 @@ class CorticalSkillHub:
             )
 
         slug_words = [w for w in re.findall(r"[a-z0-9]+", normalize_text(goal)) if w not in STOP_WORDS and len(w) > 2][:4]
-        slug_base = "-".join(slug_words) if slug_words else f"task-{episode_id.lower()}"
+        steps_summary, touched_files, verified_cmds = _extract_skill_procedure_blocks(discussion_steps)
+        has_substance = bool(
+            touched_files
+            or verified_cmds
+            or len(discussion_steps or []) >= 2
+            or len(lessons_learned.strip()) >= 80
+        )
+        if not force_create and (not has_substance or (len(slug_words) < 2 and not touched_files and not verified_cmds)):
+            return SkillEvaluationResult(
+                episode_id=episode_id,
+                should_create_skill=False,
+                reason="Contenuto procedurale insufficiente per compilare una Skill permanente (nessun file/comando verificato o lezione sintetica).",
+            )
+
+        k_links = _infer_knowledge_concepts(combined, touched_files, self.wiki_db, access_ctx)
+        slug_base = "-".join(slug_words) if slug_words else f"knowledge-{episode_id.lower()}"
         skill_id = f"learned-{slug_base}"
+
+        matched_existing: Optional[SkillDescriptor] = None
+        if not force_create and terms:
+            best_score = 0.0
+            for desc in self.list_skills():
+                if not desc.skill_id.startswith("learned-"):
+                    continue
+                s_body = Path(desc.path).read_text(encoding="utf-8", errors="replace")[:500] if desc.path else ""
+                s_terms = extract_terms(f"{desc.name} {desc.description} {s_body}")
+                overlap = len(terms & s_terms)
+                jacc = overlap / max(1, len(terms | s_terms))
+                if overlap >= consol_overlap or jacc >= consol_jacc:
+                    score = overlap + jacc
+                    if score > best_score:
+                        best_score = score
+                        matched_existing = desc
+
+        if matched_existing is not None:
+            skill_id = matched_existing.skill_id
+            skill_path = Path(matched_existing.path)
+            existing_txt = skill_path.read_text(encoding="utf-8", errors="replace")
+            if f"`{episode_id}`" not in existing_txt:
+                extra_files = [f"- `{p}`" for p in k_links["wiki_paths"] if f"`{p}`" not in existing_txt]
+                extra_cmds = [f"- Esegui: `{c}`" for c in verified_cmds if f"`{c}`" not in existing_txt]
+                addition = (
+                    f"\n\n### Esperienza & Conoscenza Consolidata (`{episode_id}`)\n"
+                    f"- **Concetti:** {', '.join(f'`{c}`' for c in k_links['concepts'])}\n"
+                    f"- **Regola Distillata:** {lessons_learned or goal}\n"
+                    + (f"- **Nodi Wiki Collegati:**\n" + "\n".join(extra_files) + "\n" if extra_files else "")
+                    + (f"- **Comandi Verificati:**\n" + "\n".join(extra_cmds) + "\n" if extra_cmds else "")
+                )
+                skill_path.write_text(existing_txt.rstrip() + addition, encoding="utf-8")
+                self.record_skill_usage([skill_id], helpful=True, ctx=access_ctx)
+            self._link_skill_knowledge_edges(skill_id, episode_id, k_links, access_ctx)
+            return SkillEvaluationResult(
+                episode_id=episode_id,
+                should_create_skill=True,
+                reason=f"Consolidata ed evoluta la Skill esistente '{skill_id}' con la conoscenza di {episode_id}.",
+                skill_id=skill_id,
+                skill_path=str(skill_path),
+                skill_markdown=skill_path.read_text(encoding="utf-8", errors="replace"),
+            )
+
+        refined_rule = lessons_learned or goal
+        if use_local_llm or llm_fn is not None:
+            try:
+                p_llm = (
+                    f"Distilla una regola tecnica riutilizzabile (senza citare ID di task) per una Skill Cortical.\n"
+                    f"Concetti: {', '.join(k_links['concepts'])}\n"
+                    f"Nodi Wiki: {', '.join(k_links['wiki_paths'])}\n"
+                    f"Nota: {refined_rule}\n"
+                    f"Restituisci 2-3 frasi concise ed azionabili."
+                )
+                ans = llm_fn(p_llm) if llm_fn is not None else invoke_configured_runner(p_llm, max_tokens=240, timeout=20.0)
+                if ans and len(ans.strip()) >= 20:
+                    refined_rule = ans.strip()[:600]
+            except Exception:  # noqa: BLE001
+                pass
+
         skill_dir = self.skills_root / skill_id
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_dir / "SKILL.md"
-
-        steps_summary, touched_files, verified_cmds = _extract_skill_procedure_blocks(discussion_steps)
-        files_block = (
-            "\n## File & Moduli Coinvolti\n"
-            + "\n".join(f"- `{p}`" for p in touched_files)
-            + "\n"
-            if touched_files
-            else ""
+        concepts_block = "\n".join(f"- `{c}`" for c in k_links["concepts"])
+        nodes_block = (
+            "\n".join(f"- `{wp}`" for wp in k_links["wiki_paths"])
+            if k_links["wiki_paths"]
+            else "- (`/src/cortical`)"
+        )
+        insights_block = (
+            "\n".join(f"- `{iid}`: {itxt}" for iid, itxt in k_links["insights"])
+            if k_links["insights"]
+            else f"- {refined_rule[:180]}"
         )
         verify_block = (
             "\n".join(f"- Esegui: `{c}`" for c in verified_cmds)
             if verified_cmds
             else "- Controlla la coerenza con la Wiki 3+1 (`wiki_navigate` / `wiki_search`) ed esegui i test in un unico colpo."
         )
+        cap_title = ", ".join(c.split(":")[-1].replace("-", " ").title() for c in k_links["concepts"][:2])
 
         skill_md = (
             f"---\n"
             f"name: {skill_id}\n"
-            f"description: Skill appresa dal task {episode_id} ({goal[:80]}). Usa quando affronti compiti simili su {', '.join(slug_words)}.\n"
+            f"description: Capability skill su {cap_title} collegata a {', '.join(k_links['wiki_paths'][:3] or slug_words)}.\n"
             f"---\n\n"
-            f"# Skill Appresa: {goal[:70]}\n\n"
-            f"## Contesto & Origine\n"
-            f"- **Task Sorgente:** `{episode_id}`\n"
-            f"- **Obiettivo Originario:** {goal}\n\n"
-            f"## Lezione Chiave Consolidata\n"
-            f"{lessons_learned or goal}\n\n"
+            f"# Capability Skill: {cap_title or goal[:70]}\n\n"
+            f"## Conoscenze, Concetti & Nodi Wiki Collegati\n"
+            f"{concepts_block}\n"
+            f"{nodes_block}\n\n"
+            f"## Regole & Insight Distillati\n"
+            f"{refined_rule}\n"
+            f"{insights_block}\n\n"
             f"## Procedura Riutilizzabile\n"
-            f"{steps_summary}\n"
-            f"{files_block}\n"
+            f"{steps_summary}\n\n"
             f"## Verifica\n"
-            f"{verify_block}\n"
+            f"{verify_block}\n\n"
+            f"## Provenienza & Evoluzione\n"
+            f"- Origine iniziale: `{episode_id}`\n"
         )
         skill_path.write_text(skill_md, encoding="utf-8")
 
@@ -977,24 +1188,931 @@ class CorticalSkillHub:
                 """INSERT OR REPLACE INTO learned_skills_registry(
                        skill_id, tenant_id, workspace_id, name, description,
                        skill_path, source_episode_id, use_count, helpful_count, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)""",
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?)""",
                 (
                     skill_id,
                     access_ctx.tenant_id,
                     access_ctx.workspace_id,
                     skill_id,
-                    f"Skill appresa dal task {episode_id}: {goal[:80]}",
+                    f"Capability: {cap_title} · nodi: {', '.join(k_links['wiki_paths'][:2])}",
                     str(skill_path),
                     episode_id,
                     time.time(),
                 ),
             )
+        self._link_skill_knowledge_edges(skill_id, episode_id, k_links, access_ctx)
 
         return SkillEvaluationResult(
             episode_id=episode_id,
             should_create_skill=True,
-            reason=f"Creata nuova Skill riutilizzabile '{skill_id}' dalle lezioni apprese nel task {episode_id}.",
+            reason=f"Creata nuova Skill '{skill_id}' collegata a {', '.join(k_links['concepts'])}.",
             skill_id=skill_id,
             skill_path=str(skill_path),
             skill_markdown=skill_md,
         )
+
+    def _link_skill_knowledge_edges(
+        self,
+        skill_id: str,
+        episode_id: str,
+        k_links: dict[str, Any],
+        ctx: AccessContext,
+    ) -> int:
+        now = time.time()
+        added = 0
+        with self.wiki_db._connect() as conn:
+            for cid in k_links.get("concepts") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO macro_edges(
+                           tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                       ) VALUES (?, ?, 'skill', ?, 'links_knowledge', 'concept', ?, 1.0, ?)""",
+                    (ctx.tenant_id, ctx.workspace_id, skill_id, cid, now),
+                )
+                added += 1
+            for wp in k_links.get("wiki_paths") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO macro_edges(
+                           tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                       ) VALUES (?, ?, 'skill', ?, 'links_knowledge', 'subtree', ?, 0.9, ?)""",
+                    (ctx.tenant_id, ctx.workspace_id, skill_id, wp, now),
+                )
+                added += 1
+            for iid, _ in k_links.get("insights") or []:
+                conn.execute(
+                    """INSERT OR IGNORE INTO macro_edges(
+                           tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                       ) VALUES (?, ?, 'skill', ?, 'links_knowledge', 'insight', ?, 0.85, ?)""",
+                    (ctx.tenant_id, ctx.workspace_id, skill_id, iid, now),
+                )
+                added += 1
+            if episode_id and episode_id != "consolidated":
+                conn.execute(
+                    """INSERT OR IGNORE INTO macro_edges(
+                           tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                       ) VALUES (?, ?, 'episode', ?, 'derived_from', 'skill', ?, 0.7, ?)""",
+                    (ctx.tenant_id, ctx.workspace_id, episode_id, skill_id, now),
+                )
+                added += 1
+        return added
+
+    def record_skill_usage(
+        self,
+        skill_ids: list[str],
+        helpful: bool = True,
+        ctx: Optional[AccessContext] = None,
+    ) -> int:
+        """Increments `use_count` (and optionally `helpful_count`) for learned skills."""
+        if not skill_ids:
+            return 0
+        access_ctx = ctx or AccessContext()
+        updated = 0
+        with self.wiki_db._connect() as conn:
+            for sid in skill_ids:
+                cur = conn.execute(
+                    """UPDATE learned_skills_registry
+                       SET use_count = use_count + 1,
+                           helpful_count = helpful_count + ?
+                       WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?""",
+                    (1 if helpful else 0, access_ctx.tenant_id, access_ctx.workspace_id, sid),
+                )
+                updated += int(cur.rowcount or 0)
+        return updated
+
+    def prune_low_value_skills(
+        self,
+        dry_run: bool = True,
+        ctx: Optional[AccessContext] = None,
+    ) -> dict[str, Any]:
+        """Finds (and optionally removes) `learned-*` stub skills with no real procedure/files/commands."""
+        access_ctx = ctx or AccessContext()
+        candidates: list[str] = []
+        if self.skills_root.exists():
+            for d in sorted(self.skills_root.glob("learned-*")):
+                sfile = d / "SKILL.md"
+                if not sfile.is_file():
+                    continue
+                txt = sfile.read_text(encoding="utf-8", errors="replace")
+                slug_parts = d.name.removeprefix("learned-").split("-")
+                has_files_or_cmds = ("## File & Moduli Coinvolti" in txt) or ("## Conoscenze, Concetti" in txt) or ("- Esegui: `" in txt)
+                is_short_stub = len(slug_parts) < 2 and not has_files_or_cmds
+                is_empty_proc = "Analisi ed esecuzione controllata sul workspace locale." in txt and not has_files_or_cmds
+                if is_short_stub or is_empty_proc:
+                    candidates.append(d.name)
+                    if not dry_run:
+                        sfile.unlink(missing_ok=True)
+                        try:
+                            d.rmdir()
+                        except OSError:
+                            pass
+                        with self.wiki_db._connect() as conn:
+                            conn.execute(
+                                "DELETE FROM learned_skills_registry WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?",
+                                (access_ctx.tenant_id, access_ctx.workspace_id, d.name),
+                            )
+        return {"dry_run": dry_run, "candidates": candidates, "count": len(candidates)}
+
+    def consolidate_and_link_skills(
+        self,
+        ctx: Optional[AccessContext] = None,
+        use_local_llm: bool = False,
+        llm_fn: Optional[Callable[[str], str]] = None,
+    ) -> dict[str, int]:
+        """Prunes stubs, merges overlapping `learned-*` skills, generalizes them via local LLM, and links knowledge."""
+        from .config import invoke_configured_runner
+
+        access_ctx = ctx or AccessContext()
+        pruned = self.prune_low_value_skills(dry_run=False, ctx=access_ctx)["count"]
+        merged = 0
+        edges_added = 0
+        insights_added = 0
+        generalized = 0
+
+        learned = [s for s in self.list_skills() if s.skill_id.startswith("learned-")]
+        removed_ids: set[str] = set()
+        for i, base in enumerate(learned):
+            if base.skill_id in removed_ids:
+                continue
+            b_path = Path(base.path)
+            if not b_path.is_file():
+                continue
+            b_txt = b_path.read_text(encoding="utf-8", errors="replace")
+            b_terms = extract_terms(f"{base.name} {base.description} {b_txt[:400]}")
+            for other in learned[i + 1 :]:
+                if other.skill_id in removed_ids:
+                    continue
+                o_path = Path(other.path)
+                if not o_path.is_file():
+                    continue
+                o_txt = o_path.read_text(encoding="utf-8", errors="replace")
+                o_terms = extract_terms(f"{other.name} {other.description} {o_txt[:400]}")
+                overlap = len(b_terms & o_terms)
+                jacc = overlap / max(1, len(b_terms | o_terms))
+                if overlap >= 4 or jacc >= 0.35:
+                    if other.skill_id not in b_txt:
+                        b_txt += f"\n\n### Conoscenza Unificata da `{other.skill_id}`\n{o_txt[:900]}"
+                        b_path.write_text(b_txt, encoding="utf-8")
+                    o_path.unlink(missing_ok=True)
+                    try:
+                        o_path.parent.rmdir()
+                    except OSError:
+                        pass
+                    with self.wiki_db._connect() as conn:
+                        conn.execute(
+                            "DELETE FROM learned_skills_registry WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?",
+                            (access_ctx.tenant_id, access_ctx.workspace_id, other.skill_id),
+                        )
+                    removed_ids.add(other.skill_id)
+                    merged += 1
+
+            k_links = _infer_knowledge_concepts(f"{base.name} {b_txt}", [], self.wiki_db, access_ctx)
+            if "## Conoscenze, Concetti" not in b_txt:
+                concepts_block = "\n".join(f"- `{c}`" for c in k_links["concepts"])
+                nodes_block = "\n".join(f"- `{wp}`" for wp in k_links["wiki_paths"]) or "- (`/src/cortical`)"
+                cap_title = ", ".join(c.split(":")[-1].replace("-", " ").title() for c in k_links["concepts"][:2])
+                extra_summary = f"Regole riutilizzabili su {cap_title} collegate ai moduli {', '.join(k_links['wiki_paths'][:3])}."
+                if use_local_llm or llm_fn is not None:
+                    try:
+                        pr_gen = (
+                            "Riscrivi questa skill di Cortical in italiano in formato professionale senza far dipendere il titolo "
+                            "da un singolo ID task. Mantieni le informazioni reali e generalizza la conoscenza riusabile (max 120 parole).\n\n"
+                            f"Concetti: {', '.join(k_links['concepts'])}\n"
+                            f"Moduli Wiki: {', '.join(k_links['wiki_paths'])}\n"
+                            f"Testo attuale:\n{b_txt[:1500]}"
+                        )
+                        ans = (
+                            llm_fn(pr_gen)
+                            if llm_fn is not None
+                            else invoke_configured_runner(pr_gen, max_tokens=320, timeout=25.0)
+                        )
+                        if ans and len(ans.strip()) >= 30:
+                            extra_summary = ans.strip()[:900]
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                new_md = (
+                    f"---\nname: {base.skill_id}\n"
+                    f"description: Capability skill su {cap_title} collegata a {', '.join(k_links['wiki_paths'][:3] or ['cortical'])}.\n"
+                    f"---\n\n"
+                    f"# Capability Skill: {cap_title}\n\n"
+                    f"## Conoscenze, Concetti & Nodi Wiki Collegati\n"
+                    f"{concepts_block}\n{nodes_block}\n\n"
+                    f"## Regole & Sintesi Generale\n{extra_summary}\n\n"
+                    f"## Provenienza & Dettagli Precedenti\n{b_txt}\n"
+                )
+                b_path.write_text(new_md, encoding="utf-8")
+                with self.wiki_db._connect() as conn:
+                    conn.execute(
+                        """UPDATE learned_skills_registry
+                           SET description = ?, use_count = MAX(1, use_count)
+                           WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?""",
+                        (f"Capability: {cap_title}", access_ctx.tenant_id, access_ctx.workspace_id, base.skill_id),
+                    )
+                generalized += 1
+
+            with self.wiki_db._connect() as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO learned_skills_registry(
+                           skill_id, tenant_id, workspace_id, name, description,
+                           skill_path, source_episode_id, use_count, helpful_count, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?)""",
+                    (base.skill_id, access_ctx.tenant_id, access_ctx.workspace_id, base.name, base.description, str(b_path), "knowledge_consolidated", time.time()),
+                )
+                conn.execute(
+                    "UPDATE learned_skills_registry SET use_count = MAX(1, use_count) WHERE tenant_id = ? AND workspace_id = ? AND skill_id = ?",
+                    (access_ctx.tenant_id, access_ctx.workspace_id, base.skill_id),
+                )
+            edges_added += self._link_skill_knowledge_edges(base.skill_id, "", k_links, access_ctx)
+
+        now = time.time()
+        with self.wiki_db._connect() as conn:
+            for row in conn.execute(
+                "SELECT skill_id, source_episode_id FROM learned_skills_registry WHERE tenant_id = ? AND workspace_id = ?",
+                (access_ctx.tenant_id, access_ctx.workspace_id),
+            ).fetchall():
+                sid, eid = str(row["skill_id"]), str(row["source_episode_id"] or "")
+                if eid and eid not in {"consolidated", "knowledge_consolidated"}:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO macro_edges(
+                               tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                           ) VALUES (?, ?, 'episode', ?, 'derived_from', 'skill', ?, 0.7, ?)""",
+                        (access_ctx.tenant_id, access_ctx.workspace_id, eid, sid, now),
+                    )
+                    edges_added += 1
+
+            for row in conn.execute(
+                """SELECT e.episode_id, e.goal, COALESCE(s.tier_l2_medium, e.learned_summary, '') AS synth
+                   FROM task_episodes e
+                   LEFT JOIN task_discussion_synthesis s
+                     ON e.tenant_id = s.tenant_id AND e.workspace_id = s.workspace_id AND e.episode_id = s.episode_id
+                   WHERE e.tenant_id = ? AND e.workspace_id = ?""",
+                (access_ctx.tenant_id, access_ctx.workspace_id),
+            ).fetchall():
+                txt = re.sub(r"\s+", " ", str(row["synth"] or row["goal"] or "")).strip()[:240]
+                if len(txt) < 30:
+                    continue
+                iid = "ins-" + hashlib.sha256(txt.encode("utf-8")).hexdigest()[:10]
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO memory_insights(
+                           insight_id, tenant_id, workspace_id, category, insight_text, related_path, created_at
+                       ) VALUES (?, ?, ?, 'task_distillation', ?, ?, ?)""",
+                    (iid, access_ctx.tenant_id, access_ctx.workspace_id, txt, f"/{row['episode_id']}", now),
+                )
+                insights_added += int(cur.rowcount or 0)
+
+        return {
+            "pruned_stubs": pruned,
+            "merged_skills": merged,
+            "generalized_skills": generalized,
+            "edges_linked": edges_added,
+            "insights_distilled": insights_added,
+        }
+
+    def distill_and_compact_knowledge(
+        self,
+        target_kind: str,
+        target_id: str,
+        keep_tier: str = "l2",
+        use_local_llm: bool = True,
+        llm_fn: Optional[Callable[[str], str]] = None,
+        ctx: Optional[AccessContext] = None,
+    ) -> dict[str, Any]:
+        """Distills knowledge from a subtree/context/episode/topic into a durable insight and discards L4 Max raw blobs."""
+        from .config import invoke_configured_runner
+
+        access_ctx = ctx or AccessContext()
+        kind = (target_kind or "subtree").lower().strip()
+        tier = (keep_tier or "l2").lower().strip()
+        snippets: list[str] = []
+        bytes_freed = 0
+        compacted_nodes = 0
+        compacted_episodes = 0
+
+        with self.wiki_db._connect() as conn:
+            if kind in {"subtree", "node", "folder", "context_root"}:
+                if kind == "context_root" and target_id == "root:private_notes":
+                    where_sql = "tenant_id = ? AND workspace_id = ? AND (path = '/private_notes' OR path LIKE '/private_notes/%')"
+                    params: tuple[Any, ...] = (access_ctx.tenant_id, access_ctx.workspace_id)
+                elif kind == "context_root" or target_id == "/":
+                    where_sql = "tenant_id = ? AND workspace_id = ? AND path NOT LIKE '/private_notes%'"
+                    params = (access_ctx.tenant_id, access_ctx.workspace_id)
+                else:
+                    pref = "/" + target_id.strip("/")
+                    where_sql = "tenant_id = ? AND workspace_id = ? AND (path = ? OR path LIKE ?)"
+                    params = (access_ctx.tenant_id, access_ctx.workspace_id, pref, pref + "/%")
+
+                rows = conn.execute(
+                    f"SELECT path, summary_light, summary_medium, summary_high, raw_content FROM merkle_nodes WHERE {where_sql}",
+                    params,
+                ).fetchall()
+                for r in rows:
+                    raw_s = str(r["raw_content"] or "")
+                    hi_s = str(r["summary_high"] or "")
+                    snippets.append(f"{r['path']}: {str(r['summary_medium'] or r['summary_light'] or '')[:220]}")
+                    bytes_freed += len(raw_s.encode("utf-8", errors="ignore"))
+                    if raw_s:
+                        compacted_nodes += 1
+                    if tier == "l1":
+                        bytes_freed += len(hi_s.encode("utf-8", errors="ignore"))
+                        conn.execute(
+                            "UPDATE merkle_nodes SET raw_content = '', summary_high = '' WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                            (access_ctx.tenant_id, access_ctx.workspace_id, r["path"]),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE merkle_nodes SET raw_content = '' WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                            (access_ctx.tenant_id, access_ctx.workspace_id, r["path"]),
+                        )
+                    conn.execute(
+                        "UPDATE merkle_fts SET raw_content = '' WHERE tenant_id = ? AND workspace_id = ? AND path = ?",
+                        (access_ctx.tenant_id, access_ctx.workspace_id, r["path"]),
+                    )
+
+            if kind in {"episode", "topic", "context_root"}:
+                ep_rows = conn.execute(
+                    """SELECT e.episode_id, e.goal, COALESCE(s.tier_l2_medium, e.learned_summary, '') AS synth,
+                              COALESCE(s.tier_l3_high, '') AS hi, COALESCE(s.tier_max_raw, '') AS raw_t
+                       FROM task_episodes e
+                       LEFT JOIN task_discussion_synthesis s
+                         ON e.tenant_id = s.tenant_id AND e.workspace_id = s.workspace_id AND e.episode_id = s.episode_id
+                       WHERE e.tenant_id = ? AND e.workspace_id = ?""",
+                    (access_ctx.tenant_id, access_ctx.workspace_id),
+                ).fetchall()
+                for r in ep_rows:
+                    eid = str(r["episode_id"])
+                    if kind == "episode" and eid != target_id:
+                        continue
+                    raw_t = str(r["raw_t"] or "")
+                    hi_t = str(r["hi"] or "")
+                    snippets.append(f"Task {eid}: {str(r['synth'] or r['goal'] or '')[:220]}")
+                    bytes_freed += len(raw_t.encode("utf-8", errors="ignore"))
+                    if raw_t:
+                        compacted_episodes += 1
+                    if tier == "l1":
+                        bytes_freed += len(hi_t.encode("utf-8", errors="ignore"))
+                        conn.execute(
+                            "UPDATE task_discussion_synthesis SET tier_max_raw = '', tier_l3_high = '' WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                            (access_ctx.tenant_id, access_ctx.workspace_id, eid),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE task_discussion_synthesis SET tier_max_raw = '' WHERE tenant_id = ? AND workspace_id = ? AND episode_id = ?",
+                            (access_ctx.tenant_id, access_ctx.workspace_id, eid),
+                        )
+
+            digest_src = "\n".join(snippets[:16]) or f"Distilled knowledge for {kind}:{target_id}"
+            insight_text = f"Conoscenza distillata ({kind} {target_id}, livello {tier.upper()}): " + re.sub(r"\s+", " ", digest_src)[:260]
+            llm_refined = False
+            if use_local_llm or llm_fn is not None:
+                try:
+                    p_dist = (
+                        f"Distilla in una singola regola tecnica ad alta densità (max 60 parole, zero ID di task effimeri) "
+                        f"l'essenza architetturale di questi elementi (`{kind}:{target_id}`):\n\n{digest_src[:2500]}"
+                    )
+                    ans = (
+                        llm_fn(p_dist)
+                        if llm_fn is not None
+                        else invoke_configured_runner(p_dist, max_tokens=180, timeout=20.0)
+                    )
+                    if ans and len(ans.strip()) >= 20:
+                        insight_text = ans.strip()[:420]
+                        llm_refined = True
+                except Exception:  # noqa: BLE001
+                    pass
+
+            now = time.time()
+            iid = "ins-" + hashlib.sha256(f"{kind}:{target_id}:{insight_text}".encode("utf-8")).hexdigest()[:10]
+            conn.execute(
+                """INSERT OR REPLACE INTO memory_insights(
+                       insight_id, tenant_id, workspace_id, category, insight_text, related_path, created_at
+                   ) VALUES (?, ?, ?, 'knowledge_distillation', ?, ?, ?)""",
+                (iid, access_ctx.tenant_id, access_ctx.workspace_id, insight_text, target_id, now),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO macro_edges(
+                       tenant_id, workspace_id, source_type, source_id, relation, target_type, target_id, weight, created_at
+                   ) VALUES (?, ?, 'insight', ?, 'distilled_from', ?, ?, 1.0, ?)""",
+                (access_ctx.tenant_id, access_ctx.workspace_id, iid, "episode" if kind == "episode" else "subtree", target_id, now),
+            )
+
+        return {
+            "status": "compacted",
+            "target_kind": kind,
+            "target_id": target_id,
+            "keep_tier": tier,
+            "compacted_nodes": compacted_nodes,
+            "compacted_episodes": compacted_episodes,
+            "bytes_freed": bytes_freed,
+            "insight_id": iid,
+            "insight_text": insight_text,
+            "llm_refined": llm_refined,
+        }
+
+    def _gate_privacy_content(
+        self,
+        raw_text: str,
+        ref_label: str,
+        eff_privacy: str,
+        default_tier: str,
+    ) -> tuple[str, bool]:
+        """Applies Cortical's Egress Decision Engine based on privacy profile (`max_security`, `low`, `medium`, etc.)."""
+        if not eff_privacy or eff_privacy in {"workspace_code", "max_context"}:
+            return (raw_text, False)
+        from .config import load_cortical_config
+        from .privacy_sanitizer import pseudonymize_text
+
+        cfg = load_cortical_config()
+        san_cfg = cfg.get("privacy_sanitizer") or {}
+        custom_terms = list(san_cfg.get("custom_terms") or []) or None
+        if eff_privacy == "max_security":
+            red_l1, _ = pseudonymize_text(raw_text[:280], redact=True, custom_terms=custom_terms)
+            gated = (
+                f"[🔒 MAX_SECURITY VAULT: {ref_label}] Contenuto riservato elaborabile solo da LLM locale (`cortical_local_loop`). "
+                f"Sintesi L1 anonimizzata: {red_l1}"
+            )
+            return (gated, True)
+        if eff_privacy == "low":
+            red_low, _ = pseudonymize_text(raw_text[:900], redact=True, custom_terms=custom_terms)
+            return (f"[🛡️ PRIVACY: LOW EGRESS · {ref_label}]\n{red_low}", False)
+        pseudo, _ = pseudonymize_text(raw_text, redact=False, custom_terms=custom_terms)
+        return (pseudo, False)
+
+    def resolve_wiki_references(
+        self,
+        prompt: str,
+        default_tier: str = "l2",
+        ctx: Optional[AccessContext] = None,
+    ) -> dict[str, Any]:
+        """Resolves universal `@kind:ref`, `@private:alias[:profile]`, `/private alias`, `cortical://`, and `/directive` mentions."""
+        access_ctx = ctx or AccessContext()
+        text = prompt or ""
+        tier_map = {"light": "l1", "l1": "l1", "medium": "l2", "l2": "l2", "high": "l3", "l3": "l3", "max": "max", "l4": "max"}
+        m_tier = re.search(r"/tier:(l1|l2|l3|l4|light|medium|high|max)\b", text, re.IGNORECASE)
+        eff_tier = tier_map.get((m_tier.group(1) if m_tier else default_tier).lower(), "l2")
+        m_priv = re.search(r"/privacy:([a-z0-9_]+)\b", text, re.IGNORECASE)
+        priv_val = m_priv.group(1).lower() if m_priv else None
+        directives = {
+            "force_local": bool(re.search(r"/(?:local|offline)\b", text, re.IGNORECASE)) or priv_val == "max_security",
+            "distill": bool(re.search(r"/distill\b", text, re.IGNORECASE)),
+            "privacy_profile": priv_val,
+            "tier": eff_tier,
+        }
+
+        raw_refs: list[tuple[str, str]] = []
+        for kind, ref in re.findall(r"@(wiki|node|file|folder|private|vault|ctx|concept|topic|skill|insight|task|root):([A-Za-z0-9_./:-]+)", text, re.IGNORECASE):
+            pair = (kind.lower(), ref.strip())
+            if pair not in raw_refs:
+                raw_refs.append(pair)
+        for ref in re.findall(r"(?:^|\s)/private\s+([A-Za-z0-9_./:-]+)", text, re.IGNORECASE):
+            pair = ("private", ref.strip())
+            if pair not in raw_refs:
+                raw_refs.append(pair)
+        for kind, ref in re.findall(r"cortical://(node|private|concept|skill|insight|task|root)/([A-Za-z0-9_./:-]+)", text, re.IGNORECASE):
+            pair = (kind.lower(), ref.strip())
+            if pair not in raw_refs:
+                raw_refs.append(pair)
+
+        col_map = {"l1": "summary_light", "l2": "summary_medium", "l3": "summary_high", "max": "raw_content"}
+        target_col = col_map.get(eff_tier, "summary_medium")
+        resolved: list[dict[str, Any]] = []
+        all_skills = self.list_skills()
+
+        with self.wiki_db._connect() as conn:
+            att_privacy: dict[str, str] = {}
+            try:
+                for arow in conn.execute(
+                    "SELECT item_ref, label, depth_tier, metadata_json FROM scoped_context_attachments WHERE tenant_id = ? AND workspace_id = ?",
+                    (access_ctx.tenant_id, access_ctx.workspace_id),
+                ).fetchall():
+                    m_json = {}
+                    try:
+                        m_json = json.loads(str(arow["metadata_json"] or "{}"))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    pr = str(m_json.get("privacy_profile") or arow["depth_tier"] or "").lower()
+                    if pr in {"max_security", "low", "medium", "max_context"}:
+                        att_privacy[str(arow["item_ref"] or "")] = pr
+                        if arow["label"]:
+                            att_privacy[str(arow["label"])] = pr
+            except Exception:  # noqa: BLE001
+                pass
+
+            for kind, raw_ref in raw_refs[:16]:
+                inline_priv = None
+                ref = raw_ref
+                for p_cand in ("max_security", "max_context", "medium", "low"):
+                    if raw_ref.lower().endswith(f":{p_cand}"):
+                        inline_priv = p_cand
+                        ref = raw_ref[: -(len(p_cand) + 1)]
+                        break
+
+                if kind in {"wiki", "node", "file", "folder", "private", "vault", "ctx"}:
+                    norm_p = "/" + ref.lstrip("/")
+                    fuzzy_rows = conn.execute(
+                        f"SELECT path, node_type, {target_col} AS body, summary_medium, summary_light FROM merkle_nodes "
+                        "WHERE tenant_id = ? AND workspace_id = ? AND (path = ? OR LOWER(path) LIKE ? OR LOWER(path) LIKE ?) "
+                        "ORDER BY (CASE WHEN path = ? THEN 0 WHEN LOWER(path) LIKE ? THEN 1 ELSE 2 END), LENGTH(path) ASC LIMIT 4",
+                        (access_ctx.tenant_id, access_ctx.workspace_id, norm_p, f"%/{ref.lower().lstrip('/')}", f"%{ref.lower().lstrip('/')}%", norm_p, f"%/{ref.lower().lstrip('/')}"),
+                    ).fetchall()
+                    if fuzzy_rows:
+                        top = fuzzy_rows[0]
+                        tpath = str(top["path"])
+                        body = str(top["body"] or top["summary_medium"] or top["summary_light"] or "")[:2400]
+                        eff_p = inline_priv or priv_val or att_privacy.get(tpath) or att_privacy.get(Path(tpath).name) or ("low" if kind in {"private", "vault", "ctx"} else "")
+                        gated_body, forced_loc = self._gate_privacy_content(body, tpath, eff_p, eff_tier)
+                        if forced_loc:
+                            directives["force_local"] = True
+                            directives["privacy_profile"] = directives["privacy_profile"] or "max_security"
+                        disamb = [str(r["path"]) for r in fuzzy_rows[1:]]
+                        if disamb:
+                            gated_body += f"\n(Altri match simili: {', '.join(disamb)})"
+                        resolved.append({
+                            "kind": "private" if eff_p in {"max_security", "low"} else "node",
+                            "ref": tpath,
+                            "alias": Path(tpath).name,
+                            "privacy_profile": eff_p or "workspace_code",
+                            "tier": eff_tier,
+                            "title": f"{tpath} ({top['node_type']})",
+                            "content": gated_body,
+                            "tokens": max(1, len(gated_body) // 4),
+                        })
+                    else:
+                        hits = self.wiki_db.search(access_ctx, query=ref, depth=DepthTier.MEDIUM, limit=2)
+                        for h in hits:
+                            hpath = str(h["path"])
+                            body = str(h.get("content") or "")[:1600]
+                            eff_p = inline_priv or priv_val or att_privacy.get(hpath) or ("low" if kind in {"private", "vault", "ctx"} else "")
+                            gated_body, forced_loc = self._gate_privacy_content(body, hpath, eff_p, eff_tier)
+                            if forced_loc:
+                                directives["force_local"] = True
+                            resolved.append({
+                                "kind": "private" if eff_p in {"max_security", "low"} else "node",
+                                "ref": hpath,
+                                "alias": Path(hpath).name,
+                                "privacy_profile": eff_p or "workspace_code",
+                                "tier": eff_tier,
+                                "title": hpath,
+                                "content": gated_body,
+                                "tokens": max(1, len(gated_body) // 4),
+                            })
+                elif kind in {"concept", "topic"}:
+                    slug = ref.split(":")[-1].lower()
+                    kws = []
+                    matched_cid = f"concept:{slug}"
+                    for cid, words in _KNOWLEDGE_DOMAIN_MAP:
+                        if slug in cid or any(slug in w for w in words):
+                            matched_cid = cid
+                            kws = list(words)
+                            break
+                    if not kws:
+                        kws = [t for t in re.split(r"[-_:]+", slug) if len(t) > 2]
+                    lines = [f"Concetto Canonico: `{matched_cid}`"]
+                    m_rows = conn.execute(
+                        "SELECT path, summary_light FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? LIMIT 150",
+                        (access_ctx.tenant_id, access_ctx.workspace_id),
+                    ).fetchall()
+                    matched_paths = [
+                        (str(r["path"]), str(r["summary_light"] or ""))
+                        for r in m_rows
+                        if any(k in (str(r["path"]) + " " + str(r["summary_light"])).lower() for k in kws)
+                    ][:5]
+                    if matched_paths:
+                        lines.append("Nodi Wiki correlati:")
+                        lines.extend(f"- `{p}`: {s[:140]}" for p, s in matched_paths)
+                    i_rows = conn.execute(
+                        "SELECT insight_id, insight_text FROM memory_insights WHERE tenant_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 80",
+                        (access_ctx.tenant_id, access_ctx.workspace_id),
+                    ).fetchall()
+                    matched_ins = [
+                        (str(r["insight_id"]), str(r["insight_text"] or ""))
+                        for r in i_rows
+                        if any(k in str(r["insight_text"] or "").lower() for k in kws)
+                    ][:4]
+                    if matched_ins:
+                        lines.append("Regole/Insight Distillati:")
+                        lines.extend(f"- `{iid}`: {txt[:160]}" for iid, txt in matched_ins)
+                    body = "\n".join(lines)
+                    resolved.append({
+                        "kind": "concept",
+                        "ref": matched_cid,
+                        "tier": eff_tier,
+                        "title": matched_cid,
+                        "content": body,
+                        "tokens": max(1, len(body) // 4),
+                    })
+                elif kind == "skill":
+                    target_s = ref.lower()
+                    matched_sk = next(
+                        (s for s in all_skills if s.skill_id.lower() == target_s or target_s in s.skill_id.lower() or target_s in s.name.lower()),
+                        None,
+                    )
+                    if matched_sk:
+                        body = matched_sk.body_excerpt if eff_tier == "l1" else matched_sk.full_body[: (1000 if eff_tier == "l2" else 2800)]
+                        resolved.append({
+                            "kind": "skill",
+                            "ref": matched_sk.skill_id,
+                            "tier": eff_tier,
+                            "title": matched_sk.name,
+                            "content": body,
+                            "tokens": max(1, len(body) // 4),
+                        })
+                elif kind == "insight":
+                    irow = conn.execute(
+                        "SELECT insight_id, category, insight_text, related_path FROM memory_insights "
+                        "WHERE tenant_id = ? AND workspace_id = ? AND (insight_id = ? OR LOWER(insight_text) LIKE ? OR LOWER(category) LIKE ?) LIMIT 1",
+                        (access_ctx.tenant_id, access_ctx.workspace_id, ref, f"%{ref.lower()}%", f"%{ref.lower()}%"),
+                    ).fetchone()
+                    if irow:
+                        body = f"[{irow['category']}] {irow['insight_text']} (path: {irow['related_path'] or '/'})"
+                        resolved.append({
+                            "kind": "insight",
+                            "ref": str(irow["insight_id"]),
+                            "tier": eff_tier,
+                            "title": str(irow["insight_id"]),
+                            "content": body,
+                            "tokens": max(1, len(body) // 4),
+                        })
+                elif kind == "task":
+                    erow = conn.execute(
+                        "SELECT e.episode_id, e.goal, e.learned_summary, s.tier_l1_light, s.tier_l2_medium, s.tier_l3_high "
+                        "FROM task_episodes e LEFT JOIN task_discussion_synthesis s "
+                        "ON e.tenant_id = s.tenant_id AND e.workspace_id = s.workspace_id AND e.episode_id = s.episode_id "
+                        "WHERE e.tenant_id = ? AND e.workspace_id = ? AND (e.episode_id = ? OR LOWER(e.goal) LIKE ?) LIMIT 1",
+                        (access_ctx.tenant_id, access_ctx.workspace_id, ref, f"%{ref.lower()}%"),
+                    ).fetchone()
+                    if erow:
+                        t_key = {"l1": "tier_l1_light", "l3": "tier_l3_high"}.get(eff_tier, "tier_l2_medium")
+                        body = str(erow[t_key] or erow["learned_summary"] or erow["goal"] or "")[:2000]
+                        resolved.append({
+                            "kind": "task",
+                            "ref": str(erow["episode_id"]),
+                            "tier": eff_tier,
+                            "title": f"Task {erow['episode_id']}",
+                            "content": body,
+                            "tokens": max(1, len(body) // 4),
+                        })
+                elif kind == "root":
+                    if "private" in ref.lower():
+                        rrows = conn.execute(
+                            "SELECT path, summary_light FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND path LIKE '/private_notes/%' ORDER BY path ASC LIMIT 25",
+                            (access_ctx.tenant_id, access_ctx.workspace_id),
+                        ).fetchall()
+                        r_title = "Contesto Privato Sanitizzato (private_notes)"
+                    else:
+                        rrows = conn.execute(
+                            "SELECT path, summary_light FROM merkle_nodes WHERE tenant_id = ? AND workspace_id = ? AND path NOT LIKE '/private_notes%' AND node_type = 'file' ORDER BY path ASC LIMIT 25",
+                            (access_ctx.tenant_id, access_ctx.workspace_id),
+                        ).fetchall()
+                        r_title = "Workspace Riconciliato"
+                    if rrows:
+                        body = "\n".join(f"- `{r['path']}`: {str(r['summary_light'] or '')[:120]}" for r in rrows)
+                        resolved.append({
+                            "kind": "root",
+                            "ref": ref,
+                            "tier": eff_tier,
+                            "title": r_title,
+                            "content": body,
+                            "tokens": max(1, len(body) // 4),
+                        })
+
+        blocks = [f"#### [{r['kind'].upper()} · {r['tier'].upper()}] `{r['ref']}`\n{r['content']}" for r in resolved]
+        return {
+            "directives": directives,
+            "resolved": resolved,
+            "context_markdown": "\n\n".join(blocks),
+            "total_tokens": sum(int(r.get("tokens") or 0) for r in resolved),
+        }
+
+    def run_multi_model_local_loop(
+        self,
+        prompt: str,
+        *,
+        models: Optional[list[str]] = None,
+        max_loops: int = 3,
+        privacy_profile: Optional[str] = None,
+        attached_files: Optional[list[str]] = None,
+        force_local_only: bool = False,
+        episode_id: Optional[str] = None,
+        max_tokens: int = 1200,
+        context_budget_chars: int = 16000,
+        timeout: float = 90.0,
+        num_ctx: Optional[int] = None,
+        llm_fn: Optional[Callable[[str, str], str]] = None,
+        ctx: Optional[AccessContext] = None,
+    ) -> dict[str, Any]:
+        """Runs multi-model iterative local reasoning using Wiki references + Skills + Privacy Sanitizer."""
+        from .config import _record_runner_telemetry, invoke_configured_runner, load_cortical_config
+        from .privacy_sanitizer import pseudonymize_text, sanitize_with_profile
+
+        access_ctx = ctx or AccessContext()
+        cfg = load_cortical_config()
+        loop_cfg = cfg.get("local_loop") or {}
+        refs = self.resolve_wiki_references(prompt, ctx=access_ctx)
+
+        eff_privacy = str(
+            privacy_profile
+            or refs["directives"].get("privacy_profile")
+            or loop_cfg.get("default_privacy_profile")
+            or "medium"
+        )
+        eff_force_local = bool(
+            force_local_only
+            or eff_privacy == "max_security"
+            or refs["directives"].get("force_local")
+        )
+
+        # Sanitize user prompt & optional files before passing across models or remote prompt builder
+        san_cfg = cfg.get("privacy_sanitizer") or {}
+        profiles = cfg.get("privacy_profiles") or {}
+        prof = dict(profiles.get(eff_privacy) or profiles.get("medium") or {})
+        clean_goal, goal_map = pseudonymize_text(
+            prompt,
+            redact=bool(prof.get("redact", False)),
+            strip_categories=list(prof.get("strip_categories") or []) or None,
+            custom_terms=list(san_cfg.get("custom_terms") or []) or None,
+        )
+
+        eff_ctx_budget = max(5200, int(context_budget_chars or 16000))
+        files_list = list(attached_files or [])[:8]
+        per_file_chars = min(6000, max(1400, eff_ctx_budget // max(1, len(files_list))))
+        sanitized_files_blocks: list[str] = []
+        for fp in files_list:
+            p = Path(fp)
+            if p.is_file():
+                try:
+                    sres = sanitize_with_profile(p, profile_name=eff_privacy, config=cfg)
+                    sanitized_files_blocks.append(f"### [FILE SANITIZED ({eff_privacy})] `{p.name}`\n{sres['sanitized_text'][:per_file_chars]}")
+                except Exception:  # noqa: BLE001
+                    pass
+
+        matched_skills = self.rank_skills_for_prompt(prompt, limit=3)
+        for sk_desc, _ in matched_skills:
+            if sk_desc.skill_id.startswith("learned-"):
+                self.record_skill_usage([sk_desc.skill_id], helpful=True, ctx=access_ctx)
+        skills_md = "\n".join(f"- `{s.skill_id}`: {s.description[:140]}" for s, _ in matched_skills)
+
+        depth = self.choose_wiki_depth(prompt)
+        search_hits = self.wiki_db.search(access_ctx, query=prompt, depth=depth, limit=4)
+        hits_md = "\n\n".join(f"### [Wiki {h['depth_tier'].upper()}] `{h['path']}`\n{h['content'][:1200]}" for h in search_hits)
+
+        ctx_parts = [p for p in (refs.get("context_markdown"), "\n\n".join(sanitized_files_blocks), hits_md, f"### [Skills]\n{skills_md}" if skills_md else "") if p]
+        context_bundle = "\n\n".join(ctx_parts)[:eff_ctx_budget]
+
+        n_loops = max(1, min(5, int(max_loops or loop_cfg.get("max_iterations", 3))))
+        router_m = str(loop_cfg.get("router_model") or "qwen2.5:1.5b")
+        analyst_m = str(loop_cfg.get("analyst_model") or "qwen3.5:9b-q3_k_xl")
+        reviewer_m = str(loop_cfg.get("reviewer_model") or loop_cfg.get("reasoner_model") or "qwen3:8b")
+        default_chain = [router_m, analyst_m, reviewer_m] if n_loops >= 3 else [router_m, analyst_m]
+        model_chain = [m.strip() for m in (models or default_chain) if str(m).strip()] or default_chain
+
+        ep_id = episode_id or f"loop-{int(time.time())}"
+        passes: list[dict[str, Any]] = []
+        prior_findings = ""
+        fallback_used = False
+        prior_limit = max(2200, min(6000, eff_ctx_budget // 2))
+        ref_limit = max(1800, min(5000, eff_ctx_budget // 2))
+
+        for idx in range(n_loops):
+            chosen_model = model_chain[min(idx, len(model_chain) - 1)]
+            role = "local_router" if (n_loops >= 3 and idx == 0) else ("local_analyst" if idx == 0 or (n_loops >= 3 and idx == 1) else ("local_synthesizer" if idx == n_loops - 1 else f"local_loop_{idx + 1}"))
+            sys_p = (
+                "You are Cortical's offline multi-model reasoning agent (0 remote tokens). "
+                "Reply thoroughly and concisely in the prompt language using ONLY grounded context. Do NOT re-introduce raw PII."
+            )
+            if idx == 0:
+                usr_p = (
+                    f"[PASS 1/{n_loops} · ARCHITECTURE & GROUNDING]\n"
+                    f"Task (privacy={eff_privacy}): {clean_goal}\n\n"
+                    f"Grounded Context (Wiki + Skills + Sanitized Files):\n{context_bundle}\n\n"
+                    f"Produce: (1) Key findings & modules/sections involved, (2) Structured outline or full draft deliverable, "
+                    f"(3) A 1-sentence INSIGHT candidate."
+                )
+            else:
+                usr_p = (
+                    f"[PASS {idx + 1}/{n_loops} · DISTILLATION & LOCAL COMPLETION GATE]\n"
+                    f"Task (privacy={eff_privacy}): {clean_goal}\n\n"
+                    f"Prior Local Pass Findings:\n{prior_findings[:prior_limit]}\n\n"
+                    f"Grounded Reference Context:\n{context_bundle[:ref_limit]}\n\n"
+                    f"Refine and produce the complete, verified deliverable, start the distilled rule with `INSIGHT:`, and end with "
+                    f"`NEEDS_CLOUD: NO` if the task is resolved locally or `NEEDS_CLOUD: YES (<reason>)` only if impossible offline."
+                )
+
+            t0 = time.perf_counter()
+            answer = ""
+            if llm_fn is not None:
+                answer = str(llm_fn(chosen_model, usr_p) or "").strip()
+                elapsed = round(time.perf_counter() - t0, 2)
+                in_tok = max(1, (len(sys_p) + len(usr_p)) // 4)
+                out_tok = max(1, len(answer) // 4)
+                _record_runner_telemetry(
+                    model=chosen_model,
+                    runner_name="local_loop",
+                    role=role,
+                    prompt=clean_goal,
+                    in_tok=in_tok,
+                    out_tok=out_tok,
+                    elapsed_sec=elapsed,
+                    episode_id=ep_id,
+                    db_path=self.wiki_db.db_path,
+                )
+            else:
+                try:
+                    answer = invoke_configured_runner(
+                        usr_p,
+                        system_prompt=sys_p,
+                        config=cfg,
+                        model_override=chosen_model,
+                        max_tokens=int(max_tokens),
+                        timeout=float(timeout),
+                        num_ctx=num_ctx,
+                        role=role,
+                        episode_id=ep_id,
+                        db_path=self.wiki_db.db_path,
+                    )
+                    elapsed = round(time.perf_counter() - t0, 2)
+                    in_tok = max(1, (len(sys_p) + len(usr_p)) // 4)
+                    out_tok = max(1, len(answer) // 4)
+                except Exception:  # noqa: BLE001
+                    fallback_used = True
+                    elapsed = round(time.perf_counter() - t0, 2)
+                    answer = (
+                        f"[Fallback Deterministico Locale ({chosen_model})] Contesto analizzato su {len(refs['resolved'])} riferimenti Wiki "
+                        f"e {len(matched_skills)} skill.\nINSIGHT: Contesto localizzato offline su {clean_goal[:90]}.\nNEEDS_CLOUD: NO"
+                    )
+                    in_tok = max(1, (len(sys_p) + len(usr_p)) // 4)
+                    out_tok = max(1, len(answer) // 4)
+            prior_findings = answer
+            passes.append({
+                "pass": idx + 1,
+                "model": chosen_model,
+                "role": role,
+                "elapsed_sec": elapsed,
+                "in_tokens_est": in_tok,
+                "out_tokens_est": out_tok,
+                "output_chars": len(answer),
+                "output": answer,
+            })
+
+        final_answer = passes[-1]["output"] if passes else ""
+        m_ins = re.search(r"INSIGHT:\s*(.+)", final_answer, re.IGNORECASE)
+        distilled_insight = (m_ins.group(1).strip() if m_ins else f"Local loop ({' -> '.join(p['model'] for p in passes)}): {clean_goal[:110]}")[:320]
+        now = time.time()
+        ins_id = "ins-" + hashlib.sha256(f"{ep_id}:{distilled_insight}".encode("utf-8")).hexdigest()[:10]
+        with self.wiki_db._connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS memory_insights (
+                       insight_id TEXT PRIMARY KEY,
+                       tenant_id TEXT NOT NULL,
+                       workspace_id TEXT NOT NULL,
+                       category TEXT NOT NULL,
+                       insight_text TEXT NOT NULL,
+                       related_path TEXT NOT NULL DEFAULT '/',
+                       created_at REAL NOT NULL
+                   )"""
+            )
+            conn.execute(
+                """INSERT OR REPLACE INTO memory_insights(
+                       insight_id, tenant_id, workspace_id, category, insight_text, related_path, created_at
+                   ) VALUES (?, ?, ?, 'local_loop_distillation', ?, ?, ?)""",
+                (ins_id, access_ctx.tenant_id, access_ctx.workspace_id, distilled_insight, refs["resolved"][0]["ref"] if refs["resolved"] else "/", now),
+            )
+
+        cloud_flag = bool(re.search(r"NEEDS_CLOUD:\s*YES", final_answer, re.IGNORECASE))
+        needs_remote = False if eff_force_local else cloud_flag
+
+        ep_runs = self.wiki_db.list_agent_runs(access_ctx, episode_id=ep_id, limit=50)
+        tot_loc_tok = sum(int(r.get("total_tokens") or 0) for r in ep_runs) or sum(p["in_tokens_est"] + p["out_tokens_est"] for p in passes)
+        tot_elapsed = round(sum(float(p.get("elapsed_sec") or 0.0) for p in passes), 2)
+
+        sanitized_remote_prompt = (
+            f"=== CORTICAL PRIVACY-SAFE DISTILLED BRIEF ({eff_privacy}) ===\n"
+            f"Sanitized Objective: {clean_goal}\n\n"
+            f"Resolved Wiki & Skills Contracts ({len(refs['resolved'])} refs):\n{context_bundle[:1800]}\n\n"
+            f"Distilled Local Conclusions ({len(passes)} local passes across {', '.join(p['model'] for p in passes)}):\n"
+            f"{final_answer[:1800]}\n\n"
+            f"Distilled Rule: {distilled_insight}\n"
+        )
+        if eff_force_local:
+            sanitized_remote_prompt = (
+                "[BLOCKED BY MAX_SECURITY / /local POLICY: Remote cloud forwarding disabled; "
+                "use `local_answer` directly on-device.]"
+            )
+
+        return {
+            "episode_id": ep_id,
+            "privacy_profile": eff_privacy,
+            "force_local_only": eff_force_local,
+            "completed_locally": not needs_remote,
+            "needs_remote_escalation": needs_remote,
+            "recommended_action": "use_local_answer" if not needs_remote else "send_sanitized_remote_prompt",
+            "fallback_used": fallback_used,
+            "models_used": [p["model"] for p in passes],
+            "total_local_tokens": tot_loc_tok,
+            "total_elapsed_sec": tot_elapsed,
+            "passes": passes,
+            "resolved_references": refs["resolved"],
+            "distilled_insight_id": ins_id,
+            "distilled_insight": distilled_insight,
+            "pseudonymized_entities": len(goal_map),
+            "local_answer": final_answer,
+            "sanitized_remote_prompt": sanitized_remote_prompt,
+        }

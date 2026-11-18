@@ -562,7 +562,13 @@ class CorticalVoiceEngine:
 
         curation_info = None
         if self.curator:
-            curation_info = self.curator.record_chat_turn(AccessContext(), cmd, answer, scope_id=eff_scope)
+            curation_info = self.curator.record_chat_turn(
+                AccessContext(),
+                cmd,
+                answer,
+                scope_id=eff_scope,
+                allow_durable=(eff_scope != "chat"),
+            )
 
         self.record_spoken_output(answer)
         return VoiceRouteResult(

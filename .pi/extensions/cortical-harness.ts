@@ -292,6 +292,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
 
   let pendingGroundedAnswer: string | null = null;
   let activeTask: ActiveTaskState | null = null;
+  const executedToolSignatures = new Map<string, number>();
 
   // Register Cortical Multi-Agent & Adaptive Skill Slash Commands in `pi`
   pi.registerCommand?.("task", {
@@ -318,6 +319,22 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         `[TASK MULTI-AGENTE ATTIVO: ${epId}]\nObiettivo: ${goal}\n` +
           `Coordina i ruoli (Analyst -> Implementer -> Reviewer) usando la Wiki MCP e i tool appropriati.`
       );
+    },
+  });
+
+  pi.registerCommand?.("gateway", {
+    description: "Stato o configurazione del Gateway Remoto opzionale (/gateway status|invite <email>)",
+    handler: async (args, ctx) => {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const action = parts[0] || "status";
+      try {
+        const cliArgs = ["gateway", action === "invite" ? "invite" : "status"];
+        if (action === "invite" && parts[1]) cliArgs.push("--email", parts[1]);
+        const res = invokeCorticalCLI(cliArgs);
+        ctx.ui?.notify?.(JSON.stringify(res, null, 2), "info");
+      } catch (err) {
+        ctx.ui?.notify?.(`Gateway error: ${String(err)}`, "warning");
+      }
     },
   });
 
@@ -450,9 +467,24 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand?.("private", {
+    description: "Interroga o allega in modo riservato file/cartelle senza esporli al cloud (/private <alias> <domanda>)",
+    handler: async (args, ctx) => {
+      const parts = args.trim();
+      if (!parts) {
+        ctx.ui?.notify?.("Uso: /private <nome_file_o_cartella> [domanda] (es. /private omniroute analisi)", "warning");
+        return;
+      }
+      const res = invokeCorticalCLI(["local-loop", `/private ${parts} /local`, "--json"]);
+      const ans = String(res.local_answer || res.distilled_insight || JSON.stringify(res));
+      ctx.ui?.notify?.(`🔒 [Cortical Locale Privato]\n${ans.slice(0, 700)}`, "info");
+    },
+  });
+
   // 1. Pre-Flight Grounding + Parallel 3+1 Memory & Skill Enhancement Hook
   pi.on("before_agent_start", (event, ctx) => {
     pendingGroundedAnswer = null;
+    executedToolSignatures.clear();
     try {
       const userPrompt =
         "prompt" in event && typeof event.prompt === "string" ? event.prompt : "";
@@ -612,16 +644,23 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         process.env.PI_CORTICAL_FAST === "1" ||
         modelStr.includes("qwen") ||
         modelStr.includes("ollama");
+      const dynCtx = Number(process.env.CORTICAL_DYNAMIC_NUM_CTX || "0") || 16384;
       const basePatch = isLocalFast
         ? {
             ...payload,
+            think: effort === "high",
             reasoning_effort:
               (payload as Record<string, unknown>).reasoning_effort ?? effortReasoning,
             max_tokens:
               (payload as Record<string, unknown>).max_tokens ?? effortMaxTokens,
+            options: {
+              ...(((payload as Record<string, unknown>).options as Record<string, unknown>) || {}),
+              num_ctx: dynCtx,
+            },
           }
         : payload;
-      if (lastMsgRole === "user" && !alreadyEnhanced && (activeTask || lastUserText.split(/\s+/).length >= 6)) {
+      const hasCorticalRefs = /@(?:private|vault|wiki|node|concept|skill|insight|root):|\/private\b|cortical:\/\//i.test(lastUserText);
+      if (lastMsgRole === "user" && !alreadyEnhanced && (activeTask || hasCorticalRefs || lastUserText.split(/\s+/).length >= 6)) {
         const enh = invokeCorticalCLI(["enhance-prompt", "--prompt", lastUserText]);
         const enhancedSys = String(enh.enhanced_system_instructions || "").slice(0, 1200);
         if (enhancedSys) {
@@ -681,6 +720,38 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     const toolArgs = ((event as unknown as Record<string, unknown>).input ||
       (event as unknown as Record<string, unknown>).args ||
       {}) as Record<string, unknown>;
+    const cmdStr = toolName === "bash" ? String(toolArgs.command || toolArgs.cmd || "").trim() : "";
+    const normPath = String(toolArgs.path || toolArgs.file_path || "")
+      .replace(/^\/Users\/[^/]+\/work\/code\/cortical\/?/, "")
+      .replace(/^\.\//, "")
+      .trim();
+    const sigKey =
+      toolName === "bash" && cmdStr
+        ? `bash:${cmdStr}`
+        : toolName === "read"
+          ? `read:${normPath}`
+          : ["grep", "find", "ls"].includes(toolName)
+            ? `${toolName}:${normPath}:${toolArgs.pattern ?? ""}`
+            : "";
+    const priorRuns = sigKey ? (executedToolSignatures.get(sigKey) || 0) : 0;
+    const isSilentOpen = /^open\b/i.test(cmdStr) || cmdStr.includes(" open ");
+    if (
+      sigKey &&
+      ((isSilentOpen && priorRuns >= 1) ||
+        (toolName === "read" && priorRuns >= 1) ||
+        priorRuns >= 2)
+    ) {
+      return {
+        block: true,
+        reason:
+          "[Cortical Anti-Loop] This exact target was already inspected/executed in this turn. Do NOT repeat the same read/command; move forward to edit/write/verification or finish with STATUS: DONE.",
+      };
+    }
+    const recordExecutedTool = () => {
+      if (sigKey) {
+        executedToolSignatures.set(sigKey, (executedToolSignatures.get(sigKey) || 0) + 1);
+      }
+    };
 
     if (activeTask) {
       activeTask.steps.push({
@@ -788,7 +859,10 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
                   if (!waitResp.ok) break;
                   const waitData = (await waitResp.json()) as Record<string, unknown>;
                   if (waitData.status !== "pending") {
-                    if (waitData.decision === "allow") return undefined;
+                    if (waitData.decision === "allow") {
+                      recordExecutedTool();
+                      return undefined;
+                    }
                     return {
                       block: true,
                       reason: `User denied ${decision.normalized_pattern}${waitData.feedback ? `: ${waitData.feedback}` : ""}`,
@@ -800,7 +874,10 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
                   reason: `Approval timeout for ${decision.normalized_pattern}`,
                 };
               }
-              if (reqData.decision === "allow") return undefined;
+              if (reqData.decision === "allow") {
+                recordExecutedTool();
+                return undefined;
+              }
             }
           } catch {
             // Fallback if live HTTP server is unreachable
@@ -816,6 +893,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
     } catch {
       // Fail-open only for non-destructive commands if CLI env is initializing
     }
+    recordExecutedTool();
     return undefined;
   });
 
@@ -903,6 +981,58 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
       const args = (params || {}) as Record<string, unknown>;
       const mode = args.mode === "read" ? "read" : "summarize";
       const res = invokeCorticalCLI(["chrome-read", "--mode", mode]);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // 3d. Extract URL Text, Links & Form Fields (works with Chrome CDP :9222 or Playwright/HTTP fallback)
+  pi.registerTool?.({
+    name: "chrome_extract_page",
+    label: "Extract Web Page & Form Fields",
+    description:
+      "Apre un URL e ne estrae testo leggibile, link (es. offerte di lavoro) e tutti i campi dei form (<input>/<textarea>/<select>) senza bisogno di configurazioni manuali.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL completo della pagina o modulo da analizzare (https://...)" },
+      },
+      required: ["url"],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const res = invokeCorticalCLI(["chrome-extract", "--url", String(args.url || "")]);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // 3e. Fill Web Form Fields & Optional CV Upload
+  pi.registerTool?.({
+    name: "chrome_fill_form",
+    label: "Fill Web Form & Upload CV",
+    description:
+      "Compila automaticamente i campi di un form web (per nome/id/placeholder/label), carica un eventuale file (es. CV .pdf/.docx) e opzionalmente invia il modulo.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "URL del form di candidatura" },
+        fields: { type: "object", description: "Mappa campo -> valore (es. {\"email\": \"ccancellieri@hotmail.com\", \"name\": \"Carlo Cancellieri\"})" },
+        upload_file: { type: "string", description: "Path locale opzionale del CV da allegare" },
+        submit: { type: "boolean", default: false, description: "Invia solo se richiesto esplicitamente" },
+      },
+      required: ["url", "fields"],
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const cliArgs = ["chrome-fill", "--url", String(args.url || ""), "--fields-json", JSON.stringify(args.fields || {})];
+      if (args.upload_file) cliArgs.push("--upload", String(args.upload_file));
+      if (args.submit === true) cliArgs.push("--submit");
+      const res = invokeCorticalCLI(cliArgs);
       return {
         content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
         details: res,
@@ -1075,5 +1205,70 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
         details: { swarm_results: results },
       };
     },
+  });
+
+  // 6. Optional Modular Remote Gateway Tool (Key Auth, Account Cap, Tunnel & Invite)
+  pi.registerTool?.({
+    name: "manage_remote_gateway",
+    label: "Manage Optional Cortical Remote Gateway",
+    description:
+      "Inspect, configure, expose, or send account password invites for Cortical's optional Remote Gateway (compatible via CLI/MCP with pi, OpenCode, OpenClaw, Codex, Claude, DeepSeek).",
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "config", "invite", "duckdns"],
+          default: "status",
+        },
+        email: { type: "string", default: "ccancellieri@hotmail.com" },
+        max_users: { type: "integer" },
+        auth_enabled: { type: "boolean" },
+        rotate_key: { type: "boolean", default: false },
+      },
+    } as any,
+    execute: async (_toolCallId, params) => {
+      const args = (params || {}) as Record<string, unknown>;
+      const action = String(args.action || "status");
+      const cliArgs = ["gateway", action];
+      if (action === "invite" && args.email) cliArgs.push("--email", String(args.email));
+      if (action === "config") {
+        if (typeof args.max_users === "number") cliArgs.push("--max-users", String(args.max_users));
+        if (typeof args.auth_enabled === "boolean") cliArgs.push("--auth-enabled", String(args.auth_enabled));
+        if (args.rotate_key) cliArgs.push("--rotate-key");
+      }
+      const res = invokeCorticalCLI(cliArgs);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        details: res,
+      };
+    },
+  });
+
+  // Compress oversized read/bash/grep tool outputs (>3800 chars) to protect local KV cache window
+  pi.on("tool_result", (event) => {
+    try {
+      const tname = String((event as unknown as Record<string, unknown>).toolName || "");
+      if (!["read", "bash", "grep", "find", "ls"].includes(tname)) return undefined;
+      const ev = event as unknown as { content?: Array<{ type?: string; text?: string }> };
+      if (!Array.isArray(ev.content)) return undefined;
+      let changed = false;
+      const nextContent = ev.content.map((part) => {
+        if (part?.type === "text" && typeof part.text === "string" && part.text.length > 3800) {
+          changed = true;
+          const omitted = part.text.length - 3000;
+          const compact =
+            part.text.slice(0, 1800) +
+            `\n\n...[CORTICAL COMPACTION: ${omitted} caratteri omessi per proteggere il contesto locale. Usa read con offset/limit mirati o grep per sezioni specifiche.]...\n\n` +
+            part.text.slice(-1200);
+          return { ...part, text: compact };
+        }
+        return part;
+      });
+      if (changed) return { content: nextContent };
+    } catch {
+      // ignore compression error
+    }
+    return undefined;
   });
 }

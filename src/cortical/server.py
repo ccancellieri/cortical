@@ -62,6 +62,7 @@ from .model_ops import (
     sync_pi_models_json,
 )
 from .permissions.gate import AdaptivePermissionGate
+from .remote_gateway import CorticalRemoteGateway, render_auth_portal_html
 from .role_registry import (
     add_custom_role,
     delete_custom_role,
@@ -415,11 +416,41 @@ def _normalize_effort(val: Any) -> str:
     return "medium"
 
 
+def _strip_think_blocks(text: str) -> str:
+    """Removes leaked `<think>...</think>`, `<|thought|>...</|thought|>`, and `/no_think` tokens."""
+    clean = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL | re.IGNORECASE)
+    clean = re.sub(r"<\|thought\|>.*?</\|thought\|>", "", clean, flags=re.DOTALL | re.IGNORECASE)
+    low = clean.lower()
+    if "</think>" in low:
+        idx = low.find("</think>")
+        clean = clean[idx + len("</think>") :]
+        low = clean.lower()
+    if "<think>" in low:
+        idx = low.find("<think>")
+        clean = clean[:idx]
+    clean = re.sub(r"(?:^|\s)/(?:no_)?think\b", " ", clean, flags=re.IGNORECASE)
+    return clean.strip()
+
+
+def _is_legacy_task_nag_reply(text: str) -> bool:
+    """Detects legacy fallback responses telling the user to create a task."""
+    low = (text or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "se vuoi che diventi un task operativo",
+            "chiedimi 'crea un task",
+            "if you want an operational multi-agent task",
+            "say 'create a task for",
+        )
+    )
+
+
 def _query_llm_endpoints(
     system_prompt: str,
     user_prompt: str,
     base_url: str,
-    timeout: float = 20.0,
+    timeout: float = 30.0,
     extra_messages: Optional[list[dict[str, str]]] = None,
     preferred_model: Optional[str] = None,
     effort: str = "medium",
@@ -429,17 +460,19 @@ def _query_llm_endpoints(
     thinking_mode: str = "auto",
 ) -> Optional[str]:
     """Queries available local/LAN OpenAI-compatible servers with multi-message context fitting."""
-    default_ollama = preferred_model or "qwen2.5:1.5b"
+    default_ollama = preferred_model or "qwen3.8:27b-iq2_xxs"
     candidates = [
         (base_url, default_ollama if ":11434" in base_url else "local-model"),
         ("http://127.0.0.1:11434/v1", default_ollama),
+        ("http://127.0.0.1:11434/v1", "qwen3:8b"),
+        ("http://127.0.0.1:11434/v1", "qwen2.5:1.5b"),
         ("http://127.0.0.1:8080/v1", "local-model"),
     ]
     lan_url = os.environ.get("CORTICAL_LAN_LLM", "").strip()
     if lan_url:
         candidates.append((lan_url, "local-model"))
     eff = _normalize_effort(effort)
-    max_tok = 700 if eff == "low" else (2000 if eff == "high" else 1200)
+    max_tok = 400 if eff == "low" else (1200 if eff == "high" else 600)
     eff_win = get_model_context_window(default_ollama) if context_window is None else clamp_context_window(context_window)
     fitted = fit_context_to_window(
         system_prompt=system_prompt,
@@ -473,8 +506,6 @@ def _query_llm_endpoints(
         }
         if ":11434" in endpoint or "qwen3" in model_name.lower():
             payload["reasoning_effort"] = reasoning_eff
-        if ":11434" in endpoint:
-            payload["options"] = {"num_ctx": eff_win}
         try:
             req = urllib.request.Request(
                 url,
@@ -486,12 +517,14 @@ def _query_llm_endpoints(
                 data = json.loads(resp.read().decode("utf-8"))
                 msg_obj = data["choices"][0]["message"]
                 content = _strip_think_blocks(str(msg_obj.get("content") or "")).strip()
-                if "</think>" in content:
-                    content = content.split("</think>", 1)[1].strip()
-                if "no longer supported" in content.lower() or "antigravity.google" in content.lower():
+                if (
+                    not content
+                    or _is_legacy_task_nag_reply(content)
+                    or "no longer supported" in content.lower()
+                    or "antigravity.google" in content.lower()
+                ):
                     continue
-                if content:
-                    return content
+                return content
         except Exception:  # noqa: BLE001
             continue
     return None
@@ -521,12 +554,19 @@ def build_chat_context(
     for h in hits:
         blocks.append(f"[WIKI {h['path']}] {str(h.get('content', ''))[:320]}")
 
+    valid_turns = [
+        t
+        for t in memory_curator.get_recent_chat(limit=6, ctx=ctx, scope_id=scope_id)
+        if not _is_legacy_task_nag_reply(str(t.get("assistant_text") or ""))
+    ]
     history_msgs: list[dict[str, str]] = []
-    for turn in reversed(memory_curator.get_recent_chat(limit=4, ctx=ctx, scope_id=scope_id)):
-        if turn.get("user_text"):
-            history_msgs.append({"role": "user", "content": str(turn["user_text"])})
-        if turn.get("assistant_text"):
-            history_msgs.append({"role": "assistant", "content": str(turn["assistant_text"])})
+    for turn in valid_turns[-3:]:
+        u_txt = str(turn.get("user_text") or "").strip()[:240]
+        a_txt = str(turn.get("assistant_text") or "").strip()[:320]
+        if u_txt:
+            history_msgs.append({"role": "user", "content": u_txt})
+        if a_txt:
+            history_msgs.append({"role": "assistant", "content": a_txt})
 
     return ("\n\n".join(blocks), history_msgs)
 
@@ -534,7 +574,7 @@ def build_chat_context(
 def query_local_reflex_llm(
     prompt: str,
     base_url: str,
-    timeout: float = 8.0,
+    timeout: float = 30.0,
     lang: str = "auto",
     extra_context: str = "",
     chat_history: Optional[list[dict[str, str]]] = None,
@@ -638,14 +678,16 @@ def query_local_reflex_llm(
     if eff_lang == "en":
         sys_chat = (
             f"You are Cortical, a bilingual engineering & voice assistant created by Carlo Cancellieri. "
-            f"Local time: {now.strftime('%H:%M')}. Reply ALWAYS and ONLY in clear, natural English "
-            "(2-3 complete sentences without cutting off)."
+            f"Local time: {now.strftime('%H:%M')}. This is General Chat for informal conversation and quick help: "
+            "answer ALWAYS directly on topic in clear, natural English (2-4 complete sentences without cutting off). "
+            "NEVER tell the user to create an operational task unless they explicitly ask about tasks."
         )
     else:
         sys_chat = (
             f"Sei Cortical, assistente vocale e ingegneristico italiano creato da Carlo Cancellieri. "
-            f"Ora locale: {now.strftime('%H:%M')}. Rispondi SEMPRE e SOLO in italiano corretto, "
-            "in modo completo, fluido e naturale (2-3 frasi concluse senza troncare)."
+            f"Ora locale: {now.strftime('%H:%M')}. Questa è la Chat Generale per discussioni informali e utilità rapide: "
+            "rispondi SEMPRE e SOLO in italiano corretto entrando subito nel merito (2-4 frasi concluse senza troncare). "
+            "NON dire mai all'utente di creare un task operativo e non usare formule ripetitive."
         )
     if extra_context.strip():
         sys_chat += f"\n\n=== CONTESTO ATTIVO ALLEGATO / WIKI ===\n{extra_context.strip()}"
@@ -661,20 +703,12 @@ def query_local_reflex_llm(
         strategy_override=strategy_override,
         thinking_mode=thinking_mode,
     )
-    if llm_out:
+    if llm_out and not _is_legacy_task_nag_reply(llm_out):
         return llm_out
 
     if eff_lang == "en":
-        return f"I received your request: '{prompt}'. If you want an operational multi-agent task, say 'create a task for {prompt}'."
-    return f"Ho ricevuto la richiesta: '{prompt}'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per {prompt}'."
-
-
-def _strip_think_blocks(text: str) -> str:
-    """Removes leaked `<think>...</think>` blocks from local model outputs."""
-    clean = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL)
-    if "<think>" in clean:
-        clean = clean.split("<think>", 1)[0]
-    return clean.strip()
+        return "I'm here in General Chat! Tell me how I can help or what you'd like to discuss."
+    return "Sono qui nella Chat Generale! Dimmi pure di cosa vuoi parlare o cosa vuoi approfondire."
 
 
 def _extract_pi_content_text(content: Any) -> str:
@@ -840,6 +874,13 @@ def _build_pi_subprocess_env(
         env["PI_ACTIVE_ROLE"] = role
     if model:
         env["PI_ACTIVE_MODEL"] = model
+    try:
+        from .context_window import compute_dynamic_num_ctx, get_model_context_window
+
+        base_ctx = get_model_context_window(model or "qwen3:8b")
+        env["CORTICAL_DYNAMIC_NUM_CTX"] = str(compute_dynamic_num_ctx(base_ctx=base_ctx, model_id=model or "qwen3:8b"))
+    except Exception:  # noqa: BLE001
+        pass
     if egress_proxy_port > 0:
         proxy_url = f"http://127.0.0.1:{egress_proxy_port}"
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -1029,19 +1070,30 @@ class PiAgentManager:
             else:
                 if sess.get("status") == "awaiting_approval" and not self.approvals.has_pending(session_id):
                     sess["status"] = "working"
+                dec_labels = {
+                    "allow_once": "Consentito (1 volta)",
+                    "allow_session": "Consentito per la sessione",
+                    "allow_always": "Sempre consentito",
+                    "deny": "Negato dall'utente",
+                    "denied": "Negato dall'utente",
+                    "expired": "Scaduto (timeout)",
+                }
+                raw_dec = str(pa.get("decision") or pa.get("status") or "")
+                dec_label = dec_labels.get(raw_dec, raw_dec)
+                icon = "✅" if pa["status"] == "allowed" else ("⏱️" if pa["status"] == "expired" else "⛔")
                 for st in reversed(sess.get("steps", [])):
                     meta_ap = (st.get("meta") or {}).get("approval")
                     if meta_ap and meta_ap.get("approval_id") == pa["approval_id"]:
-                        st["meta"]["approval"] = pa
+                        st["meta"]["approval"] = dict(pa)
+                        st["title"] = f"{icon} Approvazione {pa['tool']}: {dec_label}"
                         break
-                icon = "✅" if pa["status"] == "allowed" else ("⏱️" if pa["status"] == "expired" else "⛔")
                 fb = f" · feedback: {pa['feedback']}" if pa.get("feedback") else ""
                 self._append_step(
                     session_id,
                     "approval_result",
-                    f"{icon} {pa['tool']}: {pa['decision'] or pa['status']}{fb}",
+                    f"{icon} {pa['tool']}: {dec_label}{fb}",
                     pa["summary"],
-                    {"approval_id": pa["approval_id"], "status": pa["status"]},
+                    {"approval_id": pa["approval_id"], "status": pa["status"], "decision": raw_dec},
                 )
             sess["updated_at"] = time.time()
 
@@ -1098,6 +1150,22 @@ class PiAgentManager:
     def _hydrate_from_db(self) -> None:
         """Loads persisted task episodes and cleans up any stale 'working' runs from prior server lifetimes."""
         ctx = AccessContext()
+        try:
+            orch_cfg = self.wiki_db.get_concept_config(ctx, "concept:orchestratore-multi-agente")
+            if orch_cfg.get("chat_model") == "qwen3.8:27b-iq2_xxs" and orch_cfg.get("coordinator_model") == "qwen3:8b":
+                self.wiki_db.update_concept_config(
+                    ctx,
+                    "concept:orchestratore-multi-agente",
+                    {
+                        "coordinator_model": "qwen3.8:27b-iq2_xxs",
+                        "analyst_model": "qwen3.8:27b-iq2_xxs",
+                        "implementer_model": "qwen3.8:27b-iq2_xxs",
+                        "reviewer_model": "qwen3.8:27b-iq2_xxs",
+                        "max_agent_loops": max(int(orch_cfg.get("max_agent_loops") or 6), 6),
+                    },
+                )
+        except Exception:  # noqa: BLE001
+            pass
         self.wiki_db.mark_orphan_working_runs_stopped(ctx)
         page = self.wiki_db.search_episodes_paginated(ctx, query="", offset=0, limit=80)
         for ep in reversed(page.get("episodes", [])):
@@ -1318,6 +1386,41 @@ class PiAgentManager:
         )
         s["updated_at"] = time.time()
 
+    def resolve_prompt_mentions(self, ctx: AccessContext, text: str) -> str:
+        """Resolves `@pi-xxxxxx` / `@chat-...` task/chat mentions into bounded context for prompts."""
+        refs = re.findall(r"@((?:pi-\d+|chat-[\w-]+|chat))\b", str(text or ""))
+        if not refs:
+            return ""
+        blocks: list[str] = []
+        seen: set[str] = set()
+        for ref_id in refs[:4]:
+            if ref_id in seen:
+                continue
+            seen.add(ref_id)
+            s = self.sessions.get(ref_id)
+            if s:
+                tool_lines = [
+                    f"  * {st.get('title')}: {str(st.get('detail') or '')[:140]}"
+                    for st in (s.get("steps") or [])
+                    if st.get("kind") == "tool_result"
+                ][-4:]
+                atts = self.wiki_db.list_context_attachments(ctx, scope_id=ref_id)
+                att_str = ", ".join(a.get("label", "") for a in atts[:5]) if atts else "nessuno"
+                blocks.append(
+                    f"[Task @{ref_id} ({s.get('status')})]\n"
+                    f"- Goal: {str(s.get('goal') or '')[:220]}\n"
+                    f"- Risultato: {str(s.get('final_response') or '')[:260]}\n"
+                    f"- Allegati: {att_str}"
+                    + ("\n" + "\n".join(tool_lines) if tool_lines else "")
+                )
+            else:
+                ep = self.wiki_db.get_episode(ctx, ref_id)
+                if ep:
+                    blocks.append(
+                        f"[Episodio @{ref_id}]\n- Goal: {ep.get('goal', '')[:220]}\n- Sintesi: {ep.get('learned_summary', '')[:260]}"
+                    )
+        return "\n\n".join(blocks)[:1400]
+
     def spawn_agent(
         self,
         goal: str,
@@ -1450,6 +1553,12 @@ class PiAgentManager:
             res_obj = evt.get("result") if isinstance(evt.get("result"), dict) else {}
             out_txt = _extract_pi_content_text(res_obj.get("content"))
             is_err = bool(evt.get("isError"))
+            cmd_or_path = str(targs.get("command") or targs.get("path") or targs.get("file_path") or tname)
+            detail_txt = out_txt[:360] if out_txt.strip() else (
+                f"✓ Eseguito con successo (exit 0): {cmd_or_path}"[:360]
+                if not is_err
+                else json.dumps(targs)[:180]
+            )
             meta: dict[str, Any] = {"tool": tname, "is_error": is_err}
             if targs.get("command"):
                 meta["command"] = str(targs["command"])
@@ -1458,12 +1567,13 @@ class PiAgentManager:
             step = {
                 "type": "tool_result",
                 "title": f"{tname} ({'ERR' if is_err else 'OK'})",
-                "detail": out_txt[:360] or json.dumps(targs)[:180],
+                "detail": detail_txt,
                 "meta": meta,
             }
             state["executed_steps"].append(step)
             state["tool_count"] += 1
-            self.memory_curator.add_task_working_note(session_id, f"{step['title']}: {step['detail'][:160]}")
+            self._append_step(session_id, "tool_result", step["title"], detail_txt, meta)
+            self.memory_curator.add_task_working_note(session_id, f"{step['title']}: {detail_txt[:160]}")
             return
         if etype == "error" or evt.get("error"):
             err_msg = str(evt.get("errorMessage") or evt.get("error") or evt)[:300]
@@ -1528,6 +1638,17 @@ class PiAgentManager:
         eff = _normalize_effort(effort)
         thinking_flag = "low" if eff == "high" else "off"
         resolved_model = self._resolve_local_pi_model(model_id)
+        try:
+            from .context_window import compute_dynamic_num_ctx, get_model_context_window
+            from .model_ops import sync_pi_models_json
+
+            dyn_w = compute_dynamic_num_ctx(
+                base_ctx=get_model_context_window(resolved_model),
+                model_id=resolved_model,
+            )
+            sync_pi_models_json({resolved_model: dyn_w})
+        except Exception:  # noqa: BLE001
+            pass
         is_heavy_model = any(tag in resolved_model.lower() for tag in ("27b", "30b", "32b", "70b"))
         eff_timeout = max(240.0, timeout_sec) if is_heavy_model else (240.0 if eff == "high" else timeout_sec)
         base_state["model"] = resolved_model
@@ -1579,6 +1700,10 @@ class PiAgentManager:
             with self._lock:
                 self.processes[key] = p
 
+        is_heavy_model = any(tag in str(model_id or "").lower() for sz in ("27b", "30b", "32b", "70b") for tag in (sz,))
+        idle_limit = 360.0 if is_heavy_model else 300.0
+        hard_limit = max(eff_timeout * 3.5, 660.0 if is_heavy_model else 540.0)
+
         run_meta = run_streaming_process(
             cmd,
             cwd=str(self.repo_root),
@@ -1592,8 +1717,8 @@ class PiAgentManager:
             ),
             on_line=_on_pi_line,
             stop_event=stop_event,
-            idle_timeout_sec=180.0,
-            hard_timeout_sec=max(eff_timeout * 2.5, 420.0),
+            idle_timeout_sec=idle_limit,
+            hard_timeout_sec=hard_limit,
             is_paused=lambda: self.approvals.has_pending(session_id),
             should_abort=lambda: base_state["tool_count"] >= max_tools,
             on_start=_on_pi_start,
@@ -1704,6 +1829,17 @@ class PiAgentManager:
         run_id = f"run-{session_id}-{run_role.lower()}-{int(time.time() * 1000) % 100000}"
         t_start = time.time()
         resolved_model = self._resolve_local_pi_model(model_id)
+        try:
+            from .context_window import compute_dynamic_num_ctx, get_model_context_window
+            from .model_ops import sync_pi_models_json
+
+            dyn_w = compute_dynamic_num_ctx(
+                base_ctx=get_model_context_window(resolved_model),
+                model_id=resolved_model,
+            )
+            sync_pi_models_json({resolved_model: dyn_w})
+        except Exception:  # noqa: BLE001
+            pass
         self._record_run_start(
             ctx, run_id=run_id, session_id=session_id, role=run_role,
             model=resolved_model, goal=goal, started_at=t_start,
@@ -1762,9 +1898,9 @@ class PiAgentManager:
     ) -> dict[str, Any]:
         """Runs Analyst + Implementer in parallel, then Reviewer, returning steps and loop verdict."""
         max_loops = int(orch_cfg.get("max_agent_loops", 6))
-        analyst_model = str(orch_cfg.get("analyst_model", "qwen3.8:27b-iq2_xs"))
-        impl_model = str(orch_cfg.get("implementer_model", "qwen3.8:27b-iq2_xs"))
-        rev_model = str(orch_cfg.get("reviewer_model", "qwen3.8:27b-iq2_xs"))
+        analyst_model = str(orch_cfg.get("analyst_model", "qwen3.8:27b-iq2_xxs"))
+        impl_model = str(orch_cfg.get("implementer_model", "qwen3.8:27b-iq2_xxs"))
+        rev_model = str(orch_cfg.get("reviewer_model", "qwen3.8:27b-iq2_xxs"))
 
         shared_ctx = (
             (f"[ALLEGATI CONTESTO]\n{att_block}\n\n" if att_block else "")
@@ -1988,7 +2124,7 @@ class PiAgentManager:
             att_block = "\n".join(att_context_lines)
 
             hits = self.wiki_db.search(ctx, query=goal, depth=DepthTier(wiki_depth), limit=4)
-            hit_lines = "\n".join(f"  • {h['path']} [tier={h['depth_tier']}]: {h['content'][:160]}..." for h in hits) if hits else "  • Nessun match FTS5 specifico."
+            hit_lines = "\n".join(f"  • {str(h['path']).lstrip('/') or '.'} [tier={h['depth_tier']}]: {h['content'][:160]}..." for h in hits) if hits else "  • Nessun match FTS5 specifico."
             self._append_step(
                 session_id,
                 "tool_call",
@@ -2082,11 +2218,32 @@ class PiAgentManager:
                     reserve_output_tokens=2048,
                 )
                 compact_ctx = fitted_local["fitted_context"]
-                is_fu = bool((self.sessions.get(session_id) or {}).get("is_follow_up"))
+                sess_obj = self.sessions.get(session_id) or {}
+                is_fu = bool(sess_obj.get("is_follow_up"))
+                ref_ctx = self.resolve_prompt_mentions(ctx, goal)
+                prior_ctx = ""
+                if is_fu:
+                    orig_goal = str(sess_obj.get("goal") or "").strip()
+                    prev_steps = [
+                        st
+                        for st in (sess_obj.get("steps") or [])
+                        if st.get("kind") in {"tool_result", "assistant", "user_turn"}
+                    ][-6:]
+                    step_lines = [
+                        f"- [{st.get('kind')}] {st.get('title')}: {str(st.get('detail') or '')[:140]}"
+                        for st in prev_steps
+                    ]
+                    prior_ctx = (
+                        (f"Original Task Goal: {orig_goal}\n" if orig_goal else "")
+                        + ("\n".join(step_lines) if step_lines else "")
+                    )[:1200]
+                if ref_ctx:
+                    prior_ctx = (prior_ctx + "\n\n" + ref_ctx).strip()[:1800]
                 local_prompt = build_agent_prompt(
                     goal,
                     workspace=str(self.repo_root),
                     is_follow_up=is_fu,
+                    prior_context=prior_ctx,
                     attachments=att_block,
                     wiki_context=compact_ctx,
                     lang=detect_language(goal),
@@ -2105,13 +2262,35 @@ class PiAgentManager:
                 executed_steps.extend(list(pi_res.get("executed_steps") or []) if pi_res else [])
                 used_tool_names = {str((st.get("meta") or {}).get("tool") or "").lower() for st in executed_steps}
                 goal_low = goal.lower()
-                if any(k in goal_low for k in ("edit", "write", "modifica", "aggiungi")) and not (used_tool_names & {"edit", "write"}):
+                if any(k in goal_low for k in ("edit", "write", "modifica", "aggiungi", "scrivi", "crea ", "salva", "genera", "prepara")) and not (used_tool_names & {"edit", "write"}):
                     self._append_step(
                         session_id,
                         "system",
-                        "⚠️ Anti-Hallucination Guard: nessuna modifica file (`edit`/`write`) eseguita dai tool reali.",
+                        "⚠️ Anti-Hallucination Guard: nessuna modifica file (`edit`/`write`) eseguita — avvio passata automatica Implementer.",
                         f"Tool chiamati: {sorted(used_tool_names) or ['nessuno']}",
                     )
+                    if self.pi_runner is None and not stop_ev.is_set() and exit_reason not in {"idle_timeout", "hard_timeout", "stopped"}:
+                        retry_prompt = build_agent_prompt(
+                            f"You stopped after only inspecting without calling `write` or `edit`. Immediately call `write` now to create the file required for: {goal}",
+                            workspace=str(self.repo_root),
+                            is_follow_up=True,
+                            prior_context=str((pi_res or {}).get("final_text") or "")[:600],
+                            lang=detect_language(goal),
+                        )
+                        retry_res = self._run_pi_local_loop(
+                            session_id=session_id,
+                            prompt=retry_prompt,
+                            model_id=impl_model or resolved_model,
+                            max_loops=min(max_loops, 3),
+                            proc_key=f"{session_id}:{run_id}:impl-retry",
+                            stop_event=stop_ev,
+                            effort=eff,
+                            role="Implementer",
+                        )
+                        if retry_res:
+                            executed_steps.extend(list(retry_res.get("executed_steps") or []))
+                            if retry_res.get("final_text"):
+                                pi_res["final_text"] = retry_res["final_text"]
                 usage = (pi_res or {}).get("usage") or {}
                 in_tok = int(usage.get("input_tokens") or 0)
                 out_tok = int(usage.get("output_tokens") or 0)
@@ -2154,6 +2333,100 @@ class PiAgentManager:
                         self.rename_session(session_id, refined)
                 except Exception:  # noqa: BLE001
                     pass
+
+            def _extract_written_paths(steps_list: list[dict[str, Any]]) -> list[str]:
+                seen: list[str] = []
+                for st in steps_list:
+                    meta = st.get("meta") or {}
+                    if str(meta.get("tool") or "").lower() in {"write", "edit"} and meta.get("path"):
+                        p = str(meta["path"]).strip()
+                        if p and p not in seen:
+                            seen.append(p)
+                return seen
+
+            def _verify_paths(paths: list[str]) -> tuple[bool, list[str]]:
+                reports: list[str] = []
+                all_ok = True
+                for raw_p in paths:
+                    p = Path(raw_p)
+                    if not p.is_absolute():
+                        p = (self.repo_root / p).resolve()
+                    if not p.exists():
+                        continue
+                    suf = p.suffix.lower()
+                    if suf == ".py":
+                        r = subprocess.run([sys.executable, "-m", "py_compile", str(p)], capture_output=True, text=True, timeout=15)
+                        if r.returncode == 0:
+                            reports.append(f"✓ {p.name}: py_compile OK")
+                        else:
+                            all_ok = False
+                            reports.append(f"✗ {p.name}: {(r.stderr or r.stdout)[:240]}")
+                    elif suf == ".js" and shutil.which("node"):
+                        r = subprocess.run(["node", "--check", str(p)], capture_output=True, text=True, timeout=15)
+                        if r.returncode == 0:
+                            reports.append(f"✓ {p.name}: node --check OK")
+                        else:
+                            all_ok = False
+                            reports.append(f"✗ {p.name}: {(r.stderr or r.stdout)[:240]}")
+                    elif suf in {".html", ".htm"} and shutil.which("node"):
+                        html_txt = p.read_text(encoding="utf-8", errors="ignore")
+                        scripts = re.findall(r"<script[^>]*>([\s\S]*?)</script>", html_txt, flags=re.IGNORECASE)
+                        if not scripts:
+                            reports.append(f"✓ {p.name}: HTML valido ({len(html_txt)} bytes)")
+                        else:
+                            js_blob = "\n;\n".join(scripts)
+                            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as tf_js:
+                                tf_js.write(js_blob)
+                                tmp_js_path = tf_js.name
+                            try:
+                                r = subprocess.run(["node", "--check", tmp_js_path], capture_output=True, text=True, timeout=15)
+                                if r.returncode == 0:
+                                    reports.append(f"✓ {p.name}: HTML + {len(scripts)} script JS validi (node --check OK)")
+                                else:
+                                    all_ok = False
+                                    reports.append(f"✗ {p.name} (<script>): {(r.stderr or r.stdout)[:240]}")
+                            finally:
+                                Path(tmp_js_path).unlink(missing_ok=True)
+                return all_ok, reports
+
+            written_paths = _extract_written_paths(executed_steps)
+            if written_paths and auto_loop is not False and not stop_ev.is_set() and self.pi_runner is None:
+                ok_ver, ver_reports = _verify_paths(written_paths)
+                self._append_step(
+                    session_id,
+                    "tool_result",
+                    "🔍 Loop Verifica & Test Automatico" + (" (OK)" if ok_ver else " (ERRORI RILEVATI)"),
+                    "\n".join(ver_reports) or "Nessun controllo sintassi applicabile.",
+                )
+                if not ok_ver and not stop_ev.is_set():
+                    fix_prompt = build_agent_prompt(
+                        f"Fix the following verification errors found in files for task '{goal}':\n" + "\n".join(ver_reports),
+                        workspace=str(self.repo_root),
+                        is_follow_up=True,
+                        prior_context="\n".join(ver_reports),
+                        lang=detect_language(goal),
+                    )
+                    fix_res = self._run_pi_local_loop(
+                        session_id=session_id,
+                        prompt=fix_prompt,
+                        model_id=rev_model or resolved_model,
+                        max_loops=min(max_loops, 3),
+                        proc_key=f"{session_id}:verify-fix",
+                        stop_event=stop_ev,
+                        effort=eff,
+                        role="Reviewer",
+                    )
+                    if fix_res:
+                        executed_steps.extend(list(fix_res.get("executed_steps") or []))
+                        ok_ver2, ver_reports2 = _verify_paths(_extract_written_paths(executed_steps) or written_paths)
+                        self._append_step(
+                            session_id,
+                            "tool_result",
+                            "🔁 Re-Verifica Post-Fix" + (" (OK)" if ok_ver2 else " (FAIL)"),
+                            "\n".join(ver_reports2),
+                        )
+                        if fix_res.get("final_text"):
+                            pi_output_text = str(fix_res["final_text"])
 
             final_run_status = "stopped" if stop_ev.is_set() else "completed"
             elapsed_sec = self._record_run_finish(
@@ -2313,6 +2586,40 @@ def resolve_ui_asset(url_path: str) -> Optional[tuple[bytes, str]]:
     return (candidate.read_bytes(), mime)
 
 
+def resolve_static_dir_asset(
+    repo_root: Path, url_path: str, prefix: str, folder: str
+) -> Optional[tuple[bytes, str]]:
+    """Safely resolves static assets under `prefix` -> `repo_root/folder` without path traversal."""
+    if not url_path.startswith(prefix):
+        return None
+    root = (repo_root / folder).resolve()
+    if not root.exists():
+        return None
+    rel = url_path[len(prefix):].lstrip("/")
+    if ".." in Path(rel).parts:
+        return None
+    candidate = (root / rel).resolve() if rel else root
+    if candidate.is_dir():
+        candidate = (candidate / "index.html").resolve()
+    try:
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            return None
+    except ValueError:
+        return None
+    mime = _UI_MIME_TYPES.get(candidate.suffix.lower(), "application/octet-stream")
+    return (candidate.read_bytes(), mime)
+
+
+def resolve_examples_asset(repo_root: Path, url_path: str) -> Optional[tuple[bytes, str]]:
+    """Safely resolves static example/game assets under `/examples/` without allowing path traversal."""
+    return resolve_static_dir_asset(repo_root, url_path, "/examples/", "examples")
+
+
+def resolve_html_asset(repo_root: Path, url_path: str) -> Optional[tuple[bytes, str]]:
+    """Safely resolves static presentation & dashboard pages under `/html/`."""
+    return resolve_static_dir_asset(repo_root, url_path, "/html/", "html")
+
+
 class CorticalLiveService:
     """Holds shared state for the live Cortical Mission Control HTTP, MCP, Memory, `pi` Agent & Voice server."""
 
@@ -2357,6 +2664,7 @@ class CorticalLiveService:
         skills_dir = agents_skills if (agents_skills.exists() or not legacy_skills.exists()) else legacy_skills
         self.skill_hub = CorticalSkillHub(self.wiki_db, skills_dir, llm_fn=_reflex_for_role("skill_compiler"))
         self.mcp_server = CorticalWikiMCPServer(wiki_db_path)
+        self.remote_gateway = CorticalRemoteGateway(self.wiki_db)
 
         self.audio_responses_enabled: bool = True
         self._current_chat_scope = threading.local()
@@ -2365,6 +2673,9 @@ class CorticalLiveService:
         def _reflex_with_context(prompt: str) -> str:
             active_scope = getattr(self._current_chat_scope, "value", "chat") or "chat"
             extra_ctx, hist = build_chat_context(self.wiki_db, self.memory_curator, prompt, scope_id=active_scope)
+            mention_ctx = self.agent_mgr.resolve_prompt_mentions(AccessContext(), prompt)
+            if mention_ctx:
+                extra_ctx = (extra_ctx + "\n\n=== TASK/CHAT MENZIONATI (@) ===\n" + mention_ctx).strip()
             orch_cfg = self.wiki_db.get_concept_config(AccessContext(), "concept:orchestratore-multi-agente")
             scope_prefs = ((orch_cfg.get("scope_preferences") or {}).get(active_scope)) or {}
             role_id = "chat" if active_scope == "chat" else "coordinator"
@@ -2686,8 +2997,423 @@ class CorticalLiveService:
         path: str,
         query: dict[str, list[str]],
         body: dict[str, Any],
+        *,
+        headers: Optional[dict[str, str]] = None,
+        client_ip: str = "127.0.0.1",
     ) -> tuple[int, dict[str, Any]]:
         ctx = AccessContext()
+        auth_ctx = self.remote_gateway.check_request_auth(headers or {}, query or {}, client_ip, path)
+        if not auth_ctx.get("authorized"):
+            return (
+                HTTPStatus.UNAUTHORIZED,
+                {
+                    "error": auth_ctx.get("reason", "Authentication required"),
+                    "auth_required": True,
+                    "login_url": "/auth/login",
+                },
+            )
+
+        if method == "GET" and path == "/api/auth/status":
+            st = self.remote_gateway.get_status(include_secret=False)
+            return (
+                HTTPStatus.OK,
+                {
+                    "authenticated": bool(auth_ctx.get("method") not in {"none", "exempt_route"}),
+                    "auth_method": auth_ctx.get("method"),
+                    "auth_enabled": st["auth_enabled"],
+                    "allow_localhost_bypass": st["allow_localhost_bypass"],
+                    "is_remote": bool(auth_ctx.get("is_remote")),
+                    "user": auth_ctx.get("user"),
+                    "max_users": st["max_users"],
+                    "registered_users_count": st["registered_users_count"],
+                    "public_url": st["public_url"],
+                },
+            )
+
+        if method == "POST" and path == "/api/auth/login":
+            try:
+                res = self.remote_gateway.login(
+                    email_addr=str(body.get("email") or ""),
+                    password=str(body.get("password") or ""),
+                    api_key=str(body.get("api_key") or ""),
+                    user_agent=(headers or {}).get("User-Agent", "") if headers else "",
+                    remote_ip=client_ip,
+                )
+            except PermissionError as exc:
+                return (HTTPStatus.UNAUTHORIZED, {"ok": False, "error": str(exc)})
+            sess_tok = str(res.get("session_token") or "")
+            if sess_tok:
+                res["_set_cookies"] = [
+                    f"cortical_session={urllib.parse.quote(sess_tok)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                ]
+            return (HTTPStatus.OK, res)
+
+        if method == "POST" and path == "/api/auth/logout":
+            norm_hdrs = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+            cookie_str = norm_hdrs.get("cookie", "")
+            sess_tok = ""
+            for chunk in cookie_str.split(";"):
+                if chunk.strip().startswith("cortical_session="):
+                    sess_tok = urllib.parse.unquote(chunk.strip().split("=", 1)[1])
+            self.remote_gateway.logout(sess_tok)
+            return (
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "_set_cookies": [
+                        "cortical_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+                        "cortical_key=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+                    ],
+                },
+            )
+
+        if method == "POST" and path == "/api/auth/register":
+            try:
+                inv = self.remote_gateway.register_or_invite_user(
+                    email=str(body.get("email") or ""),
+                    display_name=str(body.get("display_name") or ""),
+                    role=str(body.get("role") or "user"),
+                )
+                return (HTTPStatus.OK, inv)
+            except PermissionError as exc:
+                return (HTTPStatus.FORBIDDEN, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+
+        if method == "GET" and path == "/api/portability/volumes":
+            from .portability import list_usb_volumes
+
+            return (HTTPStatus.OK, {"volumes": list_usb_volumes()})
+
+        if method == "GET" and path == "/api/workspace/diff":
+            try:
+                st_cmd = subprocess.run(["git", "status", "-s"], cwd=str(self.repo_root), capture_output=True, text=True, timeout=5)
+                df_cmd = subprocess.run(["git", "diff", "--stat"], cwd=str(self.repo_root), capture_output=True, text=True, timeout=5)
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "status": (st_cmd.stdout or "").strip(),
+                        "diff_stat": (df_cmd.stdout or "").strip(),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.OK, {"ok": False, "error": str(exc), "status": "", "diff_stat": ""})
+
+        if method == "POST" and path == "/api/harness/command":
+            raw_cmd = str(body.get("command") or "").strip()
+            scope_id = str(body.get("scope_id") or "chat").strip() or "chat"
+            parts = raw_cmd.split(None, 1)
+            cmd_name = parts[0].lower() if parts else ""
+            cmd_arg = parts[1].strip() if len(parts) > 1 else ""
+            if cmd_name == "/diff":
+                _, diff_data = self.handle_api("GET", "/api/workspace/diff", {}, {})
+                msg = (
+                    "### Workspace `git status` & `diff --stat`\n"
+                    f"```\n{diff_data.get('status') or '(pulito)'}\n```\n"
+                    + (f"```\n{diff_data.get('diff_stat')}\n```" if diff_data.get("diff_stat") else "")
+                )
+                return (HTTPStatus.OK, {"ok": True, "command": "/diff", "output": msg})
+            if cmd_name == "/test":
+                py_bin = str(self.repo_root / ".venv" / "bin" / "python")
+                if not Path(py_bin).exists():
+                    py_bin = sys.executable
+                env = dict(os.environ)
+                env["PYTHONPATH"] = str(self.repo_root / "src")
+                target_arg = cmd_arg or "discover -s tests -q"
+                res = subprocess.run(
+                    [py_bin, "-m", "unittest", *target_arg.split()],
+                    cwd=str(self.repo_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()[-1800:]
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": res.returncode == 0,
+                        "command": "/test",
+                        "exit_code": res.returncode,
+                        "output": f"### Test Runner (exit {res.returncode})\n```\n{out}\n```",
+                    },
+                )
+            if cmd_name == "/compact":
+                recent = self.memory_curator.get_recent_chat(scope_id=scope_id, limit=20)
+                self.memory_curator.add_task_working_note(
+                    scope_id, f"[COMPACT] Sintesi di {len(recent)} messaggi recenti in {scope_id}."
+                )
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "command": "/compact",
+                        "messages_compacted": len(recent),
+                        "output": f"🧹 Contesto di `{scope_id}` compattato ({len(recent)} messaggi indicizzati nella memoria 3+1).",
+                    },
+                )
+            if cmd_name == "/help":
+                help_txt = (
+                    "### Comandi Harness `/` & Menzioni `@`\n"
+                    "- `/skill <nome>` — Importa/allega subito una Skill al contesto attivo\n"
+                    "- `/task <obiettivo>` — Avvia un Task locale\n"
+                    "- `/loop <obiettivo>` — Forza Swarm Parallelo + Loop Verifica & Test\n"
+                    "- `/plan <obiettivo>` — Solo pianificazione architetturale (Analyst)\n"
+                    "- `/review` — Verifica codice e test sui file del task/workspace\n"
+                    "- `/test` — Esegue la suite unitaria `.venv`\n"
+                    "- `/diff` — Mostra `git status -s` & `git diff --stat`\n"
+                    "- `/compact` — Compatta il contesto della chat/task attivo\n"
+                    "- `/export` — Esporta bundle `.tar.gz` (USB / backup)\n"
+                    "- `@pi-xxxxxx` / `@chat-...` — Menziona un altro Task o Chat importandone contesto e allegati"
+                )
+                return (HTTPStatus.OK, {"ok": True, "command": "/help", "output": help_txt})
+            return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"Unknown harness command: {cmd_name}"})
+
+        if method == "POST" and path == "/api/portability/export":
+            from .portability import export_cortical_bundle
+
+            try:
+                res = export_cortical_bundle(
+                    body.get("output_path") or None,
+                    wiki_db_path=self.wiki_db.db_path,
+                    permissions_db_path=self.perm_gate.db_path,
+                    skills_dir=self.repo_root / ".agents" / "skills",
+                    memory_dir=self.repo_root / ".memory",
+                )
+                return (HTTPStatus.OK, res)
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+
+        if method == "POST" and path == "/api/portability/import":
+            import base64 as _b64
+            import tempfile as _tf
+            from .portability import import_cortical_bundle
+
+            mode = str(body.get("mode") or "merge")
+            archive_path = str(body.get("archive_path") or "").strip()
+            b64_data = str(body.get("archive_base64") or "").strip()
+            tmp_file: Optional[Path] = None
+            try:
+                if b64_data:
+                    raw = _b64.b64decode(b64_data)
+                    with _tf.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tf_obj:
+                        tf_obj.write(raw)
+                        tmp_file = Path(tf_obj.name)
+                    archive_path = str(tmp_file)
+                if not archive_path:
+                    return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": "archive_path or archive_base64 required"})
+                res = import_cortical_bundle(
+                    archive_path,
+                    mode=mode,
+                    wiki_db_path=self.wiki_db.db_path,
+                    permissions_db_path=self.perm_gate.db_path,
+                    skills_dir=self.repo_root / ".agents" / "skills",
+                    memory_dir=self.repo_root / ".memory",
+                )
+                return (HTTPStatus.OK if res.get("ok") else HTTPStatus.BAD_REQUEST, res)
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            finally:
+                if tmp_file is not None:
+                    tmp_file.unlink(missing_ok=True)
+
+        if method == "POST" and path == "/api/auth/setup-password":
+            try:
+                res = self.remote_gateway.setup_password(
+                    token=str(body.get("token") or ""),
+                    new_password=str(body.get("password") or ""),
+                    email_addr=str(body.get("email") or ""),
+                    api_key=str(body.get("api_key") or ""),
+                )
+            except PermissionError as exc:
+                return (HTTPStatus.UNAUTHORIZED, {"ok": False, "error": str(exc)})
+            except (ValueError, KeyError) as exc:
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            sess_tok = str(res.get("session_token") or "")
+            if sess_tok:
+                res["_set_cookies"] = [
+                    f"cortical_session={urllib.parse.quote(sess_tok)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                ]
+            return (HTTPStatus.OK, res)
+
+        if method == "GET" and path == "/api/gateway/status":
+            return (HTTPStatus.OK, self.remote_gateway.get_status(include_secret=True))
+
+        if method == "POST" and path == "/api/gateway/configure":
+            try:
+                st = self.remote_gateway.configure(body or {})
+                return (HTTPStatus.OK, {"ok": True, **st})
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+
+        if method == "POST" and path == "/api/gateway/expose":
+            action = str(body.get("action") or "start").lower()
+            if action == "stop":
+                return (HTTPStatus.OK, self.remote_gateway.stop_tunnel())
+            provider = str(body.get("provider") or "auto")
+            force = bool(body.get("force", action == "restart"))
+            t_res = self.remote_gateway.start_tunnel(provider=provider, force=force)
+            if bool(body.get("update_duckdns")) or body.get("duckdns_token"):
+                t_res["duckdns"] = self.remote_gateway.update_duckdns(
+                    domain=body.get("duckdns_domain"),
+                    token=body.get("duckdns_token"),
+                )
+            t_res["status"] = self.remote_gateway.get_status(include_secret=True)
+            return (HTTPStatus.OK if t_res.get("ok") else HTTPStatus.BAD_GATEWAY, t_res)
+
+        if method == "POST" and path == "/api/gateway/invite":
+            email_addr = str(body.get("email") or "ccancellieri@hotmail.com").strip().lower()
+            try:
+                res = self.remote_gateway.send_access_email(
+                    recipient_email=email_addr,
+                    base_public_url=body.get("public_url") or None,
+                    telegram_bot_token=str(body.get("telegram_bot_token") or ""),
+                    telegram_chat_id=str(body.get("telegram_chat_id") or ""),
+                )
+                return (HTTPStatus.OK, res)
+            except PermissionError as exc:
+                return (HTTPStatus.FORBIDDEN, {"ok": False, "error": str(exc)})
+            except ValueError as exc:
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+
+        if method == "GET" and path == "/api/portability/volumes":
+            from .portability import list_usb_volumes
+
+            return (HTTPStatus.OK, {"volumes": list_usb_volumes()})
+
+        if method == "GET" and path == "/api/workspace/diff":
+            try:
+                st_cmd = subprocess.run(["git", "status", "-s"], cwd=str(self.repo_root), capture_output=True, text=True, timeout=5)
+                df_cmd = subprocess.run(["git", "diff", "--stat"], cwd=str(self.repo_root), capture_output=True, text=True, timeout=5)
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "status": (st_cmd.stdout or "").strip(),
+                        "diff_stat": (df_cmd.stdout or "").strip(),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.OK, {"ok": False, "error": str(exc), "status": "", "diff_stat": ""})
+
+        if method == "POST" and path == "/api/harness/command":
+            raw_cmd = str(body.get("command") or "").strip()
+            scope_id = str(body.get("scope_id") or "chat").strip() or "chat"
+            parts = raw_cmd.split(None, 1)
+            cmd_name = parts[0].lower() if parts else ""
+            cmd_arg = parts[1].strip() if len(parts) > 1 else ""
+            if cmd_name == "/diff":
+                _, diff_data = self.handle_api("GET", "/api/workspace/diff", {}, {})
+                msg = (
+                    "### Workspace `git status` & `diff --stat`\n"
+                    f"```\n{diff_data.get('status') or '(pulito)'}\n```\n"
+                    + (f"```\n{diff_data.get('diff_stat')}\n```" if diff_data.get("diff_stat") else "")
+                )
+                return (HTTPStatus.OK, {"ok": True, "command": "/diff", "output": msg})
+            if cmd_name == "/test":
+                py_bin = str(self.repo_root / ".venv" / "bin" / "python")
+                if not Path(py_bin).exists():
+                    py_bin = sys.executable
+                env = dict(os.environ)
+                env["PYTHONPATH"] = str(self.repo_root / "src")
+                target_arg = cmd_arg or "discover -s tests -q"
+                res = subprocess.run(
+                    [py_bin, "-m", "unittest", *target_arg.split()],
+                    cwd=str(self.repo_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()[-1800:]
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": res.returncode == 0,
+                        "command": "/test",
+                        "exit_code": res.returncode,
+                        "output": f"### Test Runner (exit {res.returncode})\n```\n{out}\n```",
+                    },
+                )
+            if cmd_name == "/compact":
+                recent = self.memory_curator.get_recent_chat(scope_id=scope_id, limit=20)
+                self.memory_curator.add_task_working_note(
+                    scope_id, f"[COMPACT] Sintesi di {len(recent)} messaggi recenti in {scope_id}."
+                )
+                return (
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "command": "/compact",
+                        "messages_compacted": len(recent),
+                        "output": f"🧹 Contesto di `{scope_id}` compattato ({len(recent)} messaggi indicizzati nella memoria 3+1).",
+                    },
+                )
+            if cmd_name == "/help":
+                help_txt = (
+                    "### Comandi Harness `/` & Menzioni `@`\n"
+                    "- `/skill <nome>` — Importa/allega subito una Skill al contesto attivo\n"
+                    "- `/task <obiettivo>` — Avvia un Task locale\n"
+                    "- `/loop <obiettivo>` — Forza Swarm Parallelo + Loop Verifica & Test\n"
+                    "- `/plan <obiettivo>` — Solo pianificazione architetturale (Analyst)\n"
+                    "- `/review` — Verifica codice e test sui file del task/workspace\n"
+                    "- `/test` — Esegue la suite unitaria `.venv`\n"
+                    "- `/diff` — Mostra `git status -s` & `git diff --stat`\n"
+                    "- `/compact` — Compatta il contesto della chat/task attivo\n"
+                    "- `/export` — Esporta bundle `.tar.gz` (USB / backup)\n"
+                    "- `@pi-xxxxxx` / `@chat-...` — Menziona un altro Task o Chat importandone contesto e allegati"
+                )
+                return (HTTPStatus.OK, {"ok": True, "command": "/help", "output": help_txt})
+            return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"Unknown harness command: {cmd_name}"})
+
+        if method == "POST" and path == "/api/portability/export":
+            from .portability import export_cortical_bundle
+
+            try:
+                res = export_cortical_bundle(
+                    body.get("output_path") or None,
+                    wiki_db_path=self.wiki_db.db_path,
+                    permissions_db_path=self.perm_gate.db_path,
+                    skills_dir=self.repo_root / ".agents" / "skills",
+                    memory_dir=self.repo_root / ".memory",
+                )
+                return (HTTPStatus.OK, res)
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+
+        if method == "POST" and path == "/api/portability/import":
+            import base64 as _b64
+            import tempfile as _tf
+            from .portability import import_cortical_bundle
+
+            mode = str(body.get("mode") or "merge")
+            archive_path = str(body.get("archive_path") or "").strip()
+            b64_data = str(body.get("archive_base64") or "").strip()
+            tmp_file: Optional[Path] = None
+            try:
+                if b64_data:
+                    raw = _b64.b64decode(b64_data)
+                    with _tf.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tf_obj:
+                        tf_obj.write(raw)
+                        tmp_file = Path(tf_obj.name)
+                    archive_path = str(tmp_file)
+                if not archive_path:
+                    return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": "archive_path or archive_base64 required"})
+                res = import_cortical_bundle(
+                    archive_path,
+                    mode=mode,
+                    wiki_db_path=self.wiki_db.db_path,
+                    permissions_db_path=self.perm_gate.db_path,
+                    skills_dir=self.repo_root / ".agents" / "skills",
+                    memory_dir=self.repo_root / ".memory",
+                )
+                return (HTTPStatus.OK if res.get("ok") else HTTPStatus.BAD_REQUEST, res)
+            except Exception as exc:  # noqa: BLE001
+                return (HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            finally:
+                if tmp_file is not None:
+                    tmp_file.unlink(missing_ok=True)
 
         if method == "GET" and path == "/health":
             tts_engine = (
@@ -2709,6 +3435,7 @@ class CorticalLiveService:
                     "reuse_existing_endpoint": self.model_rec.reuse_existing_endpoint,
                     "active_base_url": self.model_rec.active_base_url,
                     "discovered_endpoints": self.hw_profile.discovered_endpoints,
+                    "memory": __import__("cortical.context_window", fromlist=["get_system_memory_snapshot"]).get_system_memory_snapshot(),
                 },
             )
 
@@ -2936,8 +3663,40 @@ class CorticalLiveService:
             return (HTTPStatus.OK, sess)
 
         if method == "GET" and path == "/api/tokens/summary":
+            from .token_analytics import build_token_report
+
             ep_id = (query.get("episode_id") or [None])[0]
-            return (HTTPStatus.OK, self.wiki_db.get_token_usage_summary(ctx, episode_id=ep_id))
+            conv_id = (query.get("conversation_id") or [None])[0]
+            summary = self.wiki_db.get_token_usage_summary(ctx, episode_id=ep_id)
+            report = build_token_report(
+                self.wiki_db,
+                ctx=ctx,
+                episode_id=ep_id,
+                conversation_id=conv_id,
+                include_narrative=False,
+            )
+            summary["global_stats"] = report["global_stats"]
+            summary["roi"] = report["global_stats"]["roi"]
+            summary["remote_summary"] = report["global_stats"]["remote"]
+            return (HTTPStatus.OK, summary)
+
+        if method == "GET" and path == "/api/tokens/report":
+            from .token_analytics import build_token_report, format_token_report_markdown
+
+            ep_id = (query.get("episode_id") or [None])[0]
+            conv_id = (query.get("conversation_id") or [None])[0]
+            narrative = str((query.get("narrative") or ["0"])[0]).lower() in {"1", "true", "yes"}
+            fmt = str((query.get("format") or ["json"])[0]).lower()
+            report = build_token_report(
+                self.wiki_db,
+                ctx=ctx,
+                episode_id=ep_id,
+                conversation_id=conv_id,
+                include_narrative=narrative,
+            )
+            if fmt == "markdown":
+                report["markdown"] = format_token_report_markdown(report)
+            return (HTTPStatus.OK, report)
 
         if method == "POST" and path == "/api/tasks/rename":
             ep_id = str(body.get("episode_id") or body.get("session_id") or "").strip()
@@ -3057,6 +3816,36 @@ class CorticalLiveService:
             force_stop = bool(body.get("force_stop", False))
             return (HTTPStatus.OK, duck_native_tts(force_stop=force_stop))
 
+        if method == "POST" and path == "/api/voice/utterance-complete":
+            text = str(body.get("text") or "").strip()
+            words = re.findall(r"[^\s]+", text.lower())
+            trailing_incomplete = {
+                "e", "ed", "o", "ma", "per", "con", "su", "in", "di", "da", "a", "tra", "fra",
+                "che", "cui", "dove", "quando", "come", "allora", "poi", "oppure", "perche",
+                "perché", "quindi", "mentre", "se", "il", "lo", "la", "i", "gli", "le", "un",
+                "uno", "una", "and", "or", "with", "for", "to", "that", "which", "then",
+            }
+            quick_complete = {"basta", "stop", "fermati", "silenzio", "ciao", "grazie", "continua", "procedi", "ok", "si", "sì"}
+            if not words:
+                return (HTTPStatus.OK, {"complete": False, "reason": "empty"})
+            if len(words) == 1 and words[0].strip(".,!?") in quick_complete:
+                return (HTTPStatus.OK, {"complete": True, "reason": "quick_command"})
+            last_tok = words[-1].strip(".,!?")
+            if last_tok in trailing_incomplete or text.endswith(("...", ",")):
+                return (HTTPStatus.OK, {"complete": False, "reason": "trailing_connector"})
+            if len(words) <= 2 and "?" not in text:
+                return (HTTPStatus.OK, {"complete": False, "reason": "too_short_fragment"})
+            # Fast local 1.5b check (<= 1.8s) to detect unfinished thoughts
+            verdict = _query_llm_endpoints(
+                "Reply ONLY with COMPLETE or INCOMPLETE. Decide if the user's spoken request is a finished thought or cut off mid-sentence while thinking.",
+                text[:400],
+                self.model_rec.active_base_url or "http://127.0.0.1:11434/v1",
+                timeout=1.8,
+                preferred_model="qwen2.5:1.5b",
+            )
+            is_incomplete = bool(verdict and "INCOMPLETE" in verdict.upper())
+            return (HTTPStatus.OK, {"complete": not is_incomplete, "reason": "llm" if verdict else "heuristic"})
+
         if method == "GET" and path == "/api/voice/state":
             return (
                 HTTPStatus.OK,
@@ -3099,7 +3888,7 @@ class CorticalLiveService:
                     role_id=str(body.get("id") or ""),
                     label=str(body.get("label") or ""),
                     description=str(body.get("description") or ""),
-                    model=str(body.get("model") or "qwen3.8:27b-iq2_xs"),
+                    model=str(body.get("model") or "qwen3.8:27b-iq2_xxs"),
                     context_window=int(body.get("context_window") or 16384),
                     effort=str(body.get("effort") or "medium"),
                     tools=list(body.get("tools") or []),
@@ -3492,17 +4281,54 @@ def run_live_server(
     perm_db_path: str | Path,
 ) -> None:
     service = CorticalLiveService(wiki_db_path=wiki_db_path, perm_db_path=perm_db_path)
+    service.remote_gateway.local_port = port
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
+            q = urllib.parse.parse_qs(parsed.query)
+            req_headers = dict(self.headers)
+            client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+
+            if parsed.path in {"/auth/login", "/auth/setup-password"}:
+                gw = service.remote_gateway.get_status(include_secret=False)
+                tok = (q.get("token") or [""])[0]
+                eml = (q.get("email") or ["ccancellieri@hotmail.com"])[0]
+                page_html = render_auth_portal_html(
+                    mode="setup" if parsed.path == "/auth/setup-password" else "login",
+                    token=tok,
+                    email_hint=eml,
+                    public_url=str(gw.get("public_url") or ""),
+                    max_users=int(gw.get("max_users") or 1),
+                    registered_count=int(gw.get("registered_users_count") or 1),
+                ).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page_html)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(page_html)
+                return
+
             if parsed.path in {"/", "/index.html"}:
+                auth_res = service.remote_gateway.check_request_auth(req_headers, q, client_ip, parsed.path)
+                if not auth_res.get("authorized"):
+                    self.send_response(HTTPStatus.FOUND)
+                    self.send_header("Location", "/auth/login")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
                 html_path = Path(__file__).with_name("dashboard.html")
                 data = html_path.read_bytes() if html_path.is_file() else DASHBOARD_HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
+                if auth_res.get("set_key_cookie"):
+                    self.send_header(
+                        "Set-Cookie",
+                        f"cortical_key={urllib.parse.quote(str(auth_res['set_key_cookie']))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000",
+                    )
                 self.end_headers()
                 self.wfile.write(data)
                 return
@@ -3521,8 +4347,46 @@ def run_live_server(
                 self.wfile.write(asset_bytes)
                 return
 
+            if parsed.path.startswith("/examples/") or parsed.path.startswith("/html/"):
+                asset = (
+                    resolve_examples_asset(service.repo_root, parsed.path)
+                    if parsed.path.startswith("/examples/")
+                    else resolve_html_asset(service.repo_root, parsed.path)
+                )
+                if not asset:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Static asset not found"})
+                    return
+                asset_bytes, mime = asset
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(asset_bytes)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(asset_bytes)
+                return
+
+            if parsed.path == "/api/portability/download":
+                from .portability import export_cortical_bundle
+
+                exp = export_cortical_bundle(
+                    None,
+                    wiki_db_path=service.wiki_db.db_path,
+                    permissions_db_path=service.perm_gate.db_path,
+                    skills_dir=service.repo_root / ".agents" / "skills",
+                    memory_dir=service.repo_root / ".memory",
+                )
+                arc_path = Path(exp["archive_path"])
+                arc_bytes = arc_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/gzip")
+                self.send_header("Content-Disposition", f'attachment; filename="{arc_path.name}"')
+                self.send_header("Content-Length", str(len(arc_bytes)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(arc_bytes)
+                return
+
             if parsed.path == "/api/tts/audio":
-                q = urllib.parse.parse_qs(parsed.query)
                 aid = (q.get("id") or [""])[0]
                 item = _TTS_AUDIO_CACHE.get(aid)
                 if not item:
@@ -3537,9 +4401,10 @@ def run_live_server(
                 self.wfile.write(audio_bytes)
                 return
 
-            q = urllib.parse.parse_qs(parsed.query)
             try:
-                status, payload = service.handle_api("GET", parsed.path, q, {})
+                status, payload = service.handle_api(
+                    "GET", parsed.path, q, {}, headers=req_headers, client_ip=client_ip
+                )
                 self._send_json(status, payload)
             except KeyError as exc:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -3548,12 +4413,16 @@ def run_live_server(
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
+            req_headers = dict(self.headers)
+            client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
             try:
                 body = json.loads(raw) if raw.strip() else {}
                 q = urllib.parse.parse_qs(parsed.query)
-                status, payload = service.handle_api("POST", parsed.path, q, body)
+                status, payload = service.handle_api(
+                    "POST", parsed.path, q, body, headers=req_headers, client_ip=client_ip
+                )
                 self._send_json(status, payload)
             except KeyError as exc:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -3561,13 +4430,24 @@ def run_live_server(
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            data = json.dumps(payload, indent=2).encode("utf-8")
+            out_payload = dict(payload) if isinstance(payload, dict) else payload
+            cookies: list[str] = []
+            if isinstance(out_payload, dict) and "_set_cookies" in out_payload:
+                raw_cookies = out_payload.pop("_set_cookies")
+                if isinstance(raw_cookies, list):
+                    cookies = [str(c) for c in raw_cookies if c]
+            data = json.dumps(out_payload, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
+            for c in cookies:
+                self.send_header("Set-Cookie", c)
+            try:
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return

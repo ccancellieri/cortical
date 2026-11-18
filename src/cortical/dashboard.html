@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Cortical Mission Control — Second Brain &amp; Multi-Agent Workspace</title>
-  <link rel="stylesheet" href="/ui/styles/theme.css" />
-  <link rel="stylesheet" href="/ui/styles/layout.css" />
+  <link rel="stylesheet" href="/ui/styles/theme.css?v=20261114b" />
+  <link rel="stylesheet" href="/ui/styles/layout.css?v=20261116c" />
 </head>
 <body>
   <div id="global-tooltip" class="floating-tooltip"></div>
@@ -45,14 +45,14 @@
 
     <nav class="main-nav" aria-label="Viste principali">
       <div class="nav-tab active" id="main-tab-stream">
-        <span id="lbl-tab-stream">💬 Workspace</span>
+        <span id="lbl-tab-stream" data-i18n="nav.workspace">💬 Workspace</span>
       </div>
       <div class="nav-tab" id="main-tab-graph">
-        <span id="lbl-tab-graph">🧠 Concetti</span>
+        <span id="lbl-tab-graph" data-i18n="nav.concepts">🧠 Concetti</span>
         <span id="nav-graph-count" style="font-family:var(--mono); font-size:0.7rem; opacity:0.8;"></span>
       </div>
       <div class="nav-tab" id="main-tab-brain">
-        <span id="lbl-tab-brain">⚙️ Studio &amp; Sicurezza</span>
+        <span id="lbl-tab-brain" data-i18n="nav.studio">⚙️ Studio &amp; Sicurezza</span>
       </div>
     </nav>
 
@@ -70,6 +70,8 @@
         <option value="dictate">📝 Dettatura</option>
       </select>
       <button type="button" class="btn btn-ghost btn-sm" id="btn-always-on" title="Microfono continuo con cancellazione eco">🎤 Mic</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="btn-token-report" title="Token Report Locale + Cloud ROI (0 token remoti)">📊 Token</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="gateway-status-pill" title="Accesso Remoto, Chiave Gateway &amp; Account">🌐 Gateway (1/1)</button>
       <button type="button" class="btn btn-danger btn-sm" id="btn-stop-top" title="Ferma voce e agenti">🛑 Stop</button>
       <button type="button" class="btn btn-ghost btn-icon" id="btn-options-top" title="Impostazioni Voce, Lingua & Guida">⚙️</button>
 
@@ -113,14 +115,14 @@
     <aside class="sidebar">
       <div class="sidebar-actions">
         <div class="sidebar-btn-row">
-          <button type="button" class="btn btn-ghost" id="btn-new-chat">+ 💬 Chat</button>
-          <button type="button" class="btn" id="btn-new-task">+ 🤖 Task</button>
+          <button type="button" class="btn btn-ghost" id="btn-new-chat" data-i18n="sidebar.newChat">+ 💬 Chat</button>
+          <button type="button" class="btn" id="btn-new-task" data-i18n="sidebar.newTask">+ 🤖 Task</button>
         </div>
-        <input id="task-search-input" placeholder="🔍 Cerca chat o task..." />
+        <input id="task-search-input" data-i18n-placeholder="sidebar.searchPlaceholder" placeholder="🔍 Cerca chat o task..." />
         <div class="sidebar-filter-row" id="sidebar-filter-pills">
-          <span class="pill active" data-sidebar-filter="all">Tutti</span>
-          <span class="pill" data-sidebar-filter="chat">💬 Chat</span>
-          <span class="pill" data-sidebar-filter="task">🤖 Task</span>
+          <span class="pill active" data-sidebar-filter="all" data-i18n="sidebar.filterAll">Tutti</span>
+          <span class="pill" data-sidebar-filter="chat" data-i18n="sidebar.filterChats">💬 Chat</span>
+          <span class="pill" data-sidebar-filter="task" data-i18n="sidebar.filterTasks">🤖 Task</span>
         </div>
       </div>
       <div class="sidebar-list" id="agent-roster">
@@ -153,13 +155,17 @@
 
         <div class="task-banner" id="active-task-banner"></div>
 
-        <div class="stream-scroll" id="stream-scroll-area">
-          <div class="stream-container" id="agent-stream"></div>
+        <div class="stage-split-body" id="stage-split-body">
+          <aside class="task-macro-panel" id="task-macro-panel" style="display:none;"></aside>
+          <div class="stream-scroll" id="stream-scroll-area">
+            <div class="stream-container" id="agent-stream"></div>
+          </div>
         </div>
 
         <!-- UNIFIED MODERN COMPOSER WITH MULTI-WAY ATTACHMENTS & DRAG/DROP -->
         <div class="composer-wrap">
           <div class="composer-card" id="composer-card">
+            <div class="composer-suggest-popover" id="composer-suggest-popover"></div>
             <div class="context-strip">
               <div class="context-chips" id="composer-context-chips"></div>
               <div class="attach-controls">
@@ -187,6 +193,9 @@
                   <option value="high">Mem: High (L3)</option>
                   <option value="max">Mem: Max (+1)</option>
                 </select>
+                <label title="Esegue automaticamente verifica sintassi/test e fix in loop dopo ogni modifica" style="display:flex; align-items:center; gap:3px; font-size:0.72rem; color:var(--text-soft); cursor:pointer;">
+                  <input type="checkbox" id="chk-auto-loop" checked /> 🔁 Loop
+                </label>
                 <button type="button" class="btn btn-ghost btn-sm" id="btn-send-task" title="Avvia un Task multi-agente locale su questo prompt">🚀 Task</button>
                 <button type="button" class="btn btn-sm" id="btn-send-auto" title="Invia nella chat o nel task attivo (Invio)">Invia ↑</button>
               </div>
@@ -286,6 +295,7 @@
               <span class="pill" data-studio-tab="mem">📚 Memoria 3+1</span>
               <span class="pill" data-studio-tab="skills">⚡ Skill &amp; Simulatore</span>
               <span class="pill" data-studio-tab="models">🎛️ Modelli &amp; Contesto</span>
+              <span class="pill" data-studio-tab="gateway">🌐 Gateway &amp; Account</span>
             </div>
           </div>
 
@@ -430,6 +440,96 @@
               <div id="model-windows-list"></div>
             </div>
           </div>
+
+          <!-- TAB 5: OPTIONAL REMOTE GATEWAY, KEY & ACCOUNT CAP -->
+          <div id="studio-pane-gateway" class="card-panel" style="display:none; padding:0;">
+            <div class="pane-header">
+              <span>🌐 Gateway Remoto Opzionale, Chiave &amp; Account</span>
+              <div style="display:flex; gap:6px;">
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-gw-refresh">🔄 Aggiorna</button>
+                <button type="button" class="btn btn-sm" id="btn-gw-save">💾 Salva Impostazioni</button>
+              </div>
+            </div>
+            <div class="pane-body">
+              <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-bottom:12px;">
+                <label style="display:flex; align-items:center; gap:8px; font-size:0.8rem; cursor:pointer; padding:8px; border:1px solid var(--border); border-radius:8px;">
+                  <input type="checkbox" id="gw-auth-enabled" checked />
+                  <span>🔐 Proteggi Accessi Remoti (Chiave/Account)</span>
+                </label>
+                <label style="display:flex; align-items:center; gap:8px; font-size:0.8rem; cursor:pointer; padding:8px; border:1px solid var(--border); border-radius:8px;">
+                  <input type="checkbox" id="gw-localhost-bypass" checked />
+                  <span>🏠 Consenti Accesso Diretto da Localhost</span>
+                </label>
+              </div>
+
+              <div style="font-size:0.75rem; font-weight:700; color:var(--muted); margin-bottom:6px;">ESPOSIZIONE INTERNET (TUNNEL HTTPS &amp; DOMINIO)</div>
+              <div style="padding:10px; border:1px solid var(--border); border-radius:8px; margin-bottom:12px; background:rgba(15,23,42,0.45);">
+                <div style="font-size:0.78rem; margin-bottom:6px;">URL Remoto Attivo: <code id="gw-public-url" style="color:var(--accent);">In caricamento...</code></div>
+                <div style="font-size:0.76rem; color:var(--muted); margin-bottom:8px;">Portale Personale GitHub Pages: <a id="gw-portal-url" href="https://ccancellieri.github.io/cortical/" target="_blank" rel="noopener" style="color:var(--accent);">https://ccancellieri.github.io/cortical/</a></div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                  <select id="gw-tunnel-provider" style="font-size:0.76rem;">
+                    <option value="auto" selected>⚡ Auto (Cloudflared / localhost.run / Pinggy)</option>
+                    <option value="localhost.run">SSH localhost.run (gratis, zero account)</option>
+                    <option value="cloudflared">Cloudflare Tunnel</option>
+                    <option value="pinggy">SSH Pinggy</option>
+                  </select>
+                  <button type="button" class="btn btn-sm" id="btn-gw-expose-start">🚀 Apri Tunnel Internet</button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="btn-gw-copy-url">📋 Copia Link 1-Click</button>
+                  <button type="button" class="btn btn-danger btn-sm" id="btn-gw-expose-stop">🛑 Chiudi Tunnel</button>
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+                  <input type="text" id="gw-duckdns-domain" placeholder="Subdominio DuckDNS (es. sovereign-ai)" style="font-size:0.75rem;" />
+                  <input type="password" id="gw-duckdns-token" placeholder="DuckDNS Token (opzionale)" style="font-size:0.75rem;" />
+                </div>
+                <div style="display:grid; grid-template-columns:2fr 80px 1.5fr 1.5fr; gap:6px; margin-top:6px;">
+                  <input type="text" id="gw-smtp-host" placeholder="SMTP Relay (es. smtp-mail.outlook.com)" style="font-size:0.73rem;" />
+                  <input type="number" id="gw-smtp-port" value="587" placeholder="587" style="font-size:0.73rem;" />
+                  <input type="text" id="gw-smtp-user" placeholder="SMTP User (opzionale)" style="font-size:0.73rem;" />
+                  <input type="password" id="gw-smtp-pass" placeholder="SMTP App Password" style="font-size:0.73rem;" />
+                </div>
+              </div>
+
+              <div style="font-size:0.75rem; font-weight:700; color:var(--muted); margin-bottom:6px;">CHIAVE GATEWAY STANDARD (<code>X-Cortical-Key</code> per Web, MCP, pi, OpenCode, OpenClaw, Codex, Claude, DeepSeek)</div>
+              <div style="display:flex; gap:6px; margin-bottom:12px;">
+                <input type="text" id="gw-api-key" readonly style="flex:1; font-family:var(--mono); font-size:0.78rem;" />
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-gw-copy-key">📋 Copia Chiave</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-gw-rotate-key">🔄 Rigenera</button>
+              </div>
+
+              <div style="font-size:0.75rem; font-weight:700; color:var(--muted); margin-bottom:6px;">ACCOUNT AUTORIZZATI &amp; LIMITE REGISTRAZIONI</div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                <label for="gw-max-users" style="font-size:0.78rem;">Limite massimo utenti:</label>
+                <input type="number" id="gw-max-users" min="1" max="100" value="1" style="width:74px; font-family:var(--mono); font-size:0.78rem;" />
+                <input type="email" id="gw-new-user-email" placeholder="Aggiungi email utente..." style="flex:1; min-width:190px; font-size:0.76rem;" />
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-gw-register-user">➕ Registra / Verifica Limite</button>
+              </div>
+              <div id="gw-users-list"></div>
+              <div id="gw-feedback" style="font-size:0.78rem; margin-top:8px; word-break:break-word;"></div>
+
+              <hr style="border:none; border-top:1px solid var(--border); margin:16px 0;" />
+              <div style="font-size:0.75rem; font-weight:700; color:var(--accent); margin-bottom:4px;" data-i18n="portability.title">💾 Migrazione &amp; Backup USB (Altro PC)</div>
+              <div style="font-size:0.74rem; color:var(--muted); margin-bottom:10px;" data-i18n="portability.subtitle">
+                Esporta tutta la memoria Second Brain, task, chat, skill e profilo Chrome in un unico pacchetto .tar.gz.
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+                <select id="usb-volume-select" style="flex:1; min-width:210px; font-size:0.76rem;">
+                  <option value="">📁 Locale (.cortical_data/backups/)</option>
+                </select>
+                <input type="text" id="usb-custom-path" placeholder="/Volumes/MIA_USB/cortical.tar.gz" style="flex:1; min-width:200px; font-family:var(--mono); font-size:0.76rem;" />
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-usb-refresh" data-i18n="portability.refreshVolumes">🔄 Aggiorna USB</button>
+                <button type="button" class="btn btn-sm" id="btn-usb-export" data-i18n="portability.exportUsb">💾 Esporta su USB / File</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-usb-download" data-i18n="portability.downloadBundle">⬇️ Scarica Bundle (.tar.gz)</button>
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                <select id="usb-import-mode" style="font-size:0.76rem;">
+                  <option value="merge" selected data-i18n="portability.importModeMerge">Unisci con dati esistenti (Merge)</option>
+                  <option value="replace" data-i18n="portability.importModeReplace">Sostituisci completamente (Replace)</option>
+                </select>
+                <input type="file" id="usb-import-file" accept=".tar.gz,.tgz,application/gzip" style="display:none;" />
+                <button type="button" class="btn btn-ghost btn-sm" id="btn-usb-import" data-i18n="portability.importBtn">📥 Importa Bundle</button>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </main>
@@ -527,6 +627,22 @@
     </div>
   </div>
 
-  <script type="module" src="/ui/js/app.js"></script>
+  <!-- TOKEN REPORT & ROI MODAL -->
+  <div id="token-report-modal-overlay" class="modal-overlay">
+    <div class="catalog-modal" style="width:760px; max-width:94vw;" onclick="event.stopPropagation()">
+      <div class="pane-header">
+        <span style="color:var(--accent);">📊 Token Report · Locale + Cloud ROI (0 Token Remoti)</span>
+        <div style="display:flex; gap:6px;">
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-token-report-ai">🧠 Analisi LLM Locale</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-token-report-close">✕ Chiudi</button>
+        </div>
+      </div>
+      <div class="pane-body" id="token-report-body" style="max-height:72vh; overflow-y:auto; font-size:0.8rem;">
+        Caricamento report locale...
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/ui/js/app.js?v=20261116c"></script>
 </body>
 </html>

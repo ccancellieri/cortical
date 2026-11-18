@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import queue
 import re
 import subprocess
@@ -36,10 +37,14 @@ class PendingApproval:
     role: str = ""
     model: str = ""
     created_at: float = field(default_factory=time.time)
+    resolved_at: Optional[float] = None
     status: str = "pending"  # pending | allowed | denied | expired
     decision: str = ""
     feedback: str = ""
     event: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def exact_signature(self) -> str:
+        return f"{self.tool}:{json.dumps(self.args or {}, sort_keys=True)}"
 
     def summary(self) -> str:
         if self.tool == "bash":
@@ -62,6 +67,7 @@ class PendingApproval:
             "role": self.role,
             "model": self.model,
             "created_at": self.created_at,
+            "resolved_at": self.resolved_at,
             "age_sec": round(time.time() - self.created_at, 1),
             "status": self.status,
             "decision": self.decision,
@@ -93,6 +99,7 @@ class ApprovalBroker:
         self._pending: dict[str, PendingApproval] = {}
         self._modes: dict[str, str] = {}
         self._session_allow: dict[str, set[str]] = {}
+        self._session_exact_allow: dict[str, set[str]] = {}
 
     # ----- modes -------------------------------------------------------
     def set_mode(self, session_id: str, mode: str) -> str:
@@ -122,10 +129,26 @@ class ApprovalBroker:
         if dec.verdict == "allow":
             return {"decision": "allow", "pending": False, **base}
         mode = self.get_mode(session_id)
+        exact_sig = f"{tool}:{json.dumps(dict(args or {}), sort_keys=True)}"
         with self._lock:
             session_ok = dec.normalized_pattern in self._session_allow.get(session_id, set())
-        if session_ok or mode == "full_auto" or (mode == "auto_edit" and _auto_edit_allows(tool, dec.normalized_pattern)):
-            why = "session-approved pattern" if session_ok else f"approval mode {mode}"
+            exact_ok = exact_sig in self._session_exact_allow.get(session_id, set())
+            existing_pending = next(
+                (
+                    p for p in self._pending.values()
+                    if p.session_id == session_id and p.status == "pending" and p.exact_signature() == exact_sig
+                ),
+                None,
+            )
+        if existing_pending is not None:
+            return {"decision": "pending", "pending": True, "approval_id": existing_pending.approval_id, **base}
+        if session_ok or exact_ok or mode == "full_auto" or (mode == "auto_edit" and _auto_edit_allows(tool, dec.normalized_pattern)):
+            if session_ok:
+                why = "session-approved pattern"
+            elif exact_ok:
+                why = "exact command already approved"
+            else:
+                why = f"approval mode {mode}"
             return {"decision": "allow", "pending": False, **base, "reason": why}
         pa = PendingApproval(
             approval_id=f"apr-{uuid.uuid4().hex[:10]}",
@@ -162,9 +185,12 @@ class ApprovalBroker:
         if pa.status != "pending":
             return {"ok": False, "error": f"already {pa.status}", **self._result(pa)}
         dec = decision if decision in APPROVAL_DECISIONS else "deny"
-        if dec == "allow_session":
+        exact_sig = pa.exact_signature()
+        if dec in {"allow_once", "allow_session", "allow_always"}:
             with self._lock:
-                self._session_allow.setdefault(pa.session_id, set()).add(pa.pattern)
+                self._session_exact_allow.setdefault(pa.session_id, set()).add(exact_sig)
+                if dec == "allow_session":
+                    self._session_allow.setdefault(pa.session_id, set()).add(pa.pattern)
         try:
             if dec == "allow_always":
                 self.gate.record_user_feedback(pa.tool, pa.args, approved=True, remember_always=True)
@@ -173,7 +199,20 @@ class ApprovalBroker:
         except Exception:  # noqa: BLE001
             pass
         status = "denied" if dec == "deny" else "allowed"
+        with self._lock:
+            sibling_pas = [
+                p for p in self._pending.values()
+                if p.approval_id != pa.approval_id
+                and p.session_id == pa.session_id
+                and p.status == "pending"
+                and (
+                    p.exact_signature() == exact_sig
+                    or (dec in {"allow_session", "allow_always"} and p.pattern == pa.pattern)
+                )
+            ]
         self._finalize(pa, status, dec, feedback)
+        for sib in sibling_pas:
+            self._finalize(sib, status, dec, feedback)
         return {"ok": True, **self._result(pa)}
 
     def cancel_session(self, session_id: str, reason: str = "Task interrotto") -> int:
@@ -207,6 +246,7 @@ class ApprovalBroker:
     def _finalize(self, pa: PendingApproval, status: str, decision: str, feedback: str) -> None:
         pa.status = status
         pa.decision = decision
+        pa.resolved_at = time.time()
         pa.feedback = feedback or pa.feedback
         pa.event.set()
         self._notify(pa)
@@ -370,13 +410,14 @@ def build_agent_prompt(
     *,
     workspace: str,
     is_follow_up: bool = False,
+    prior_context: str = "",
     attachments: str = "",
     wiki_context: str = "",
     lang: str = "it",
 ) -> str:
     """Concise Claude-Code-style task prompt with an explicit completion protocol."""
     if is_follow_up:
-        head = f"Follow-up from the user in this same task (keep all previous context):\n{goal.strip()}"
+        head = f"Follow-up from the user in this same task (keep all previous context and original goal):\n{goal.strip()}"
     else:
         head = f"Task: {goal.strip()}"
     parts = [
@@ -384,12 +425,15 @@ def build_agent_prompt(
         "",
         f"Workspace: {workspace}",
         "How to work:",
-        "1. Explore first with read/grep/find/ls inside the workspace; never run `ls -R` on parent (`../`) directories.",
-        "2. If a target file or directory does not exist yet, create it directly with write (or `mkdir -p`) instead of searching for it.",
-        "3. Make real changes with edit/write and verify them with bash (tests, lint, run).",
+        "1. Do at most 1-2 quick read/ls checks inside the workspace; NEVER run `ls -R` on parent (`../`) or broad repo searches when creating something new.",
+        "2. If a target file or directory does not exist yet, create it directly with `write` (for standalone HTML5 games/apps, place them in `examples/vibe_games/<slug>/index.html`).",
+        "3. Make real changes with `edit`/`write` and verify them with `bash` (syntax check, unit test, quick run).",
         "4. Keep going autonomously until the task is fully done; do not ask for confirmation for normal steps.",
         "5. Never start long-running servers or interactive commands (no `npm run dev`, no editors, no prompts); use timeouts.",
         "6. If a tool call is denied, read the reason/feedback and adapt instead of retrying the same call.",
+        "7. Commands like 'open', 'mkdir', 'cp', 'mv', 'touch' return empty stdout on success (exit code 0). NEVER re-run the same bash command if it already succeeded without error.",
+        "8. When building HTML/JS apps or games, always initialize all state arrays/variables before rendering, verify there are no JS syntax errors, and ensure controls and win/lose/reset states work end-to-end.",
+        "9. If the user asks to browse the web, inspect job listings, or fill forms, call `chrome_extract_page`, `chrome_search`, `chrome_read_page`, or `chrome_fill_form` directly instead of running unrelated bash `touch`/`ls` commands.",
         "",
         "When you finish, end your final message with:",
         "## Result",
@@ -397,6 +441,8 @@ def build_agent_prompt(
         "STATUS: DONE  |  STATUS: NEEDS_INPUT (then ask ONE precise question)  |  STATUS: BLOCKED (then explain why)",
         f"Reply in {'Italian' if lang == 'it' else 'English'} unless the user writes in another language.",
     ]
+    if prior_context.strip():
+        parts += ["", "[Prior task context & steps already executed]", prior_context.strip()]
     if attachments.strip():
         parts += ["", "[Attached context]", attachments.strip()]
     if wiki_context.strip():
@@ -410,7 +456,7 @@ def parse_agent_status(final_text: str, tool_count: int = 0, exit_reason: str = 
     if exit_reason == "stopped":
         return {"status": "stopped", "label": "Interrotto"}
     if exit_reason in {"idle_timeout", "hard_timeout"}:
-        return {"status": "stalled", "label": "Bloccato (timeout)"}
+        return {"status": "needs_input", "label": "In pausa (scrivi 'continua' per riprendere)"}
     if exit_reason == "spawn_error":
         return {"status": "blocked", "label": "Errore avvio agente"}
     m = None

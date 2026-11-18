@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "code": "it",
+    "label": "🇮🇹 IT",
+    "toggleBtn": "🇮🇹 Lingua: IT",
+    "nextBtn": "🇬🇧 EN"
+  },
+  "nav": {
+    "workspace": "💬 Workspace",
+    "concepts": "🧠 Concetti",
+    "studio": "⚙️ Studio & Sicurezza",
+    "gatewayBtn": "🌐 Gateway"
+  },
+  "topbar": {
+    "initializing": "Inizializzazione...",
+    "audioOn": "🔊 Audio: ON",
+    "audioOff": "🔇 Audio: OFF",
+    "micOff": "🎤 Mic",
+    "micOn": "🟢 Mic ON",
+    "micDenied": "🎤 Negato",
+    "listening": "In ascolto...",
+    "listeningShort": "🎙️ Ascolto",
+    "micDeniedStatus": "🚫 Mic negato",
+    "noMicStatus": "⚠️ Nessun microfono rilevato",
+    "micBusyRetry": "⚠️ Microfono occupato, riprovo...",
+    "liveReady": "Pronto",
+    "duckNormal": "🔊 100%",
+    "duckLow": "🔉 14% Duck",
+    "stop": "🛑 Stop",
+    "guide": "📖 Guida",
+    "close": "✕ Chiudi",
+    "guideTitle": "📖 Guida Interattiva di Cortical v0.4 (IT / EN / ES)",
+    "tooltipHint": "💡 Clicca per aprire la guida",
+    "ttsVoiceLabel": "Voce Neurale (IT / EN / ES)",
+    "chromeProfileLabel": "Sessione Chrome (Browser Agent)",
+    "chromeProfilePlaceholder": "es. Default, Profile 1 o email"
+  },
+  "sidebar": {
+    "newChat": "+ 💬 Chat",
+    "newTask": "+ 🤖 Task",
+    "searchPlaceholder": "🔍 Cerca chat o task...",
+    "filterAll": "Tutti",
+    "filterChats": "💬 Chat",
+    "filterTasks": "🤖 Task",
+    "loadMore": "Carica altri..."
+  },
+  "workspace": {
+    "promptPlaceholder": "Scrivi un messaggio, trascina un file o premi ⌘+Invio per avviare un Task...",
+    "sendBtn": "Invia ↵",
+    "runTaskBtn": "🚀 Come Task",
+    "attachPc": "📎 File PC",
+    "attachWorkspace": "📂 Workspace",
+    "attachCatalog": "🧩 Skill / MCP",
+    "generalChat": "Chat Generale"
+  },
+  "portability": {
+    "title": "💾 Migrazione & Backup USB (Altro PC)",
+    "subtitle": "Esporta tutta la memoria Second Brain, task, chat, skill e profilo Chrome in un unico pacchetto .tar.gz.",
+    "volumeLabel": "Disco USB / Destinazione",
+    "refreshVolumes": "🔄 Aggiorna USB",
+    "exportUsb": "💾 Esporta su USB / File",
+    "downloadBundle": "⬇️ Scarica Bundle (.tar.gz)",
+    "importModeMerge": "Unisci con dati esistenti (Merge)",
+    "importModeReplace": "Sostituisci completamente (Replace)",
+    "importBtn": "📥 Importa Bundle",
+    "noVolumes": "Nessuna chiavetta USB rilevata (verrà salvato in backups/)",
+    "exportDone": "Bundle esportato in {path} ({size} KB)",
+    "importDone": "Importazione completata ({mode})!"
+  }
+}

@@ -1,6 +1,10 @@
 /**
- * Shared frontend state, safe HTML/prose formatting, bilingual IT/EN dictionary, and interactive docs.
+ * Shared frontend state, safe HTML/prose formatting, i18n facade, and interactive docs.
  */
+
+import { SUPPORTED_LANGS, applyDomTranslations, getLang, setUiLanguage, t } from './i18n.js';
+
+export { SUPPORTED_LANGS, t };
 
 export const store = {
   uiLang: localStorage.getItem('cortical_ui_lang') || 'it',
@@ -127,38 +131,45 @@ export const GUIDE_DOCS = {
     'doc-studio': ['🧭 3+1 Context Studio, Skill Router & Safety Gate', 'Inspect L1–Max synthesis, simulate harness prompt enrichment, and evaluate Adaptive Permission Gate guardrails.'],
     'doc-tasks': ['🤖 Chats vs Multi-Agent Tasks', 'Chats stay fast and conversational; tasks run local <code>pi</code> agents with step telemetry, 3+1 archival, and post-archival reopening.'],
   },
+  es: {
+    'doc-stream': ['⚡ Flujo en Vivo, Audio Ducking y Coordinador Único', 'Muestra en tiempo real conversaciones y tareas multi-agente. Con Audio ON, Cortical usa <b>Web Audio GainNode</b> + <code>echoCancellation</code> y habla <b>solo el Coordinador</b> al finalizar el equipo.'],
+    'doc-attachments': ['📎 Contexto Aislado por Chat y Tarea', 'Cada chat y tarea tiene adjuntos propios: archivos locales (o <b>Drag & Drop</b>), carpetas del workspace y <b>Skills / Plugins / MCP</b>.'],
+    'doc-graph': ['🧠 Grafo Semántico de Conceptos (MCP)', 'Visualiza los pilares del framework (🔒) junto con conceptos de usuario, insights, skills y tareas.'],
+    'doc-concept-config': ['⚙️ Configuración de Conceptos y Eliminación', 'Los pilares core están protegidos pero permiten ajustar modelos y bucles en vivo; los conceptos de usuario se pueden editar o eliminar.'],
+    'doc-studio': ['🧭 Estudio 3+1, Skill Router, Seguridad y Backup USB', 'Inspecciona los 4 niveles (Light, Medium, High, Max), configura Gateway remoto y exporta/importa todo a un disco USB (.tar.gz).'],
+    'doc-tasks': ['🤖 Chats vs Tareas Multi-Agente', 'Los chats son ligeros; las tareas ejecutan agentes locales (<code>pi</code>) con pasos trazados y archivo 3+1.'],
+  },
 };
 
 export function applyUiTranslations(lang, onLanguageUpdated) {
-  store.uiLang = lang === 'en' ? 'en' : 'it';
-  localStorage.setItem('cortical_ui_lang', store.uiLang);
-  const t = I18N[store.uiLang];
-  const setTxt = (id, val) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = val;
-  };
-  setTxt('help-drawer-title', t.guideTitle);
-  setTxt('btn-help-close', t.close);
-  setTxt('btn-ui-lang', t.toggleLangBtn);
-  setTxt('btn-drawer-lang', t.drawerLangBtn);
-  setTxt('lbl-tab-stream', t.tabStream);
-  setTxt('lbl-tab-graph', t.tabGraph);
-  setTxt('lbl-tab-brain', t.tabBrain);
-  setTxt('btn-new-chat', t.newChatBtn);
-  setTxt('btn-new-task', t.newTaskBtn);
-  const guideSet = GUIDE_DOCS[store.uiLang] || GUIDE_DOCS.it;
-  Object.entries(guideSet).forEach(([secId, [title, body]]) => {
-    const sec = document.getElementById(secId);
-    if (sec) {
-      const h4 = sec.querySelector('h4');
-      const p = sec.querySelector('p');
-      if (h4) h4.innerHTML = title;
-      if (p) p.innerHTML = body;
+  const resolved = SUPPORTED_LANGS.includes(lang) ? lang : 'it';
+  store.uiLang = resolved;
+  const finish = () => {
+    const legacy = I18N[store.uiLang] || I18N.it;
+    const setTxt = (id, val) => {
+      const el = document.getElementById(id);
+      if (el && val) el.textContent = val;
+    };
+    applyDomTranslations();
+    setTxt('help-drawer-title', t('topbar.guideTitle') || legacy.guideTitle);
+    setTxt('btn-help-close', t('topbar.close') || legacy.close);
+    setTxt('btn-ui-lang', t('meta.toggleBtn') || legacy.toggleLangBtn);
+    setTxt('btn-drawer-lang', t('meta.nextBtn') || legacy.drawerLangBtn);
+    const guideSet = GUIDE_DOCS[store.uiLang] || GUIDE_DOCS.it;
+    Object.entries(guideSet).forEach(([secId, [title, body]]) => {
+      const sec = document.getElementById(secId);
+      if (sec) {
+        const h4 = sec.querySelector('h4');
+        const p = sec.querySelector('p');
+        if (h4) h4.innerHTML = title;
+        if (p) p.innerHTML = body;
+      }
+    });
+    if (typeof onLanguageUpdated === 'function') {
+      onLanguageUpdated(store.uiLang, legacy);
     }
-  });
-  if (typeof onLanguageUpdated === 'function') {
-    onLanguageUpdated(store.uiLang, t);
-  }
+  };
+  setUiLanguage(resolved).then(finish);
 }
 
 export function openHelpSection(sectionId, event) {

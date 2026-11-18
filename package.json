@@ -1,14 +1,21 @@
 {
   "name": "cortical-pi-harness",
-  "version": "0.1.0",
-  "description": "Cortical Agentic Harness, Second Brain MCP, Adaptive Permission Gate & Voice Engine for pi",
+  "version": "0.2.0",
+  "description": "Zero-Dependency 4-Tier Merkle Second Brain MCP, Dynamic 200k Context Auto-Scaler, Zero-Token ROI Analytics & Adaptive Permission Gate for pi / OpenCode",
   "license": "Apache-2.0",
   "author": "Carlo Cancellieri <ccancellieri@hotmail.com> (https://github.com/ccancellieri)",
+  "homepage": "https://github.com/ccancellieri/cortical",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ccancellieri/cortical.git"
+  },
   "keywords": [
     "pi-package",
     "opencode",
     "mcp",
-    "agentskills"
+    "agentskills",
+    "second-brain",
+    "ollama"
   ],
   "pi": {
     "extensions": [
@@ -21,7 +28,8 @@
   "type": "module",
   "scripts": {
     "setup": "bash ./scripts/setup.sh",
-    "doctor": "python3 -m cortical.cli doctor",
+    "doctor": "PYTHONPATH=src python3 -m cortical.cli doctor",
+    "token-report": "PYTHONPATH=src python3 -m cortical.cli token-report --narrative",
     "test": ".venv/bin/python -m unittest discover -s tests -v"
   }
 }

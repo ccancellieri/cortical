@@ -326,23 +326,29 @@ function mirrorBufferToComposer(preview) {
   pi.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-function flushMicTranscriptBuffer(forceSubmit = false) {
+async function flushMicTranscriptBuffer(forceSubmit = false) {
   if (audioState.micCommitTimer) {
     clearTimeout(audioState.micCommitTimer);
     audioState.micCommitTimer = null;
   }
   const combined = `${audioState.micFinalBuffer} ${audioState.micInterimBuffer}`.replace(/\s+/g, ' ').trim();
-  audioState.micFinalBuffer = '';
-  audioState.micInterimBuffer = '';
   const pi = document.getElementById('prompt-input');
-  if (pi) pi.placeholder = (I18N[store.uiLang] || I18N.it).promptPlaceholder;
-  if (!combined) return;
+  if (!combined) {
+    audioState.micFinalBuffer = '';
+    audioState.micInterimBuffer = '';
+    if (pi) pi.placeholder = (I18N[store.uiLang] || I18N.it).promptPlaceholder;
+    return;
+  }
   if (isSelfEchoClient(combined) && !audioState.acousticUserPriorityDetected) {
+    audioState.micFinalBuffer = '';
+    audioState.micInterimBuffer = '';
     const lt = document.getElementById('live-transcript');
     if (lt) lt.textContent = '🔇 Eco ignorato';
     return;
   }
   if (audioState.micMode === 'dictate' && !forceSubmit) {
+    audioState.micFinalBuffer = '';
+    audioState.micInterimBuffer = '';
     if (pi) {
       pi.value = combined;
       pi.dispatchEvent(new Event('input', { bubbles: true }));
@@ -352,9 +358,35 @@ function flushMicTranscriptBuffer(forceSubmit = false) {
     if (lt) lt.textContent = `📝 Dettato (${combined.split(/\s+/).length} parole)`;
     return;
   }
-  if (pi && audioState.micMode === 'vibe') {
-    pi.value = '';
-    pi.dispatchEvent(new Event('input', { bubbles: true }));
+
+  // Ask local classifier if user paused mid-thought; if incomplete (< 2 extensions), keep buffer to append next phrase
+  if (!forceSubmit && (audioState._micExtendCount || 0) < 2) {
+    try {
+      const chk = await apiPost('/api/voice/utterance-complete', { text: combined });
+      if (chk && chk.complete === false) {
+        audioState._micExtendCount = (audioState._micExtendCount || 0) + 1;
+        audioState.micFinalBuffer = combined;
+        audioState.micInterimBuffer = '';
+        mirrorBufferToComposer(combined);
+        const lt = document.getElementById('live-transcript');
+        if (lt) lt.textContent = `⏳ Attendo completamento frase... ("${combined.slice(-36)}")`;
+        scheduleMicCommit(5000);
+        return;
+      }
+    } catch (_) {
+      // Fallback to dispatch on network error
+    }
+  }
+
+  audioState._micExtendCount = 0;
+  audioState.micFinalBuffer = '';
+  audioState.micInterimBuffer = '';
+  if (pi) {
+    pi.placeholder = (I18N[store.uiLang] || I18N.it).promptPlaceholder;
+    if (audioState.micMode === 'vibe') {
+      pi.value = '';
+      pi.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
   const lt = document.getElementById('live-transcript');
   if (lt) {
@@ -366,10 +398,10 @@ function flushMicTranscriptBuffer(forceSubmit = false) {
   }
 }
 
-function scheduleMicCommit(delayMs) {
+function scheduleMicCommit(delayMs = 5000) {
   if (audioState.micCommitTimer) clearTimeout(audioState.micCommitTimer);
-  const effectiveDelay = audioState.micMode === 'vibe' ? Math.max(delayMs, 2800) : delayMs;
-  audioState.micCommitTimer = setTimeout(() => flushMicTranscriptBuffer(false), effectiveDelay);
+  const effectiveDelay = Math.max(delayMs, 5000);
+  audioState.micCommitTimer = setTimeout(() => { flushMicTranscriptBuffer(false); }, effectiveDelay);
 }
 
 function startMicRecognizer() {

@@ -4,6 +4,7 @@
  * concept graph, studio tools, and delegated DOM events.
  */
 import { apiGet } from './api.js';
+import { bindGatewayEvents, loadGatewayStatus } from './gateway.js';
 import {
   attachFromStudio,
   attachContextItemApi,
@@ -74,6 +75,7 @@ import {
 } from './state.js';
 import {
   autoResizeComposer,
+  bindComposerAutocomplete,
   clearArchivedTasks,
   closeAndArchiveTask,
   closeTaskActionModal,
@@ -83,10 +85,12 @@ import {
   deleteChat,
   deleteTask,
   focusGeneralChat,
+  closeTokenReportModal,
   loadMoreTasks,
   onTaskSearchInput,
   openNativePiTerminal,
   openTaskActionModal,
+  openTokenReportModal,
   refreshAgents,
   renameTask,
   reopenTask,
@@ -112,22 +116,25 @@ function switchMainStage(stage) {
     loadScopedContext();
     loadSmartMemory();
     navigateWiki(store.currentWikiPath);
+    loadGatewayStatus();
   }
 }
 
 function toggleUiLanguage() {
-  const next = store.uiLang === 'en' ? 'it' : 'en';
-  applyUiTranslations(next, (_lang, t) => {
+  const langs = ['it', 'en', 'es'];
+  const idx = langs.indexOf(store.uiLang);
+  const next = langs[(idx + 1) % langs.length];
+  applyUiTranslations(next, (_lang, legacyT) => {
     const micBtn = document.getElementById('btn-always-on');
-    if (micBtn) micBtn.textContent = audioState.alwaysOnActive ? t.micOn : t.micOff;
+    if (micBtn) micBtn.textContent = audioState.alwaysOnActive ? legacyT.micOn : legacyT.micOff;
     const pi = document.getElementById('prompt-input');
     if (pi && !audioState.micFinalBuffer && !audioState.micInterimBuffer && !store.selectedSessionId) {
-      pi.placeholder = t.promptPlaceholder;
+      pi.placeholder = legacyT.promptPlaceholder;
     }
     const lt = document.getElementById('live-transcript');
-    if (lt && !audioState.alwaysOnActive) lt.textContent = t.liveReady;
+    if (lt && !audioState.alwaysOnActive) lt.textContent = legacyT.liveReady;
     if (audioState.recognition) {
-      audioState.recognition.lang = next === 'en' ? 'en-US' : 'it-IT';
+      audioState.recognition.lang = next === 'en' ? 'en-US' : next === 'es' ? 'es-ES' : 'it-IT';
     }
   });
 }
@@ -178,6 +185,10 @@ function wireEvents() {
     setMicMode(e.target?.value || 'auto');
   });
   document.getElementById('btn-always-on')?.addEventListener('click', toggleAlwaysOnMic);
+  document.getElementById('btn-token-report')?.addEventListener('click', () => openTokenReportModal(false));
+  document.getElementById('btn-token-report-ai')?.addEventListener('click', () => openTokenReportModal(true));
+  document.getElementById('btn-token-report-close')?.addEventListener('click', closeTokenReportModal);
+  document.getElementById('token-report-modal-overlay')?.addEventListener('click', closeTokenReportModal);
   document.getElementById('btn-stop-top')?.addEventListener('click', triggerStopBargeIn);
   document.getElementById('btn-options-top')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -323,6 +334,7 @@ function wireEvents() {
 
   const promptEl = document.getElementById('prompt-input');
   if (promptEl) {
+    bindComposerAutocomplete();
     promptEl.addEventListener('input', autoResizeComposer);
     promptEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -479,11 +491,16 @@ function wireEvents() {
     if (!pill) return;
     const target = pill.getAttribute('data-studio-tab');
     document.querySelectorAll('#studio-subtabs .pill').forEach((p) => p.classList.toggle('active', p === pill));
-    ['perm', 'mem', 'skills', 'models'].forEach((k) => {
+    ['perm', 'mem', 'skills', 'models', 'gateway'].forEach((k) => {
       const el = document.getElementById(`studio-pane-${k}`);
       if (el) el.style.display = k === target ? 'block' : 'none';
     });
     if (target === 'models') loadModelsConfig();
+    if (target === 'gateway') loadGatewayStatus();
+  });
+  bindGatewayEvents(() => {
+    switchMainStage('brain');
+    document.querySelector('#studio-subtabs [data-studio-tab="gateway"]')?.click();
   });
   document.getElementById('btn-models-refresh')?.addEventListener('click', loadModelsConfig);
   document.getElementById('btn-models-save')?.addEventListener('click', saveModelsConfig);
@@ -547,6 +564,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   loadSmartMemory();
   loadSkillsHub();
   refreshEgressAudit();
+  loadGatewayStatus();
   await selectChat('chat');
 
   setInterval(refreshAgents, 2000);

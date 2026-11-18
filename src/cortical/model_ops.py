@@ -15,20 +15,48 @@ DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434"
 
 RECOMMENDED_MODEL_PRESETS: List[Dict[str, str]] = [
     {
-        "id": "qwen3.8:27b-iq2_xs",
-        "label": "Qwen 3.8 27B (IQ2_XS, ~7.6 GB) — Primary Local Reasoning",
+        "id": "qwen3.5:9b",
+        "label": "Qwen 3.5 9B (~6.6 GB, 256K ctx) — Top Intelligence Density & Tool Calling",
     },
     {
-        "id": "hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
-        "label": "LiquidAI LFM2.5 1.2B — Fast Voice/Reflex (<1s)",
+        "id": "qwen3.5:9b-q3_k_xl",
+        "label": "Qwen 3.5 9B Unsloth UD-Q3_K_XL (~5.1 GB) — Compact Dynamic 3-bit",
+    },
+    {
+        "id": "hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL",
+        "label": "Qwen 3.5 9B Unsloth Dynamic UD-Q4_K_XL (~6.8 GB) — Non-Uniform Precision",
+    },
+    {
+        "id": "mlx-community/Qwen3.5-9B-Instruct-4bit",
+        "label": "Qwen 3.5 9B MLX 4-bit (:8080) — Native Apple Silicon Metal Speed",
+    },
+    {
+        "id": "qwen3.5:14b",
+        "label": "Qwen 3.5 14B (~9.5 GB, 256K ctx) — Heavy Coder (tight on 16GB)",
+    },
+    {
+        "id": "gemma3:12b",
+        "label": "Gemma 3 12B (~8.1 GB, 128K ctx) — Multimodal & Strong Reasoning",
+    },
+    {
+        "id": "devstral-small-2",
+        "label": "Devstral Small 24B (~13 GB) — Agentic SWE Specialist (near 16GB limit)",
     },
     {
         "id": "qwen3:8b",
-        "label": "Qwen 3 8B (~5.2 GB) — Balanced Fast Coder/Analyst",
+        "label": "Qwen 3 8B (~5.2 GB, 40K ctx) — Fast Reliable Coder/Analyst",
     },
     {
-        "id": "qwen2.5-coder:7b",
-        "label": "Qwen 2.5 Coder 7B (~4.7 GB) — Fast Code Edits",
+        "id": "qwen3.8:27b-iq2_xxs",
+        "label": "Qwen 3.8 27B Unsloth UD-IQ2_XXS (~6.6 GB) — Lighter Non-Uniform 2-bit",
+    },
+    {
+        "id": "qwen3.8:27b-iq2_xs",
+        "label": "Qwen 3.8 27B Unsloth UD-IQ2_XS (~7.6 GB) — Non-Uniform Aggressive 2-bit",
+    },
+    {
+        "id": "qwen3.5:4b",
+        "label": "Qwen 3.5 4B (~2.9 GB, 256K ctx) — Ultra-Fast Compact Agent",
     },
     {
         "id": "qwen2.5:1.5b",

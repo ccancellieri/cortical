@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+import urllib.parse
 from pathlib import Path
 
 from cortical.cli import main as cli_main
@@ -37,11 +38,14 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "api_fixtures.json"
 class TestCorticalSystem(unittest.TestCase):
     def setUp(self) -> None:
         self._prev_disable_live_pi = os.environ.get("CORTICAL_DISABLE_LIVE_PI")
+        self._prev_wiki_db = os.environ.get("CORTICAL_WIKI_DB")
         os.environ["CORTICAL_DISABLE_LIVE_PI"] = "1"
         self.tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp_dir.name)
         self.wiki_db_path = self.root / "wiki.db"
         self.perm_db_path = self.root / "perm.db"
+        # Prevent any runner call with db_path=None from writing into the live workspace DB
+        os.environ["CORTICAL_WIKI_DB"] = str(self.wiki_db_path)
         self.sample_docs = self.root / "docs"
         self.sample_docs.mkdir(parents=True, exist_ok=True)
 
@@ -66,6 +70,10 @@ class TestCorticalSystem(unittest.TestCase):
             os.environ.pop("CORTICAL_DISABLE_LIVE_PI", None)
         else:
             os.environ["CORTICAL_DISABLE_LIVE_PI"] = self._prev_disable_live_pi
+        if self._prev_wiki_db is None:
+            os.environ.pop("CORTICAL_WIKI_DB", None)
+        else:
+            os.environ["CORTICAL_WIKI_DB"] = self._prev_wiki_db
         self.tmp_dir.cleanup()
 
     def test_1_merkle_crawler_4_tiers_and_delta_skip(self) -> None:
@@ -1381,7 +1389,7 @@ class TestCorticalSystem(unittest.TestCase):
         proxy = _EgressGuardProxy(gate)
         port = proxy.start()
         try:
-            proxy.set_context(session_id="pi-sec-1", role="Coordinator", model="qwen3.8:27b-iq2_xs")
+            proxy.set_context(session_id="pi-sec-1", role="Coordinator", model="qwen3.8:27b-iq2_xxs")
             opener = urllib.request.build_opener(
                 urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{port}"})
             )
@@ -1394,7 +1402,7 @@ class TestCorticalSystem(unittest.TestCase):
         events = gate.list_egress_events(limit=10)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["target_host"], "exfil.invalid")
-        self.assertEqual(events[0]["model"], "qwen3.8:27b-iq2_xs")
+        self.assertEqual(events[0]["model"], "qwen3.8:27b-iq2_xxs")
         self.assertEqual(events[0]["verdict"], "blocked")
 
         # 3. API endpoints for /api/security/egress and effort propagation in /api/agents/spawn
@@ -1710,18 +1718,18 @@ class TestCorticalSystem(unittest.TestCase):
             {},
             {
                 "role_models": {
-                    "coordinator_model": "qwen3.8:27b-iq2_xs",
+                    "coordinator_model": "qwen3.8:27b-iq2_xxs",
                     "analyst_model": "qwen3:8b",
-                    "implementer_model": "qwen3.8:27b-iq2_xs",
+                    "implementer_model": "qwen3.8:27b-iq2_xxs",
                     "reviewer_model": "qwen3:8b",
                     "chat_model": "qwen3:8b",
                 },
-                "model_context_windows": {"qwen3.8:27b-iq2_xs": 65536, "qwen3:8b": 16384},
+                "model_context_windows": {"qwen3.8:27b-iq2_xxs": 65536, "qwen3:8b": 16384},
             },
         )
         self.assertEqual(st_post, 200)
         self.assertEqual(res_post["role_models"]["analyst_model"], "qwen3:8b")
-        self.assertEqual(res_post["model_context_windows"]["qwen3.8:27b-iq2_xs"], 65536)
+        self.assertEqual(res_post["model_context_windows"]["qwen3.8:27b-iq2_xxs"], 65536)
 
         st_ag, res_ag = svc.handle_api("GET", "/api/agents", {}, {})
         self.assertEqual(st_ag, 200)
@@ -1756,7 +1764,7 @@ class TestCorticalSystem(unittest.TestCase):
             {
                 "id": "security_auditor",
                 "label": "Security Auditor",
-                "model": "qwen3.8:27b-iq2_xs",
+                "model": "qwen3.8:27b-iq2_xxs",
                 "context_window": 49152,
                 "effort": "high",
             },
@@ -1779,7 +1787,7 @@ class TestCorticalSystem(unittest.TestCase):
         # 2. Duplicate/variant detection & ~/.pi/agent/models.json sync
         self.assertEqual(
             normalize_model_family("hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XS"),
-            normalize_model_family("qwen3.8:27b-iq2_xs"),
+            normalize_model_family("qwen3.8:27b-iq2_xxs"),
         )
 
         class _FakeResp:
@@ -1794,7 +1802,7 @@ class TestCorticalSystem(unittest.TestCase):
 
         tags_fixture = {
             "models": [
-                {"name": "qwen3.8:27b-iq2_xs", "size": 7_600_000_000, "digest": "abcdef123456"},
+                {"name": "qwen3.8:27b-iq2_xxs", "size": 7_600_000_000, "digest": "abcdef123456"},
                 {"name": "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XS", "size": 8_600_000_000, "digest": "123456abcdef"},
                 {"name": "qwen3:8b", "size": 5_200_000_000, "digest": "fedcba654321"},
             ]
@@ -1802,16 +1810,16 @@ class TestCorticalSystem(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=_FakeResp(tags_fixture)):
             detailed = list_ollama_models_detailed("http://127.0.0.1:11434")
         by_name = {m["name"]: m for m in detailed}
-        self.assertTrue(by_name["qwen3.8:27b-iq2_xs"]["is_duplicate"])
+        self.assertTrue(by_name["qwen3.8:27b-iq2_xxs"]["is_duplicate"])
         self.assertTrue(by_name["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XS"]["is_duplicate"])
         self.assertFalse(by_name["qwen3:8b"]["is_duplicate"])
 
         pi_models = self.root / "pi_models.json"
         pi_models.write_text(
-            json.dumps({"providers": {"ollama": {"models": [{"id": "qwen3.8:27b-iq2_xs", "contextWindow": 16384}]}}}),
+            json.dumps({"providers": {"ollama": {"models": [{"id": "qwen3.8:27b-iq2_xxs", "contextWindow": 16384}]}}}),
             encoding="utf-8",
         )
-        sync_res = sync_pi_models_json({"qwen3.8:27b-iq2_xs": 65536}, pi_models_path=pi_models)
+        sync_res = sync_pi_models_json({"qwen3.8:27b-iq2_xxs": 65536}, pi_models_path=pi_models)
         self.assertTrue(sync_res["updated"])
         synced = json.loads(pi_models.read_text(encoding="utf-8"))
         self.assertEqual(synced["providers"]["ollama"]["models"][0]["contextWindow"], 65536)
@@ -1864,7 +1872,7 @@ class TestCorticalSystem(unittest.TestCase):
                 run_id=f"run-old-{i}",
                 episode_id="pi-orphan-1",
                 role="Implementer" if i % 2 == 0 else "Analyst",
-                model="qwen3.8:27b-iq2_xs",
+                model="qwen3.8:27b-iq2_xxs",
                 provider="ollama",
                 status="working" if i < 3 else "completed",
                 goal=f"Step work #{i}",
@@ -1885,7 +1893,7 @@ class TestCorticalSystem(unittest.TestCase):
         # Insert a live 'working' run and stop it explicitly
         db.upsert_agent_run(
             ctx, run_id="run-live-1", episode_id="pi-orphan-1",
-            role="Coordinator", model="qwen3.8:27b-iq2_xs", provider="ollama", status="working", goal="Live work",
+            role="Coordinator", model="qwen3.8:27b-iq2_xxs", provider="ollama", status="working", goal="Live work",
         )
         st_stop, res_stop = svc.handle_api("POST", "/api/agents/run/stop", {}, {"run_id": "run-live-1", "session_id": "pi-orphan-1"})
         self.assertEqual(st_stop, 200)
@@ -1972,7 +1980,7 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(parse_agent_status("All fixed.\nSTATUS: DONE", tool_count=3)["status"], "completed")
         self.assertEqual(parse_agent_status("Which port?\nSTATUS: NEEDS_INPUT")["status"], "needs_input")
         self.assertEqual(parse_agent_status("Missing key\nSTATUS: BLOCKED")["status"], "blocked")
-        self.assertEqual(parse_agent_status("", exit_reason="idle_timeout")["status"], "stalled")
+        self.assertEqual(parse_agent_status("", exit_reason="idle_timeout")["status"], "needs_input")
 
         # 5. Live HTTP approval endpoints
         db = CorticalWikiDB(self.wiki_db_path)
@@ -2033,7 +2041,7 @@ class TestCorticalSystem(unittest.TestCase):
             tool="write",
             args={"path": "examples/vibe_games/tic_tac_toe/index.html"},
             role="Coordinator",
-            model="qwen3.8:27b-iq2_xs",
+            model="qwen3.8:27b-iq2_xxs",
         )
         self.assertEqual(req["decision"], "pending")
         st_a, res_a = svc.handle_api(
@@ -2046,6 +2054,1004 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(res_a["route"], "permission_feedback")
         self.assertEqual(res_a["permission_updated"], "allow")
         self.assertFalse(svc.agent_mgr.approvals.has_pending("pi-voice-1"))
+
+    def test_32_approval_dedup_safe_open_and_examples_static_serving(self) -> None:
+        from pathlib import Path
+        from cortical.agent_runtime import ApprovalBroker, build_agent_prompt
+        from cortical.permissions.gate import AdaptivePermissionGate
+        from cortical.server import resolve_examples_asset
+
+        gate = AdaptivePermissionGate(self.perm_db_path)
+
+        # 1. Safe workspace HTML open & safe mkdir are allowed directly
+        self.assertEqual(
+            gate.evaluate("bash", {"command": "open -a Safari examples/vibe_games/sliding_puzzle/index.html"}).verdict,
+            "allow",
+        )
+        self.assertEqual(
+            gate.evaluate("bash", {"command": "open http://127.0.0.1:8765/examples/vibe_games/pacman/index.html"}).verdict,
+            "allow",
+        )
+        self.assertEqual(
+            gate.evaluate("bash", {"command": "mkdir -p examples/vibe_games/new_dir"}).verdict,
+            "allow",
+        )
+        # Chained commands must never be downgraded to safe local_open
+        self.assertEqual(
+            gate.evaluate("bash", {"command": "open examples/a.html && make deploy"}).verdict,
+            "ask",
+        )
+
+        # 2. ApprovalBroker deduplicates pending and exact allow_once retries in same session
+        broker = ApprovalBroker(gate, default_timeout_sec=5.0)
+        r1 = broker.request("pi-dedup", "bash", {"command": "make build"})
+        r2 = broker.request("pi-dedup", "bash", {"command": "make build"})
+        self.assertEqual(r1["decision"], "pending")
+        self.assertEqual(r2["decision"], "pending")
+        self.assertEqual(r1["approval_id"], r2["approval_id"])
+        self.assertEqual(len(broker.list_pending("pi-dedup")), 1)
+
+        res_ok = broker.resolve(r1["approval_id"], "allow_once")
+        self.assertTrue(res_ok["ok"])
+        self.assertIsNotNone(res_ok)
+
+        # Exact retry is now auto-allowed without spawning a new pending card
+        r3 = broker.request("pi-dedup", "bash", {"command": "make build"})
+        self.assertEqual(r3["decision"], "allow")
+        self.assertFalse(r3["pending"])
+
+        # Different args under same pattern still ask under allow_once
+        r4 = broker.request("pi-dedup", "bash", {"command": "make deploy"})
+        self.assertEqual(r4["decision"], "pending")
+
+        # Prompt carries silent-command anti-loop guidance
+        prompt = build_agent_prompt("Apri il gioco", workspace=str(self.root))
+        self.assertIn("empty stdout on success", prompt)
+
+        # 3. Examples static asset resolver serves all 4 vibe games + hub and blocks traversal
+        repo_root = Path(__file__).resolve().parents[1]
+        for rel_url in (
+            "/examples/vibe_games/index.html",
+            "/examples/vibe_games/tic_tac_toe/index.html",
+            "/examples/vibe_games/sliding_puzzle/index.html",
+            "/examples/vibe_games/snake/index.html",
+            "/examples/vibe_games/pacman/index.html",
+        ):
+            asset = resolve_examples_asset(repo_root, rel_url)
+            self.assertIsNotNone(asset, f"Missing example asset {rel_url}")
+            body, mime = asset
+            self.assertIn("text/html", mime)
+            self.assertGreater(len(body), 1500)
+        self.assertIsNone(resolve_examples_asset(repo_root, "/examples/../../src/cortical/server.py"))
+
+    def test_33_general_chat_informal_no_task_nag_and_no_wiki_registration(self) -> None:
+        import io
+        import urllib.request
+        from unittest.mock import patch
+        from cortical.server import (
+            CorticalLiveService,
+            _is_legacy_task_nag_reply,
+            _query_llm_endpoints,
+            _strip_think_blocks,
+            build_chat_context,
+            query_local_reflex_llm,
+        )
+
+        # 1. Strip think blocks and /no_think tokens; detect legacy nag phrases
+        self.assertEqual(_strip_think_blocks("<think>ragionamento</think>\n/no_think"), "")
+        self.assertEqual(_strip_think_blocks("<|thought|>step</|thought|> Ciao Carlo! /no_think"), "Ciao Carlo!")
+        self.assertTrue(_is_legacy_task_nag_reply("Ho ricevuto la richiesta: 'ciao'. Se vuoi che diventi un task operativo, chiedimi 'crea un task per ciao'."))
+        self.assertFalse(_is_legacy_task_nag_reply("Ciao! Tutto bene, come posso aiutarti?"))
+
+        # 2. _query_llm_endpoints omits `options` and falls back to qwen3:8b if primary emits /no_think
+        seen_payloads: list[dict] = []
+
+        def fake_urlopen(req, timeout=20.0):
+            payload = json.loads(req.data.decode("utf-8"))
+            seen_payloads.append(payload)
+            model = payload.get("model", "")
+            content = "/no_think" if "27b" in model else "Certo! Ti rispondo subito in modo semplice."
+            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode("utf-8")
+
+            class _Resp(io.BytesIO):
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.close()
+
+            return _Resp(body)
+
+        with patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            ans = _query_llm_endpoints(
+                "Sei Cortical",
+                "voglio che mi rispondi semplicemente",
+                "http://127.0.0.1:11434/v1",
+                preferred_model="qwen3.8:27b-iq2_xxs",
+                thinking_mode="off",
+            )
+            self.assertEqual(ans, "Certo! Ti rispondo subito in modo semplice.")
+            self.assertGreaterEqual(len(seen_payloads), 2)
+            self.assertTrue(all("options" not in p for p in seen_payloads))
+            self.assertEqual(seen_payloads[0]["model"], "qwen3.8:27b-iq2_xxs")
+            self.assertEqual(seen_payloads[1]["model"], "qwen3:8b")
+
+            # Even when offline / empty, query_local_reflex_llm never tells user to create a task
+            fallback = query_local_reflex_llm(
+                "parliamo un attimo",
+                "http://127.0.0.1:59999/v1",
+                preferred_model="qwen3.8:27b-iq2_xxs",
+            )
+            self.assertFalse(_is_legacy_task_nag_reply(fallback))
+
+        # 3. Chat Generale stays informal & non-registered into memory_insights, purges polluted rows
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        with svc.wiki_db._connect() as conn:
+            conn.execute(
+                """INSERT INTO chat_buffer(tenant_id, workspace_id, scope_id, user_text, assistant_text, is_ephemeral, created_at)
+                   VALUES ('default', 'default', 'chat', 'ciao vecchio', 'Ho ricevuto la richiesta: ''ciao vecchio''. Se vuoi che diventi un task operativo, chiedimi ''crea un task per ciao vecchio''.', 1, ?)""",
+                (time.time(),),
+            )
+        purged = svc.memory_curator.purge_legacy_fallback_turns()
+        self.assertGreaterEqual(purged, 1)
+
+        with patch.object(urllib.request, "urlopen", side_effect=fake_urlopen):
+            st_v, res_v = svc.handle_api(
+                "POST",
+                "/api/voice",
+                {},
+                {
+                    "utterance": "Ricorda che in chat generale voglio che mi rispondi semplicemente",
+                    "scope_id": "chat",
+                    "speak": False,
+                },
+            )
+            self.assertEqual(st_v, 200)
+            self.assertEqual(res_v["route"], "system1_reflex")
+            self.assertEqual(res_v["spoken_response"], "Certo! Ti rispondo subito in modo semplice.")
+            self.assertFalse(res_v["memory_curation"]["curated_saved"])
+            self.assertTrue(res_v["memory_curation"]["is_ephemeral"])
+            self.assertEqual(len(svc.memory_curator.list_insights()), 0)
+
+            # Custom contextual chat thread still curates durable insights when triggered
+            custom = svc.memory_curator.create_chat("Progetto Alfa")
+            _, res_c = svc.handle_api(
+                "POST",
+                "/api/voice",
+                {},
+                {
+                    "utterance": "Ricorda che per Progetto Alfa preferisco sempre risposte concise.",
+                    "scope_id": custom["chat_id"],
+                    "speak": False,
+                },
+            )
+            self.assertTrue(res_c["memory_curation"]["curated_saved"])
+            self.assertEqual(len(svc.memory_curator.list_insights()), 1)
+
+        _, chat_hist = build_chat_context(svc.wiki_db, svc.memory_curator, "ciao", scope_id="chat")
+        self.assertTrue(all(not _is_legacy_task_nag_reply(m["content"]) for m in chat_hist))
+
+        # 4. Natural informal weather / internet search intent detection + casual chatter guard
+        w_intent = extract_weather_intent("fammi una ricerca su internet riguardo il tempo di domani")
+        self.assertIsNotNone(w_intent)
+        assert w_intent is not None
+        self.assertEqual(w_intent["day_offset"], 1)
+        self.assertTrue(w_intent["open_browser"])
+
+        self.assertIsNone(
+            extract_weather_intent(
+                "bella giornata l aria fresca ma stasera fara freddo no piovera pure mi sa ci vediamo tra 10 minuti tempo di piu"
+            )
+        )
+        b_intent = extract_browser_intent("fammi una ricerca su internet riguardo Albert Einstein")
+        self.assertIsNotNone(b_intent)
+        assert b_intent is not None
+        self.assertEqual(b_intent["site"], "google")
+        self.assertEqual(b_intent["query"], "Albert Einstein")
+
+    def test_34_optional_remote_gateway_auth_max_users_and_cross_harness(self) -> None:
+        """Verifies optional Gateway Key auth, max_users=1 cap, ccancellieri@hotmail.com setup-password flow & MCP tools."""
+        from cortical.server import CorticalLiveService
+        from cortical.wiki.mcp_server import CorticalWikiMCPServer
+
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+
+        # 1. Pre-seeded owner ccancellieri@hotmail.com occupies slot 1/1
+        st_gw, gw = svc.handle_api("GET", "/api/gateway/status", {}, {})
+        self.assertEqual(st_gw, 200)
+        self.assertEqual(gw["max_users"], 1)
+        self.assertEqual(gw["registered_users_count"], 1)
+        self.assertEqual(gw["users"][0]["email"], "ccancellieri@hotmail.com")
+        api_key = gw["gateway_api_key"]
+        self.assertTrue(api_key.startswith("ctk_"))
+
+        # 2. Second user registration MUST be blocked when max_users=1
+        st_reg2, reg2 = svc.handle_api(
+            "POST",
+            "/api/auth/register",
+            {},
+            {"email": "intruder@example.com"},
+        )
+        self.assertEqual(st_reg2, 403)
+        self.assertIn("limite massimo", reg2["error"].lower())
+
+        # 3. Remote request without key or session MUST be rejected (401)
+        remote_hdrs = {"Host": "demo.lhr.life", "X-Forwarded-For": "203.0.113.10"}
+        st_unauth, res_unauth = svc.handle_api(
+            "GET", "/api/chats", {}, {}, headers=remote_hdrs, client_ip="203.0.113.10"
+        )
+        self.assertEqual(st_unauth, 401)
+        self.assertTrue(res_unauth.get("auth_required"))
+
+        # 4. Remote request WITH X-Cortical-Key MUST succeed
+        st_key_ok, _ = svc.handle_api(
+            "GET",
+            "/api/chats",
+            {},
+            {},
+            headers={**remote_hdrs, "X-Cortical-Key": api_key},
+            client_ip="203.0.113.10",
+        )
+        self.assertEqual(st_key_ok, 200)
+
+        # 5. Re-inviting existing ccancellieri@hotmail.com generates password setup token + outbox files
+        inv = svc.remote_gateway.send_access_email(
+            recipient_email="ccancellieri@hotmail.com",
+            base_public_url="https://demo.lhr.life",
+        )
+        self.assertTrue(inv["ok"])
+        self.assertIn("https://demo.lhr.life/auth/setup-password?token=", inv["setup_url"])
+        self.assertTrue(Path(inv["outbox_eml"]).is_file())
+        self.assertTrue(Path(inv["outbox_html"]).is_file())
+
+        # Extract token and set password via /api/auth/setup-password
+        parsed_q = urllib.parse.parse_qs(urllib.parse.urlparse(inv["setup_url"]).query)
+        setup_tok = parsed_q["token"][0]
+        st_pw, res_pw = svc.handle_api(
+            "POST",
+            "/api/auth/setup-password",
+            {},
+            {"token": setup_tok, "password": "StrongPassword!2026"},
+            headers=remote_hdrs,
+            client_ip="203.0.113.10",
+        )
+        self.assertEqual(st_pw, 200)
+        self.assertTrue(res_pw["ok"])
+        self.assertEqual(res_pw["user"]["status"], "active")
+        sess_tok = res_pw["session_token"]
+
+        # Remote request with Bearer session token succeeds; wrong password fails
+        st_bearer_ok, _ = svc.handle_api(
+            "GET",
+            "/api/chats",
+            {},
+            {},
+            headers={**remote_hdrs, "Authorization": f"Bearer {sess_tok}"},
+            client_ip="203.0.113.10",
+        )
+        self.assertEqual(st_bearer_ok, 200)
+
+        st_bad_pw, _ = svc.handle_api(
+            "POST",
+            "/api/auth/login",
+            {},
+            {"email": "ccancellieri@hotmail.com", "password": "wrong-password"},
+            headers=remote_hdrs,
+            client_ip="203.0.113.10",
+        )
+        self.assertEqual(st_bad_pw, 401)
+
+        # Optional: turning off auth allows remote without key
+        svc.handle_api("POST", "/api/gateway/configure", {}, {"auth_enabled": False})
+        st_opt, _ = svc.handle_api(
+            "GET", "/api/chats", {}, {}, headers=remote_hdrs, client_ip="203.0.113.10"
+        )
+        self.assertEqual(st_opt, 200)
+        svc.handle_api("POST", "/api/gateway/configure", {}, {"auth_enabled": True})
+
+        # 6. Cross-harness MCP Gateway tools
+        mcp = CorticalWikiMCPServer(self.wiki_db_path)
+        mcp_resp = mcp.handle_request({
+            "jsonrpc": "2.0",
+            "id": 340,
+            "method": "tools/call",
+            "params": {"name": "wiki_gateway_status", "arguments": {"include_secret": False}},
+        })
+        assert mcp_resp is not None
+        self.assertFalse(mcp_resp["result"]["isError"])
+        mcp_data = json.loads(mcp_resp["result"]["content"][0]["text"])
+        self.assertEqual(mcp_data["max_users"], 1)
+
+    def test_35_portability_i18n_and_chrome_email_resolution(self) -> None:
+        """Verifies USB export/import bundle, i18n locale JSONs (it/en/es), and Chrome email->profile resolution."""
+        from cortical.grounding import _resolve_system_profile_match
+        from cortical.portability import export_cortical_bundle, import_cortical_bundle
+        from cortical.wiki.db import AccessContext, CorticalWikiDB
+
+        base_dir = Path(self.tmp_dir.name)
+        src_dir = base_dir / "src_pc"
+        dst_dir = base_dir / "dst_pc"
+        src_dir.mkdir(parents=True)
+        dst_dir.mkdir(parents=True)
+
+        # 1. Populate source DB, skill & memory
+        db_src = CorticalWikiDB(src_dir / "wiki.db")
+        db_src.record_episode(
+            AccessContext(),
+            episode_id="ep-migrate-1",
+            title="Migrate workspace",
+            goal="Migrate workspace",
+            outcome_status="done",
+            learned_summary="Keep USB bundle compact",
+        )
+        skills_src = src_dir / "skills"
+        (skills_src / "my-skill").mkdir(parents=True)
+        (skills_src / "my-skill" / "SKILL.md").write_text("# My Skill\n", encoding="utf-8")
+        mem_src = src_dir / "memory"
+        mem_src.mkdir(parents=True)
+        (mem_src / "decisions.md").write_text("- Decision 1\n", encoding="utf-8")
+        chrome_src = src_dir / "chrome_profile.json"
+        chrome_src.write_text(json.dumps({"mode": "system_chrome", "profile_directory": "Default", "email": "ccancellieri@gmail.com"}), encoding="utf-8")
+
+        bundle_path = base_dir / "usb_drive" / "cortical-backup.tar.gz"
+        exp = export_cortical_bundle(
+            bundle_path,
+            wiki_db_path=src_dir / "wiki.db",
+            skills_dir=skills_src,
+            memory_dir=mem_src,
+            chrome_profile_path=chrome_src,
+        )
+        self.assertTrue(exp["ok"])
+        self.assertTrue(bundle_path.exists())
+        self.assertEqual(exp["counts"]["skills"], 1)
+
+        # 2. Import onto target machine (merge & replace)
+        db_dst = CorticalWikiDB(dst_dir / "wiki.db")
+        imp = import_cortical_bundle(
+            bundle_path,
+            mode="merge",
+            wiki_db_path=db_dst.db_path,
+            skills_dir=dst_dir / "skills",
+            memory_dir=dst_dir / "memory",
+            chrome_profile_path=dst_dir / "chrome_profile.json",
+        )
+        self.assertTrue(imp["ok"])
+        self.assertTrue((dst_dir / "skills" / "my-skill" / "SKILL.md").exists())
+        self.assertTrue((dst_dir / "memory" / "decisions.md").exists())
+        self.assertTrue((dst_dir / "chrome_profile.json").exists())
+
+        # 3. Chrome email -> Local State profile resolution
+        fake_chrome = base_dir / "Chrome"
+        fake_chrome.mkdir(parents=True)
+        (fake_chrome / "Local State").write_text(
+            json.dumps({"profile": {"info_cache": {"Default": {"user_name": "ccancellieri@gmail.com", "name": "carlo"}}}}),
+            encoding="utf-8",
+        )
+        matched = _resolve_system_profile_match("ccancellieri@gmail.com", system_dir=fake_chrome)
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        self.assertEqual(matched["profile_directory"], "Default")
+        self.assertEqual(matched["mode"], "system_chrome")
+
+        # 4. i18n JSON locale files (it, en, es) are valid and consistent
+        locales_dir = Path(__file__).resolve().parent.parent / "src" / "cortical" / "ui" / "locales"
+        for code in ("it", "en", "es"):
+            data = json.loads((locales_dir / f"{code}.json").read_text(encoding="utf-8"))
+            self.assertIn("nav", data)
+            self.assertIn("portability", data)
+            self.assertIn("topbar", data)
+
+    def test_36_task_follow_up_preserves_original_goal_and_prior_steps(self) -> None:
+        """Verifies follow-up turns in a task include original goal & prior steps instead of starting blind."""
+        from cortical.agent_runtime import build_agent_prompt
+        from cortical.server import CorticalLiveService
+
+        captured_prompts: list[str] = []
+
+        def fake_pi_runner(prompt: str, model: str, max_loops: int) -> list[str]:
+            captured_prompts.append(prompt)
+            return [
+                json.dumps({
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "## Result\nFatto.\nSTATUS: DONE"}],
+                        "usage": {"input": 100, "output": 20, "totalTokens": 120},
+                    },
+                })
+            ]
+
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        svc.agent_mgr.pi_runner = fake_pi_runner
+
+        sess = svc.agent_mgr.spawn_agent("Crea un videogioco tennis in vibecoding", parallel=False)
+        deadline = time.time() + 4.0
+        while svc.agent_mgr.sessions[sess["session_id"]]["status"] == "working" and time.time() < deadline:
+            time.sleep(0.05)
+
+        svc.agent_mgr.continue_session(sess["session_id"], "cosa hai completato?", parallel=False)
+        deadline = time.time() + 4.0
+        while svc.agent_mgr.sessions[sess["session_id"]]["status"] == "working" and time.time() < deadline:
+            time.sleep(0.05)
+
+        self.assertGreaterEqual(len(captured_prompts), 2)
+        follow_prompt = captured_prompts[-1]
+        self.assertIn("Original Task Goal: Crea un videogioco tennis in vibecoding", follow_prompt)
+        self.assertIn("cosa hai completato?", follow_prompt)
+
+        p = build_agent_prompt("Test", workspace="/tmp", prior_context="Original Task Goal: Tennis")
+        self.assertIn("Original Task Goal: Tennis", p)
+
+        # idle_timeout transitions to resumable needs_input rather than dead stalled
+        from cortical.agent_runtime import parse_agent_status
+        st_pause = parse_agent_status("", 0, exit_reason="idle_timeout")
+        self.assertEqual(st_pause["status"], "needs_input")
+
+        # Voice utterance completion heuristic catches incomplete trailing connectors / 1-word fragments
+        st_u1, u1 = svc.handle_api("POST", "/api/voice/utterance-complete", {}, {"text": "porre"})
+        self.assertEqual(st_u1, 200)
+        self.assertFalse(u1["complete"])
+        st_u2, u2 = svc.handle_api("POST", "/api/voice/utterance-complete", {}, {"text": "crea un gioco di tennis per"})
+        self.assertEqual(st_u2, 200)
+        self.assertFalse(u2["complete"])
+        st_u3, u3 = svc.handle_api("POST", "/api/voice/utterance-complete", {}, {"text": "basta"})
+        self.assertEqual(st_u3, 200)
+        self.assertTrue(u3["complete"])
+        st_u4, u4 = svc.handle_api("POST", "/api/voice/utterance-complete", {}, {"text": "crea un gioco di tennis HTML5 con racchetta e punteggio."})
+        self.assertEqual(st_u4, 200)
+        self.assertIn("complete", u4)
+
+    def test_37_harness_slash_commands_mentions_and_auto_loop(self) -> None:
+        """Verifies classic harness slash commands (/diff, /help, /compact), @task mentions, and auto-verify loop heuristic."""
+        from cortical.server import CorticalLiveService, _wants_continuous_loop
+        from cortical.wiki.db import AccessContext
+
+        self.assertTrue(_wants_continuous_loop("Crea un videogioco HTML5 tennis in loop", None))
+        self.assertFalse(_wants_continuous_loop("Crea un videogioco HTML5 tennis in loop", False))
+
+        svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
+        svc.agent_mgr.sessions["pi-991122"] = {
+            "session_id": "pi-991122",
+            "title": "Tennis Demo",
+            "goal": "Crea tennis in examples/vibe_games/tennis/index.html",
+            "status": "completed",
+            "final_response": "Scritto index.html con punteggio.",
+            "steps": [{"kind": "tool_result", "title": "write (OK)", "detail": "examples/vibe_games/tennis/index.html"}],
+        }
+        resolved = svc.agent_mgr.resolve_prompt_mentions(AccessContext(), "Migliora il gioco creato in @pi-991122 aggiungendo audio")
+        self.assertIn("@pi-991122", resolved)
+        self.assertIn("examples/vibe_games/tennis/index.html", resolved)
+
+        st_d, d = svc.handle_api("GET", "/api/workspace/diff", {}, {})
+        self.assertEqual(st_d, 200)
+        self.assertIn("diff_stat", d)
+
+        st_h, h = svc.handle_api("POST", "/api/harness/command", {}, {"command": "/help", "scope_id": "chat"})
+        self.assertEqual(st_h, 200)
+        self.assertIn("/skill", h["output"])
+        self.assertIn("@pi-xxxxxx", h["output"])
+
+        st_c, c = svc.handle_api("POST", "/api/harness/command", {}, {"command": "/compact", "scope_id": "chat"})
+        self.assertEqual(st_c, 200)
+        self.assertTrue(c["ok"])
+
+        from cortical.context_window import compute_dynamic_num_ctx
+        low_ram_ctx = compute_dynamic_num_ctx(base_ctx=32768, model_id="qwen3:8b", ram_available_gb=3.0)
+        high_ram_ctx = compute_dynamic_num_ctx(base_ctx=16384, model_id="qwen3:8b", ram_available_gb=12.0)
+        self.assertLessEqual(low_ram_ctx, 16384)
+        self.assertGreater(high_ram_ctx, 16384)
+
+        from cortical.grounding import _FormAndLinkParser
+        p_html = _FormAndLinkParser(base_url="https://example.org/jobs")
+        p_html.feed("<html><title>GIS Role</title><body><form><input name='email' required/><textarea name='cover'></textarea></form><a href='/apply'>Apply Now</a></body></html>")
+        self.assertEqual(p_html.title, "GIS Role")
+        self.assertEqual(len(p_html.forms), 2)
+        self.assertEqual(p_html.links[0]["url"], "https://example.org/apply")
+
+    def test_38_token_analytics_memory_dedup_and_skill_quality(self) -> None:
+        from cortical.token_analytics import (
+            build_token_report,
+            format_token_report_markdown,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            brain = tpath / "brain"
+            c1 = brain / "conv-measured-1111" / ".system_generated" / "logs"
+            c2 = brain / "conv-estimated-2222" / ".system_generated" / "logs"
+            c1.mkdir(parents=True)
+            c2.mkdir(parents=True)
+            (c1 / "transcript.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"step_index": 0, "type": "USER_INPUT", "content": "Analizza cortical-token-saver"}),
+                        json.dumps(
+                            {
+                                "step_index": 1,
+                                "type": "PLANNER_RESPONSE",
+                                "input_tokens": 2500,
+                                "cache_read_tokens": 12000,
+                                "output_tokens": 450,
+                                "tool_calls": [{"name": "run_command"}],
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (c2 / "transcript.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"step_index": 0, "type": "USER_INPUT", "content": "Quick question without usage"}),
+                        json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "thinking": "Checking...", "tool_calls": []}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            db = CorticalWikiDB(str(tpath / "wiki.db"))
+            ctx = AccessContext()
+            db.record_episode(
+                ctx,
+                episode_id="ep-tok-1",
+                title="Test token analytics",
+                goal="Test token analytics",
+                skills_used=[],
+                outcome_status="done",
+                learned_summary="ok",
+            )
+            db.upsert_agent_run(
+                ctx,
+                episode_id="ep-tok-1",
+                run_id="run-1",
+                role="code_implementer",
+                model="qwen3:8b",
+                provider="ollama",
+                goal="Implement token analytics",
+                status="completed",
+                input_tokens=3200,
+                output_tokens=600,
+                total_tokens=3800,
+                elapsed_sec=4.2,
+            )
+
+            report = build_token_report(
+                db,
+                ctx=ctx,
+                brain_dir=brain,
+                include_narrative=True,
+                llm_fn=lambda p: "- Ottimo risparmio locale con Cortical (0 token cloud).",
+            )
+            self.assertTrue(report["zero_remote_tokens_used"])
+            rem = report["global_stats"]["remote"]
+            self.assertEqual(rem["chat_count"], 2)
+            self.assertEqual(rem["measured_chat_count"], 1)
+            self.assertEqual(rem["estimated_chat_count"], 1)
+            self.assertEqual(rem["cache_read_tokens"], 12000)
+            self.assertEqual(report["global_stats"]["local"]["total_tokens"], 3800)
+            self.assertGreaterEqual(report["global_stats"]["roi"]["estimated_cloud_tokens_saved"], 3800)
+            self.assertEqual(report["local_llm_insight"]["source"], "local_llm")
+            md = format_token_report_markdown(report)
+            self.assertIn("Token Report", md)
+            self.assertIn("3,800", md)
+
+            # Memory insight semantic deduplication (Jaccard >= 0.80)
+            curator = MemoryCurator(db)
+            curator.record_chat_turn(ctx, "Preferisco sempre usare pytest per i test python", "Ok")
+            curator.record_chat_turn(ctx, "preferisco sempre usare pytest per i test python!", "Ricevuto")
+            insights = curator.list_insights(limit=10, ctx=ctx)
+            self.assertEqual(len(insights), 1)
+
+            # Skill quality gate + usage tracking + pruning
+            hub = CorticalSkillHub(db, skills_root=tpath / "skills")
+            bad_eval = hub.evaluate_and_compile_skill("ep-bad", goal="procedi", lessons_learned="ok", ctx=ctx)
+            self.assertFalse(bad_eval.should_create_skill)
+
+            good_eval = hub.evaluate_and_compile_skill(
+                "ep-good",
+                goal="Analizza token analytics e verifica suite unittest",
+                lessons_learned="Usa token_analytics per aggregare transcript.jsonl e agent_runs con zero token cloud.",
+                discussion_steps=[
+                    {"tool": "read", "path": "src/cortical/token_analytics.py"},
+                    {"tool": "bash", "command": ".venv/bin/python -m unittest discover -s tests -q"},
+                ],
+                ctx=ctx,
+            )
+            self.assertTrue(good_eval.should_create_skill)
+            updated = hub.record_skill_usage([good_eval.skill_id], helpful=True, ctx=ctx)
+            self.assertEqual(updated, 1)
+
+            # Related task should evolve the existing skill instead of creating a duplicate
+            evolved = hub.evaluate_and_compile_skill(
+                "ep-good-2",
+                goal="Estendi token analytics e suite unittest con export HTML",
+                lessons_learned="Aggiungi export HTML statico a token_analytics e verifica con unittest.",
+                discussion_steps=[
+                    {"tool": "read", "path": "src/cortical/token_analytics.py"},
+                    {"tool": "bash", "command": ".venv/bin/python -m unittest discover -s tests -q"},
+                ],
+                ctx=ctx,
+            )
+            self.assertEqual(evolved.skill_id, good_eval.skill_id)
+            self.assertIn("ep-good-2", evolved.skill_markdown)
+
+            # Create a stub skill and verify prune_low_value_skills detects it
+            stub_dir = (tpath / "skills") / "learned-procedi"
+            stub_dir.mkdir(parents=True)
+            (stub_dir / "SKILL.md").write_text("---\nname: learned-procedi\n---\nAnalisi ed esecuzione controllata sul workspace locale.\n", encoding="utf-8")
+            pruned = hub.prune_low_value_skills(dry_run=False, ctx=ctx)
+            self.assertIn("learned-procedi", pruned["candidates"])
+            self.assertFalse((stub_dir / "SKILL.md").exists())
+
+            # Pluggable model context discovery & configurable 200k cap
+            from cortical.context_window import (
+                compute_dynamic_num_ctx,
+                get_model_context_window,
+                register_model_context_provider,
+            )
+            register_model_context_provider(
+                lambda mid: {"context_length": 262144, "parameter_size": "9B"} if mid == "custom-plug-9b" else None
+            )
+            self.assertEqual(get_model_context_window("custom-plug-9b"), 200000)
+            self.assertEqual(get_model_context_window("custom-plug-9b", max_ctx=131072), 131072)
+            dyn_plug = compute_dynamic_num_ctx(base_ctx=200000, model_id="custom-plug-9b", ram_available_gb=24.0)
+            self.assertLessEqual(dyn_plug, 200000)
+            self.assertGreaterEqual(dyn_plug, 65536)
+
+            # Static Token & Wiki dashboards + offline maintenance patch
+            from cortical.token_analytics import export_static_token_dashboard
+            from cortical.wiki_static import apply_wiki_maintenance_patch, export_static_wiki_dashboard
+
+            tok_html = export_static_token_dashboard(report, tpath / "token_report.html")
+            self.assertTrue(tok_html.exists())
+            self.assertIn("Token Cloud Risparmiati", tok_html.read_text(encoding="utf-8"))
+
+            wiki_res = export_static_wiki_dashboard(db, tpath / "wiki.html", ctx=ctx)
+            self.assertTrue(Path(wiki_res["output_path"]).exists())
+            ins_id = insights[0]["insight_id"]
+            patch_res = apply_wiki_maintenance_patch(
+                db,
+                {"operations": [{"op": "update_insight", "id": ins_id, "text": "Regola aggiornata offline"}]},
+                ctx=ctx,
+            )
+            self.assertEqual(patch_res["updated"], 1)
+            self.assertEqual(curator.list_insights(limit=10, ctx=ctx)[0]["insight_text"], "Regola aggiornata offline")
+
+            # Local Privacy Sanitizer (metadata stripping + pseudonymization + offline LLM) + MCP tool
+            import zipfile
+            from cortical.privacy_sanitizer import sanitize_file
+            from cortical.wiki.mcp_server import CorticalWikiMCPServer
+
+            docx_path = tpath / "sample.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("docProps/core.xml", "<cp:coreProperties><dc:creator>Mario Rossi</dc:creator></cp:coreProperties>")
+                zf.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:t>Contatta mario.rossi@example.org o +39 338 123 4567</w:t></w:p></w:body></w:document>',
+                )
+            san = sanitize_file(docx_path, use_local_llm=True, llm_fn=lambda txt: txt.replace("Contatta", "Scrivi a"))
+            self.assertIn("docProps/core.xml", san.stripped_metadata)
+            self.assertIn("[EMAIL_1]", san.sanitized_text)
+            self.assertNotIn("mario.rossi@example.org", san.sanitized_text)
+            self.assertTrue(san.llm_refined)
+
+            mcp = CorticalWikiMCPServer(str(tpath / "wiki.db"))
+            mcp_res = mcp._dispatch_tool("privacy_read_sanitized", {"file_path": str(docx_path)})
+            self.assertIn("[EMAIL_1]", mcp_res["sanitized_text"])
+            self.assertNotIn("pseudonym_map", mcp_res)
+
+            # Pluggable config & runner adapter + privacy profiles + static settings + retention prune
+            from cortical.config import invoke_configured_runner, load_cortical_config, register_runner_adapter, save_cortical_config
+            from cortical.privacy_sanitizer import sanitize_with_profile
+            from cortical.settings_static import export_static_settings_dashboard
+            from cortical.token_analytics import prune_old_token_data
+
+            register_runner_adapter("mock_metal", lambda sys_p, usr_p, cfg: f"mock:{cfg['model']}:{usr_p[:12]}")
+            cfg_path = tpath / "cortical.config.json"
+            save_cortical_config({"active_runner": "mock_metal", "active_model": "metal-9b"}, cfg_path)
+            loaded_cfg = load_cortical_config(cfg_path)
+            self.assertEqual(invoke_configured_runner("hello world", config=loaded_cfg), "mock:metal-9b:hello world")
+
+            p_max = sanitize_with_profile(docx_path, "max_security", config=loaded_cfg, llm_fn=lambda t: "Conclusion only")
+            self.assertTrue(p_max["local_only"])
+            self.assertEqual(p_max["sanitized_text"], "Conclusion only")
+
+            p_med = sanitize_with_profile(docx_path, "medium", config=loaded_cfg)
+            self.assertFalse(p_med["local_only"])
+            self.assertIn("[EMAIL_1]", p_med["sanitized_text"])
+
+            settings_html = export_static_settings_dashboard(tpath / "settings.html", config=loaded_cfg)
+            self.assertTrue(settings_html.exists())
+            self.assertIn("showSaveFilePicker", settings_html.read_text(encoding="utf-8"))
+
+            pr_res = prune_old_token_data(db, retention_days=90, reset_all=True, ctx=ctx)
+            self.assertGreaterEqual(pr_res["deleted_runs"], 1)
+
+            # Modular multi-file cortical.config.d/*.json + optional component isolation
+            from cortical.config import is_component_enabled, resolve_component
+
+            cfg_d = tpath / "cortical.config.d"
+            cfg_d.mkdir()
+            (cfg_d / "10-custom-privacy.json").write_text(
+                json.dumps({"components": {"privacy_sanitizer": {"enabled": False}}}),
+                encoding="utf-8",
+            )
+            mod_cfg = load_cortical_config(cfg_path, config_dir=cfg_d)
+            self.assertFalse(is_component_enabled("privacy_sanitizer", mod_cfg))
+            self.assertIsNone(resolve_component("privacy_sanitizer", mod_cfg))
+            self.assertIsNotNone(resolve_component("token_analytics", mod_cfg))
+
+            # Custom anonymization terms + PERSON_NAME heuristic + per-row ROI + Wiki compression stats
+            custom_doc = tpath / "hr_note.txt"
+            custom_doc.write_text(
+                "Mario Rossi lavorava per Acme Corp con progetto Orione.",
+                encoding="utf-8",
+            )
+            custom_cfg = {
+                **loaded_cfg,
+                "privacy_sanitizer": {
+                    "sanitizer_model": "qwen2.5:1.5b",
+                    "custom_terms": ["Acme Corp", "Orione"],
+                    "enable_person_name_heuristic": True,
+                },
+            }
+            p_custom = sanitize_with_profile(custom_doc, "medium", config=custom_cfg)
+            self.assertIn("[CUSTOM_1]", p_custom["sanitized_text"])
+            self.assertIn("[PERSON_NAME_1]", p_custom["sanitized_text"])
+            self.assertNotIn("Acme Corp", p_custom["sanitized_text"])
+            self.assertNotIn("Mario Rossi", p_custom["sanitized_text"])
+
+            self.assertIn("local_offload_usd_saved", report["global_stats"]["roi"])
+            self.assertIn("memory_usd_saved", report["global_stats"]["roi"])
+            self.assertIn("current_turn", report)
+            md_turn = format_token_report_markdown(report, lang="en", turn_only=True)
+            self.assertIn("Current Response", md_turn)
+            self.assertNotIn("Recent Remote Chats", md_turn)
+            md_full = format_token_report_markdown(report, lang="en", turn_only=False)
+            self.assertIn("Recent Remote Chats", md_full)
+            md_en = format_token_report_markdown(report, lang="en")
+            self.assertIn("Saved ~$", md_en)
+            self.assertIn("Total Saved: ~$", md_en)
+
+            settings_raw = settings_html.read_text(encoding="utf-8")
+            self.assertIn("Cortical Skill Engine", settings_raw)
+            self.assertNotIn("Skill Hub", settings_raw)
+
+            # Knowledge-linked skill sections & group distillation/compaction + multi-view wiki snapshot
+            self.assertIn("Conoscenze, Concetti & Nodi Wiki Collegati", evolved.skill_markdown)
+            db.ensure_workspace(ctx, root_path=str(tpath), can_write=True)
+            db.upsert_merkle_node(
+                ctx,
+                path="/sub/doc.md",
+                parent_path="/",
+                node_type="file",
+                content_hash="abc",
+                subtree_hash="abc",
+                summary_light="Doc light",
+                summary_medium="Doc medium",
+                summary_high="Doc high",
+                raw_content="Heavy raw payload " * 40,
+            )
+            comp = hub.distill_and_compact_knowledge(
+                "subtree",
+                "/sub",
+                keep_tier="l2",
+                use_local_llm=False,
+                llm_fn=lambda p: "Regola distillata: comprimi sempre L4 Max dopo la sintesi.",
+                ctx=ctx,
+            )
+            self.assertEqual(comp["compacted_nodes"], 1)
+            self.assertGreater(comp["bytes_freed"], 100)
+            self.assertIn("Regola distillata", comp["insight_text"])
+            patch2 = apply_wiki_maintenance_patch(
+                db,
+                {"operations": [{"op": "delete_subtree", "id": "/sub"}]},
+                ctx=ctx,
+            )
+            self.assertEqual(patch2["deleted"], 1)
+
+            from cortical.wiki_static import collect_wiki_snapshot
+            snap = collect_wiki_snapshot(db, ctx=ctx)
+            self.assertIn("optimization", snap)
+            self.assertIn("avg_l1_saving_pct", snap["optimization"])
+            self.assertIn("context_roots", snap)
+            self.assertIn("cross_task_correlations", snap)
+            wiki_html_txt = Path(wiki_res["output_path"]).read_text(encoding="utf-8")
+            self.assertIn("toggleDir(", wiki_html_txt)
+            self.assertNotIn("Merkle</option>", wiki_html_txt)
+
+            # Universal @ / / Wiki addressing + Multi-model local reasoning loop + MCP resources/prompts
+            db.upsert_merkle_node(
+                ctx,
+                path="/src/cortical/sample_ref.py",
+                parent_path="/",
+                node_type="file",
+                content_hash="ref1",
+                subtree_hash="ref1",
+                summary_light="Sample light module summary for merkle compression.",
+                summary_medium="Sample medium module summary.",
+                summary_high="Sample high module summary.",
+                raw_content="def sample(): return 1",
+            )
+            refs = hub.resolve_wiki_references(
+                f"Controlla @wiki:/src/cortical/sample_ref.py @concept:merkle-context-compression @skill:{good_eval.skill_id} @insight:Regola /privacy:max_security /tier:l1",
+                ctx=ctx,
+            )
+            self.assertTrue(refs["directives"]["force_local"])
+            self.assertEqual(refs["directives"]["privacy_profile"], "max_security")
+            self.assertEqual(refs["directives"]["tier"], "l1")
+            self.assertGreaterEqual(len(refs["resolved"]), 3)
+            self.assertIn("Sample light module summary", refs["context_markdown"])
+
+            loop_res = hub.run_multi_model_local_loop(
+                "Analizza @wiki:/src/cortical/sample_ref.py per Mario Rossi (mario@example.org) /tier:l1",
+                models=["qwen2.5:1.5b", "qwen3.5:9b-q3_k_xl"],
+                max_loops=2,
+                privacy_profile="medium",
+                episode_id="ep-loop-test",
+                llm_fn=lambda m, pr: (
+                    f"Soluzione locale da {m} senza dati personali.\nINSIGHT: Usa L1 Merkle prima di scalare al cloud.\nNEEDS_CLOUD: NO"
+                ),
+                ctx=ctx,
+            )
+            self.assertTrue(loop_res["completed_locally"])
+            self.assertEqual(loop_res["models_used"], ["qwen2.5:1.5b", "qwen3.5:9b-q3_k_xl"])
+            self.assertIn("Usa L1 Merkle", loop_res["distilled_insight"])
+            self.assertNotIn("mario@example.org", loop_res["sanitized_remote_prompt"])
+            loop_runs = db.list_agent_runs(ctx, episode_id="ep-loop-test", limit=10)
+            self.assertEqual(len(loop_runs), 2)
+
+            init_resp = mcp.handle_request({"jsonrpc": "2.0", "id": 10, "method": "initialize", "params": {}})
+            self.assertIn("resources", init_resp["result"]["capabilities"])
+            self.assertIn("prompts", init_resp["result"]["capabilities"])
+            res_list = mcp.handle_request({"jsonrpc": "2.0", "id": 11, "method": "resources/list", "params": {}})
+            self.assertTrue(any(r["uri"].startswith("cortical://concept/") for r in res_list["result"]["resources"]))
+            res_read = mcp.handle_request({"jsonrpc": "2.0", "id": 12, "method": "resources/read", "params": {"uri": "cortical://node/src/cortical/sample_ref.py"}})
+            self.assertIn("Sample", res_read["result"]["contents"][0]["text"])
+            pr_list = mcp.handle_request({"jsonrpc": "2.0", "id": 13, "method": "prompts/list", "params": {}})
+            self.assertTrue(any(p["name"] == "cortical-local" for p in pr_list["result"]["prompts"]))
+            pr_get = mcp.handle_request({"jsonrpc": "2.0", "id": 14, "method": "prompts/get", "params": {"name": "cortical-wiki", "arguments": {"reference": "@wiki:/src/cortical/sample_ref.py", "tier": "l1"}}})
+            self.assertIn("Sample light module summary", pr_get["result"]["messages"][0]["content"]["text"])
+            ref_tool = mcp._dispatch_tool("wiki_resolve_references", {"prompt": "@concept:zero-token-roi-analytics /tier:l1"})
+            self.assertGreaterEqual(len(ref_tool["resolved"]), 1)
+
+            # Fuzzy @private:alias / /private alias resolution + Egress Gate + attach/auto-apply + ignore files + interactive Wiki UI
+            from cortical.privacy_sanitizer import ensure_privacy_ignore_files
+            from cortical.wiki_static import auto_apply_pending_wiki_patch, render_static_wiki_dashboard_html
+
+            ignored = ensure_privacy_ignore_files(tpath)
+            self.assertEqual(len(ignored), 3)
+            self.assertIn(".cortical_data/private_notes/", (tpath / ".geminiignore").read_text(encoding="utf-8"))
+
+            fuzz_max = hub.resolve_wiki_references("Controlla @private:sample_ref:max_security", ctx=ctx)
+            self.assertTrue(fuzz_max["directives"]["force_local"])
+            self.assertIn("MAX_SECURITY VAULT", fuzz_max["context_markdown"])
+            fuzz_slash = hub.resolve_wiki_references("Analizza /private sample_ref", ctx=ctx)
+            self.assertIn("PRIVACY: LOW EGRESS", fuzz_slash["context_markdown"])
+
+            patch_file = tpath / "wiki_maintenance_patch.json"
+            patch_file.write_text(
+                json.dumps(
+                    {
+                        "operations": [
+                            {
+                                "op": "attach_private_item",
+                                "path": "/private_notes/hr_secret.md",
+                                "privacy_profile": "max_security",
+                                "summary_light": "[RISERVATO] hr_secret summary",
+                                "summary_medium": "hr_secret sanitized medium summary",
+                                "summary_high": "hr_secret sanitized high summary",
+                                "raw_content": "",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auto_res = auto_apply_pending_wiki_patch(db, repo_root=tpath, ctx=ctx)
+            self.assertEqual(auto_res["applied_files"], 1)
+            self.assertFalse(patch_file.exists())
+            hr_res = hub.resolve_wiki_references("@private:hr_secret", ctx=ctx)
+            self.assertTrue(hr_res["directives"]["force_local"])
+            self.assertIn("MAX_SECURITY VAULT", hr_res["context_markdown"])
+
+            wiki_live_html = render_static_wiki_dashboard_html(collect_wiki_snapshot(db, ctx=ctx))
+            self.assertIn("handlePickedFiles", wiki_live_html)
+            self.assertIn("renderRefAutocomplete", wiki_live_html)
+            self.assertIn("undoLastOp", wiki_live_html)
+            self.assertIn("HISTORY_STACK", wiki_live_html)
+
+    def test_39_multi_model_offload_window_and_public_docs(self) -> None:
+        """Tests mock telemetry isolation, active-window multi-episode local offload aggregation, 3-model loop, and public docs export."""
+        from cortical.config import DEFAULT_CONFIG, _record_runner_telemetry
+        from cortical.settings_static import export_static_settings_and_help
+        from cortical.token_analytics import build_token_report, format_token_report_markdown
+
+        db = CorticalWikiDB(self.wiki_db_path)
+        ctx = AccessContext()
+
+        # 1. Mock telemetry with db_path=None must NOT pollute an existing DB pointed to by CORTICAL_WIKI_DB
+        self.wiki_db_path.touch()
+        _record_runner_telemetry(
+            model="mock-model",
+            runner_name="mock_metal",
+            role="test",
+            prompt="hello world",
+            in_tok=10,
+            out_tok=5,
+            elapsed_sec=0.1,
+            episode_id="ep-mock-ignore",
+            db_path=None,
+        )
+        self.assertEqual(len(db.list_agent_runs(ctx, limit=20)), 0)
+
+        # 2. 3-model local loop via offline mock llm_fn populates total_local_tokens & records 3 runs
+        skills_dir = self.root / "skills"
+        skills_dir.mkdir()
+        hub = CorticalSkillHub(db, skills_dir)
+        loop3 = hub.run_multi_model_local_loop(
+            "Audit module architecture",
+            models=["qwen2.5:1.5b", "qwen3.5:9b-q3_k_xl", "qwen3:8b"],
+            max_loops=3,
+            episode_id="ep-a",
+            llm_fn=lambda m, p: f"Analisi offline completata con {m}.\nINSIGHT: Usa loop locali 3-modelli.\nNEEDS_CLOUD: NO",
+            ctx=ctx,
+        )
+        self.assertEqual(loop3["models_used"], ["qwen2.5:1.5b", "qwen3.5:9b-q3_k_xl", "qwen3:8b"])
+        self.assertGreater(loop3["total_local_tokens"], 0)
+        self.assertTrue(loop3["completed_locally"])
+
+        # Add a second recent local episode to verify active-window aggregation across episodes
+        now = time.time()
+        db.upsert_agent_run(
+            ctx,
+            run_id="run-ep-b-1",
+            episode_id="ep-b",
+            role="local_reviewer",
+            model="qwen3:8b",
+            provider="ollama",
+            status="completed",
+            goal="Second active-window local task",
+            input_tokens=600,
+            output_tokens=200,
+            total_tokens=800,
+            elapsed_sec=4.5,
+            finished_at=now,
+        )
+        # Seed a minimal remote transcript JSONL so current_turn computes both raw and effective offload shares
+        brain_dir = self.root / "brain"
+        conv_dir = brain_dir / "conv1234" / ".system_generated" / "logs"
+        conv_dir.mkdir(parents=True)
+        (conv_dir / "transcript.jsonl").write_text(
+            json.dumps({
+                "type": "PLANNER_RESPONSE",
+                "usage": {"input_tokens": 1000, "output_tokens": 400, "cache_read_tokens": 200},
+                "tool_calls": [],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        report = build_token_report(db, ctx=ctx, conversation_id="conv1234", brain_dir=brain_dir, lang="en")
+        ct_loc = report["current_turn"]["local"]
+        ct_roi = report["current_turn"]["roi"]
+        self.assertEqual(ct_loc["run_count"], 4)
+        self.assertGreater(ct_loc["total_tokens"], 800)
+        self.assertIn("qwen2.5:1.5b", ct_loc["models_used"])
+        self.assertIn("qwen3:8b", ct_loc["models_used"])
+        self.assertGreater(ct_roi["offload_share_pct"], 0.0)
+        self.assertGreaterEqual(ct_roi["effective_offload_share_pct"], ct_roi["offload_share_pct"])
+
+        md = format_token_report_markdown(report, lang="en", turn_only=True)
+        self.assertIn("qwen2.5:1.5b", md)
+        self.assertIn("eff.", md)
+
+        # 3. Public docs export strips broken local links & stale branding
+        docs_out = self.root / "public_docs"
+        s_path, h_path = export_static_settings_and_help(docs_out, config=DEFAULT_CONFIG, public_docs=True)
+        for p in (s_path, h_path):
+            txt = p.read_text(encoding="utf-8")
+            self.assertNotIn("./token_report.html", txt)
+            self.assertNotIn("./wiki.html", txt)
+            self.assertNotIn("Skill Hub", txt)
 
 
 if __name__ == "__main__":
