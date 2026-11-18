@@ -7,7 +7,7 @@ Designed to stay completely optional and lightweight:
   (`X-Cortical-Key`, `Authorization: Bearer ...`, `?key=...`, or `cortical_key` cookie)
   or an authenticated user session (`cortical_session` cookie / Bearer session token).
 - User registration is strictly bounded by configurable `max_users` (default: 1, pre-assigned
-  to `ccancellieri@hotmail.com`) with PBKDF2-HMAC-SHA256 passwords and one-time password
+  to `DEFAULT_OWNER_EMAIL`, default `owner@example.com`) with PBKDF2-HMAC-SHA256 passwords and one-time password
   creation tokens sent via email / outbox.
 """
 
@@ -35,9 +35,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-DEFAULT_OWNER_EMAIL = "ccancellieri@hotmail.com"
-DEFAULT_OWNER_NAME = "Carlo Cancellieri"
-DEFAULT_DUCKDNS_DOMAIN = "sovereign-ai"
+DEFAULT_OWNER_EMAIL = os.environ.get("CORTICAL_OWNER_EMAIL", "owner@example.com")
+DEFAULT_OWNER_NAME = os.environ.get("CORTICAL_OWNER_NAME", "Local Owner")
+DEFAULT_DUCKDNS_DOMAIN = os.environ.get("CORTICAL_DUCKDNS_DOMAIN", "my-cortical")
 DEFAULT_GITHUB_PORTAL_URL = "https://ccancellieri.github.io/cortical/"
 
 GATEWAY_SCHEMA_SQL = """
@@ -1110,7 +1110,7 @@ def render_auth_portal_html(
 
     <div id="pane-login" style="display:{'none' if is_setup else 'block'};">
       <label for="login-email">Email</label>
-      <input id="login-email" type="email" value="{esc_email}" placeholder="ccancellieri@hotmail.com" />
+      <input id="login-email" type="email" value="{esc_email}" placeholder="owner@example.com" />
       <label for="login-pw">Password (oppure usa la Chiave Gateway sotto)</label>
       <input id="login-pw" type="password" placeholder="••••••••" />
       <label for="login-key">Oppure Chiave Gateway (X-Cortical-Key)</label>

@@ -34,5 +34,5 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db gate
 PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db gateway config --max-users 1 --auth-enabled true
 
 # Send/prepare password setup link email
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db gateway invite --email ccancellieri@hotmail.com
+PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db gateway invite --email user@example.com
 ```

@@ -13,13 +13,13 @@ build/
 *.db-wal
 .DS_Store
 
-html/token_report.html
-html/wiki.html
-html/tennis-game.html
+html/
 wiki_maintenance_patch.json
 .mcp.json
+.pi/mcp.json
 .pi/hardware_profile.json
 .memory/
+.agents/skills/learned-*/
 
 # Personal & unrelated third-party workspace skills (never publish upstream)
 .agents/skills/career-campaign-unified/

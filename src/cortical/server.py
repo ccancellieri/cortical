@@ -379,7 +379,7 @@ def speak_native_tts(
             return True
 
         if sys_name == "Linux":
-            piper_bin = shutil.which("piper") or "/home/bianco/.local/bin/piper"
+            piper_bin = shutil.which("piper") or os.environ.get("CORTICAL_PIPER_BIN", "piper")
             paola_model = Path.home() / ".local/share/local-ai/models/piper/it_IT-paola-medium.onnx"
             if Path(piper_bin).exists() and paola_model.exists() and shutil.which("aplay"):
                 cmd = (
@@ -3263,7 +3263,7 @@ class CorticalLiveService:
             return (HTTPStatus.OK if t_res.get("ok") else HTTPStatus.BAD_GATEWAY, t_res)
 
         if method == "POST" and path == "/api/gateway/invite":
-            email_addr = str(body.get("email") or "ccancellieri@hotmail.com").strip().lower()
+            email_addr = str(body.get("email") or os.environ.get("CORTICAL_OWNER_EMAIL", "owner@example.com")).strip().lower()
             try:
                 res = self.remote_gateway.send_access_email(
                     recipient_email=email_addr,
@@ -4293,7 +4293,7 @@ def run_live_server(
             if parsed.path in {"/auth/login", "/auth/setup-password"}:
                 gw = service.remote_gateway.get_status(include_secret=False)
                 tok = (q.get("token") or [""])[0]
-                eml = (q.get("email") or ["ccancellieri@hotmail.com"])[0]
+                eml = (q.get("email") or [os.environ.get("CORTICAL_OWNER_EMAIL", "owner@example.com")])[0]
                 page_html = render_auth_portal_html(
                     mode="setup" if parsed.path == "/auth/setup-password" else "login",
                     token=tok,

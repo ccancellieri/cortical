@@ -3,8 +3,8 @@
   "version": "0.2.0",
   "description": "Zero-Dependency 4-Tier Merkle Second Brain MCP, Dynamic 200k Context Auto-Scaler, Zero-Token ROI Analytics & Adaptive Permission Gate for pi / OpenCode",
   "license": "Apache-2.0",
-  "author": "Carlo Cancellieri <ccancellieri@hotmail.com> (https://github.com/ccancellieri)",
-  "homepage": "https://github.com/ccancellieri/cortical",
+  "author": "Carlo Cancellieri (https://github.com/ccancellieri)",
+  "homepage": "https://ccancellieri.github.io/cortical/",
   "repository": {
     "type": "git",
     "url": "https://github.com/ccancellieri/cortical.git"

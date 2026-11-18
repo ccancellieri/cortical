@@ -289,7 +289,7 @@ def save_chrome_profile_preference(pref: dict[str, Any]) -> dict[str, Any]:
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     current = load_chrome_profile_preference()
 
-    # Resolve email/name lookup (e.g. ccancellieri@gmail.com -> Default)
+    # Resolve email/name lookup (e.g. user@example.com -> Default)
     lookup = str(pref.get("email") or pref.get("profile_directory") or "").strip()
     if "@" in lookup or pref.get("mode") == "system_chrome":
         matched = _resolve_system_profile_match(lookup)

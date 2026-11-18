@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -198,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     p_gw.add_argument("--max-users", type=int, default=None)
     p_gw.add_argument("--rotate-key", action="store_true")
     p_gw.add_argument("--include-secret", action="store_true")
-    p_gw.add_argument("--email", default="ccancellieri@hotmail.com")
+    p_gw.add_argument("--email", default=os.environ.get("CORTICAL_OWNER_EMAIL", "owner@example.com"))
     p_gw.add_argument("--public-url", default="")
     p_gw.add_argument("--duckdns-domain", default="")
     p_gw.add_argument("--duckdns-token", default=None)

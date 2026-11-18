@@ -131,7 +131,7 @@ def render_static_settings_html(cfg: Optional[dict[str, Any]] = None, public_doc
         sanModelLbl: 'Modello LLM Sanitizer Offline', sanModelTip: 'Modello locale leggero (es. qwen2.5:1.5b) o evoluto usato per riscrivere quasi-identificatori.',
         personHeur: 'Rileva automaticamente Nomi/Cognomi (euristica [PERSON_NAME_N])',
         customTermsLbl: 'Termini Personalizzati da Anonimizzare (nomi, cognomi, clienti, codename — separati da virgola)',
-        customTermsTip: 'Esempio: Carlo Cancellieri, Acme Srl, Progetto Orione → sostituiti da [CUSTOM_N].',
+        customTermsTip: 'Esempio: Mario Rossi, Acme Srl, Progetto Orione → sostituiti da [CUSTOM_N].',
         addTier: '+ Aggiungi Livello Custom',
         catsLbl: 'Categorie da rimuovere / pseudonimizzare:',
         prLocalOnly: 'Solo Locale (0 byte al cloud)',
@@ -178,7 +178,7 @@ def render_static_settings_html(cfg: Optional[dict[str, Any]] = None, public_doc
         sanModelLbl: 'Offline Sanitizer LLM Model', sanModelTip: 'Lightweight (e.g. qwen2.5:1.5b) or stronger local model used for quasi-identifier rewriting.',
         personHeur: 'Auto-detect Person Names/Surnames ([PERSON_NAME_N] heuristic)',
         customTermsLbl: 'Custom Terms to Anonymize (names, surnames, clients, codenames — comma separated)',
-        customTermsTip: 'Example: Carlo Cancellieri, Acme Corp, Project Orion → replaced with [CUSTOM_N].',
+        customTermsTip: 'Example: Jane Doe, Acme Corp, Project Orion → replaced with [CUSTOM_N].',
         addTier: '+ Add Custom Privacy Tier',
         catsLbl: 'Categories to strip / pseudonymize:',
         prLocalOnly: 'Local Only (0 bytes to cloud)',
@@ -437,7 +437,7 @@ def render_static_settings_html(cfg: Optional[dict[str, Any]] = None, public_doc
           <label class="row-chk"><input type="checkbox" ${{ps.enable_person_name_heuristic!==false?'checked':''}} onchange="setCfgPath('privacy_sanitizer','enable_person_name_heuristic',this.checked)" /> <span>${{L.personHeur}}</span></label>
         </div>
         <label style="margin-bottom:14px;"><span class="lbl-head">${{L.customTermsLbl}} ${{tip(L.customTermsTip)}}</span>
-          <textarea oninput="updateCustomTerms(this.value)" placeholder="Carlo Cancellieri, Client Corp, Project Phoenix">${{esc(customTerms)}}</textarea>
+          <textarea oninput="updateCustomTerms(this.value)" placeholder="Jane Doe, Client Corp, Project Orion">${{esc(customTerms)}}</textarea>
         </label>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
           <strong style="font-size:0.9rem; color:var(--accent);">Privacy Profiles</strong>

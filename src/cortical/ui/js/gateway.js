@@ -49,7 +49,7 @@ function renderGatewayUi(st) {
   const keyInp = document.getElementById('gw-api-key');
   if (keyInp) keyInp.value = st.gateway_api_key || st.gateway_key_masked || '';
   const domInp = document.getElementById('gw-duckdns-domain');
-  if (domInp) domInp.value = st.duckdns_domain || 'sovereign-ai';
+  if (domInp) domInp.value = st.duckdns_domain || 'my-cortical';
   const smtpH = document.getElementById('gw-smtp-host');
   if (smtpH) smtpH.value = st.smtp_host || '';
   const smtpP = document.getElementById('gw-smtp-port');
@@ -93,7 +93,7 @@ export async function saveGatewayConfig({ rotateKey = false } = {}) {
       auth_enabled: Boolean(document.getElementById('gw-auth-enabled')?.checked),
       allow_localhost_bypass: Boolean(document.getElementById('gw-localhost-bypass')?.checked),
       max_users: Math.max(1, Number(document.getElementById('gw-max-users')?.value || 1)),
-      duckdns_domain: document.getElementById('gw-duckdns-domain')?.value?.trim() || 'sovereign-ai',
+      duckdns_domain: document.getElementById('gw-duckdns-domain')?.value?.trim() || 'my-cortical',
       rotate_key: Boolean(rotateKey),
     };
     const duckTok = document.getElementById('gw-duckdns-token')?.value?.trim();
@@ -143,7 +143,7 @@ export async function exposeGatewayTunnel(action = 'start') {
   }
 }
 
-export async function sendGatewayInvite(email = 'ccancellieri@hotmail.com') {
+export async function sendGatewayInvite(email = 'owner@example.com') {
   setFeedback(`Preparazione email e link creazione password per ${email}...`);
   try {
     const res = await apiPost('/api/gateway/invite', { email });
@@ -183,7 +183,7 @@ export function bindGatewayEvents(onOpenStudioGateway) {
   document.getElementById('btn-gw-expose-stop')?.addEventListener('click', () => exposeGatewayTunnel('stop'));
   document.getElementById('gw-users-list')?.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-gw-invite]');
-    if (btn) sendGatewayInvite(btn.getAttribute('data-gw-invite') || 'ccancellieri@hotmail.com');
+    if (btn) sendGatewayInvite(btn.getAttribute('data-gw-invite') || 'owner@example.com');
   });
   document.getElementById('btn-gw-register-user')?.addEventListener('click', async () => {
     const eml = document.getElementById('gw-new-user-email')?.value?.trim() || '';

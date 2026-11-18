@@ -323,7 +323,7 @@ MCP_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "email": {"type": "string", "default": "ccancellieri@hotmail.com"},
+                "email": {"type": "string", "default": "owner@example.com"},
                 "public_url": {"type": "string", "default": ""},
             },
         },
@@ -801,7 +801,7 @@ class CorticalWikiMCPServer:
         if name == "wiki_gateway_invite_user":
             gw = CorticalRemoteGateway(self.db)
             return gw.send_access_email(
-                recipient_email=str(args.get("email") or "ccancellieri@hotmail.com"),
+                recipient_email=str(args.get("email") or os.environ.get("CORTICAL_OWNER_EMAIL", "owner@example.com")),
                 base_public_url=str(args.get("public_url") or "") or None,
             )
         if name == "wiki_bundle_export":

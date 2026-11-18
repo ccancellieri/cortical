@@ -41,8 +41,7 @@ function resolveCorticalPaths(): { pythonBin: string; pythonPath: string; skills
   const candidates = [
     process.env.CORTICAL_ROOT,
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."),
-    "/Users/ccancellieri/work/code/cortical",
-    "/home/bianco/cortical",
+    process.cwd(),
   ].filter(Boolean) as string[];
 
   for (const root of candidates) {
@@ -1021,7 +1020,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
       type: "object",
       properties: {
         url: { type: "string", description: "URL del form di candidatura" },
-        fields: { type: "object", description: "Mappa campo -> valore (es. {\"email\": \"ccancellieri@hotmail.com\", \"name\": \"Carlo Cancellieri\"})" },
+        fields: { type: "object", description: "Mappa campo -> valore (es. {\"email\": \"user@example.com\", \"name\": \"Jane Doe\"})" },
         upload_file: { type: "string", description: "Path locale opzionale del CV da allegare" },
         submit: { type: "boolean", default: false, description: "Invia solo se richiesto esplicitamente" },
       },
@@ -1221,7 +1220,7 @@ export default function corticalHarnessExtension(pi: ExtensionAPI) {
           enum: ["status", "config", "invite", "duckdns"],
           default: "status",
         },
-        email: { type: "string", default: "ccancellieri@hotmail.com" },
+        email: { type: "string", default: "owner@example.com" },
         max_users: { type: "integer" },
         auth_enabled: { type: "boolean" },
         rotate_key: { type: "boolean", default: false },

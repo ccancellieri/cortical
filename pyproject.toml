@@ -9,7 +9,7 @@ description = "Cortical: Zero-Dependency 4-Tier Merkle/Macro-Graph Second Brain 
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
-  {name = "Carlo Cancellieri", email = "ccancellieri@hotmail.com"}
+  {name = "Carlo Cancellieri"}
 ]
 requires-python = ">=3.10"
 dependencies = []

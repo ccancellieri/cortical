@@ -1828,12 +1828,12 @@ class TestCorticalSystem(unittest.TestCase):
         chrome_dir = self.root / "chrome_sys"
         chrome_dir.mkdir(parents=True, exist_ok=True)
         (chrome_dir / "Local State").write_text(
-            json.dumps({"profile": {"info_cache": {"Profile 1": {"name": "Work", "user_name": "ccancellieri@gmail.com"}}}}),
+            json.dumps({"profile": {"info_cache": {"Profile 1": {"name": "Work", "user_name": "work@example.com"}}}}),
             encoding="utf-8",
         )
         disc_ok = discover_chrome_profiles(system_dir=chrome_dir)
         emails = [p.get("email") for p in disc_ok["profiles"]]
-        self.assertIn("ccancellieri@gmail.com", emails)
+        self.assertIn("work@example.com", emails)
         self.assertFalse(disc_ok["tcc_restricted"])
 
         with patch.object(Path, "read_text", side_effect=PermissionError(1, "Operation not permitted")):
@@ -2250,18 +2250,19 @@ class TestCorticalSystem(unittest.TestCase):
         self.assertEqual(b_intent["query"], "Albert Einstein")
 
     def test_34_optional_remote_gateway_auth_max_users_and_cross_harness(self) -> None:
-        """Verifies optional Gateway Key auth, max_users=1 cap, ccancellieri@hotmail.com setup-password flow & MCP tools."""
+        """Verifies optional Gateway Key auth, max_users=1 cap, default owner setup-password flow & MCP tools."""
         from cortical.server import CorticalLiveService
         from cortical.wiki.mcp_server import CorticalWikiMCPServer
 
         svc = CorticalLiveService(self.wiki_db_path, self.perm_db_path)
 
-        # 1. Pre-seeded owner ccancellieri@hotmail.com occupies slot 1/1
+        # 1. Pre-seeded owner occupies slot 1/1
         st_gw, gw = svc.handle_api("GET", "/api/gateway/status", {}, {})
         self.assertEqual(st_gw, 200)
         self.assertEqual(gw["max_users"], 1)
         self.assertEqual(gw["registered_users_count"], 1)
-        self.assertEqual(gw["users"][0]["email"], "ccancellieri@hotmail.com")
+        owner_email = gw["users"][0]["email"]
+        self.assertEqual(owner_email, "owner@example.com")
         api_key = gw["gateway_api_key"]
         self.assertTrue(api_key.startswith("ctk_"))
 
@@ -2294,9 +2295,9 @@ class TestCorticalSystem(unittest.TestCase):
         )
         self.assertEqual(st_key_ok, 200)
 
-        # 5. Re-inviting existing ccancellieri@hotmail.com generates password setup token + outbox files
+        # 5. Re-inviting existing owner generates password setup token + outbox files
         inv = svc.remote_gateway.send_access_email(
-            recipient_email="ccancellieri@hotmail.com",
+            recipient_email=owner_email,
             base_public_url="https://demo.lhr.life",
         )
         self.assertTrue(inv["ok"])
@@ -2335,7 +2336,7 @@ class TestCorticalSystem(unittest.TestCase):
             "POST",
             "/api/auth/login",
             {},
-            {"email": "ccancellieri@hotmail.com", "password": "wrong-password"},
+            {"email": owner_email, "password": "wrong-password"},
             headers=remote_hdrs,
             client_ip="203.0.113.10",
         )
@@ -2391,7 +2392,7 @@ class TestCorticalSystem(unittest.TestCase):
         mem_src.mkdir(parents=True)
         (mem_src / "decisions.md").write_text("- Decision 1\n", encoding="utf-8")
         chrome_src = src_dir / "chrome_profile.json"
-        chrome_src.write_text(json.dumps({"mode": "system_chrome", "profile_directory": "Default", "email": "ccancellieri@gmail.com"}), encoding="utf-8")
+        chrome_src.write_text(json.dumps({"mode": "system_chrome", "profile_directory": "Default", "email": "work@example.com"}), encoding="utf-8")
 
         bundle_path = base_dir / "usb_drive" / "cortical-backup.tar.gz"
         exp = export_cortical_bundle(
@@ -2424,10 +2425,10 @@ class TestCorticalSystem(unittest.TestCase):
         fake_chrome = base_dir / "Chrome"
         fake_chrome.mkdir(parents=True)
         (fake_chrome / "Local State").write_text(
-            json.dumps({"profile": {"info_cache": {"Default": {"user_name": "ccancellieri@gmail.com", "name": "carlo"}}}}),
+            json.dumps({"profile": {"info_cache": {"Default": {"user_name": "work@example.com", "name": "work"}}}}),
             encoding="utf-8",
         )
-        matched = _resolve_system_profile_match("ccancellieri@gmail.com", system_dir=fake_chrome)
+        matched = _resolve_system_profile_match("work@example.com", system_dir=fake_chrome)
         self.assertIsNotNone(matched)
         assert matched is not None
         self.assertEqual(matched["profile_directory"], "Default")
