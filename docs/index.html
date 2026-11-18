@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cortical — Zero-Server Second Brain MCP, Multi-Model Local Offload &amp; Privacy Sanitizer</title>
+  <meta name="description" content="Zero-dependency Python 3.10+ 4-Tier Merkle Second Brain MCP, Multi-Model Local Offload Loops, Local Privacy Sanitizer (@private), 200k Dynamic Context Auto-Scaler, and Zero-Token ROI Analytics." />
+  <style>
+    :root {
+      --bg: #0b1120; --surface: #111827; --card: #172033; --border: #263248;
+      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --emerald: #34d399; --amber: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { color: var(--emerald); background: #090e1a; padding: 1px 5px; border-radius: 5px; font-size: 0.84em; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 20px 64px; }
+    .hero { padding: 34px 28px; border: 1px solid var(--border); border-radius: 16px; background: radial-gradient(circle at top right, rgba(56,189,248,0.16), transparent 55%), var(--surface); margin-bottom: 24px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .badge { display: inline-block; font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(56,189,248,0.4); color: var(--accent); background: rgba(56,189,248,0.08); }
+    .badge-em { border-color: rgba(52,211,153,0.4); color: var(--emerald); background: rgba(52,211,153,0.08); }
+    h1 { margin: 0 0 10px; font-size: 2.2rem; line-height: 1.2; }
+    .lead { color: var(--muted); font-size: 1.04rem; max-width: 840px; margin: 0 0 20px; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 15px; border-radius: 8px; font-weight: 600; font-size: 0.9rem; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+    .btn:hover { border-color: var(--accent); text-decoration: none; }
+    .btn-primary { background: var(--accent); color: #082f49; border-color: var(--accent); }
+    .btn-emerald { background: rgba(52,211,153,0.14); color: var(--emerald); border-color: rgba(52,211,153,0.45); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-bottom: 28px; }
+    .kpi { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+    .kpi-val { font-size: 1.65rem; font-weight: 800; color: var(--emerald); }
+    .kpi-lbl { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+    h2 { font-size: 1.35rem; margin: 30px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+    .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 16px; }
+    .card { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
+    .card h3 { margin: 0 0 8px; font-size: 1.04rem; color: var(--accent); }
+    .card p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .local-box { padding: 20px; border: 1px solid rgba(52,211,153,0.35); border-radius: 12px; background: rgba(17,24,39,0.9); margin: 26px 0; }
+    .local-box h3 { margin: 0 0 8px; color: var(--emerald); font-size: 1.08rem; }
+    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .tab-btn { padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); cursor: pointer; font-weight: 600; }
+    .tab-btn.active { background: var(--accent); color: #082f49; border-color: var(--accent); }
+    pre { margin: 0; padding: 14px; border-radius: 10px; background: #060a14; border: 1px solid var(--border); overflow-x: auto; font-size: 0.84rem; color: #cbd5e1; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="badges">
+        <span class="badge">Apache-2.0</span>
+        <span class="badge">Python 3.10+ Stdlib Only (0 External Deps)</span>
+        <span class="badge badge-em">Zero-Server Architecture</span>
+        <span class="badge badge-em">Multi-Model Local Offload</span>
+      </div>
+      <h1>Cortical</h1>
+      <p class="lead">
+        Zero-server <strong>4-Tier Merkle Second Brain MCP</strong>, <strong>Multi-Model Local Offload Loops</strong>,
+        <strong>Local Privacy Sanitizer &amp; <code>@private:</code> Egress Gate</strong>, <strong>200k Dynamic Context Auto-Scaler</strong>,
+        <strong>Cortical Skill Engine</strong>, and <strong>Zero-Token ROI Analytics</strong> for
+        <code>pi</code>, <code>OpenCode</code>, <code>Claude Code</code>, <code>Codex</code> &amp; <code>Antigravity</code>.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">GitHub Repository</a>
+        <a class="btn" href="./settings.html">⚙️ Settings</a>
+        <a class="btn" href="./help.html">❓ Docs / Help</a>
+        <a class="btn btn-emerald" href="https://github.com/ccancellieri/cortical/blob/main/docs/LAUNCH_KIT.md" target="_blank" rel="noopener">🚀 Launch Kit &amp; PRs</a>
+        <button class="btn" id="idx-lang-btn" onclick="toggleIdxLang()">🇮🇹 IT</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="kpi"><div class="kpi-val">99.27%</div><div class="kpi-lbl" data-i18n="k1">Token reduction (<code>light</code> root index: 1,860 vs 255,360 raw tokens across 43 modules)</div></div>
+      <div class="kpi"><div class="kpi-val">283.35 ms</div><div class="kpi-lbl" data-i18n="k2">Full Merkle crawl (89.56 ms O(1) unchanged delta skip)</div></div>
+      <div class="kpi"><div class="kpi-val">951.7 µs</div><div class="kpi-lbl" data-i18n="k3">Deterministic permission gate latency per bash evaluation</div></div>
+      <div class="kpi"><div class="kpi-val">7,700 tok · $0</div><div class="kpi-lbl" data-i18n="k4">3-model local offload loop in 44.39s (14.51 out tok/s, 0 cloud tokens)</div></div>
+    </section>
+
+    <h2 data-i18n="h_tools">Core Plug-and-Play Modules (Zero-Server, Zero Vector-DB Bloat)</h2>
+    <section class="tools">
+      <div class="card">
+        <h3>1. cortical-wiki-mcp</h3>
+        <p data-i18n="t1">Pure Python + SQLite FTS5 4-tier Merkle Tree (<code>light</code> ~50 tok, <code>medium</code> ~250 tok, <code>high</code> ~1000 tok, <code>max</code>) + Episode Macro-Graph + relational RBAC + native MCP <code>resources</code> &amp; <code>prompts</code>. Zero Docker or daemon bloat.</p>
+      </div>
+      <div class="card">
+        <h3 data-i18n="t2_h">2. Multi-Model Local Offload Loops</h3>
+        <p data-i18n="t2">Chains fast local models via Ollama / llama.cpp / mlx-lm (e.g. <code>qwen2.5:1.5b</code> router &rarr; <code>qwen3.5:9b-q3_k_xl</code> analyst &rarr; <code>qwen3:8b</code> reviewer) to solve tasks offline and distill insights without burning cloud tokens.</p>
+      </div>
+      <div class="card">
+        <h3 data-i18n="t3_h">3. Local Privacy Sanitizer &amp; @private: Gate</h3>
+        <p data-i18n="t3">Strips OOXML/PDF metadata, pseudonymizes custom terms &amp; IDs (<code>[EMAIL_1]</code>, <code>[CUSTOM_1]</code>), protects private vaults with harness ignore rules, and resolves <code>@private:</code> / <code>cortical://private/...</code> policies before cloud egress.</p>
+      </div>
+      <div class="card">
+        <h3 data-i18n="t4_h">4. Pluggable 200k Context Auto-Scaler</h3>
+        <p data-i18n="t4">Auto-discovers loaded local models (<code>/api/ps</code>, <code>/api/show</code>) and dynamically sizes <code>num_ctx</code> to live RAM headroom (<code>vm_stat</code>/<code>/proc/meminfo</code>) up to 200k—preventing silent 4096 truncation and swap thrashing.</p>
+      </div>
+      <div class="card">
+        <h3 data-i18n="t5_h">5. Cortical Skill Engine</h3>
+        <p data-i18n="t5">Maintains standard <code>SKILL.md</code> playbooks (<code>cortical-token-saver</code>, <code>second-brain-3plus1-workflow</code>), consolidates recurring workflows into knowledge-linked <code>learned-*</code> skills, and tracks real usage without skill bloat.</p>
+      </div>
+      <div class="card">
+        <h3 data-i18n="t6_h">6. Zero-Token ROI &amp; Permission Gate</h3>
+        <p data-i18n="t6">Parses remote cloud transcripts (<code>mtime+size</code> cached in ~99 ms) alongside local multi-model runs and 3+1 compression savings at 0 cloud tokens, paired with sub-millisecond bash risk scoring.</p>
+      </div>
+    </section>
+
+    <section class="local-box">
+      <h3 data-i18n="h_local">Run Your Private Static Dashboards Locally</h3>
+      <p data-i18n="p_local" style="margin:0 0 12px; color:var(--muted); font-size:0.9rem;">
+        Your personal Wiki Knowledge Explorer (<code>html/wiki.html</code>) and live Token ROI Dashboard (<code>html/token_report.html</code>) never leave your machine. Generate them locally in 100 ms with zero servers running:
+      </p>
+      <pre>PYTHONPATH=src python3 -m cortical.cli --db .cortical_data/wiki.db wiki-dashboard --output html/wiki.html
+PYTHONPATH=src python3 -m cortical.cli --db .cortical_data/wiki.db token-report --html html/token_report.html</pre>
+    </section>
+
+    <h2 id="benchmarks" data-i18n="h_bench">Measured Benchmarks (Apple M2 Pro · 16 GB Unified Memory)</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th data-i18n="th_m">Model / Component</th><th data-i18n="th_f">Footprint</th><th data-i18n="th_t">Throughput / Latency</th><th data-i18n="th_c">Context</th><th data-i18n="th_r">Verified Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>qwen3.5:9b-q3_k_xl</code> (Unsloth UD-Q3_K_XL)</td><td>5.1 GB</td><td>25.0 tok/s (load 6.57s)</td><td>131K</td><td data-i18n="r1">Daily local LLM &amp; 131K context</td></tr>
+          <tr><td><code>qwen3:8b</code></td><td>5.2 GB</td><td>28.6 tok/s (load 5.19s)</td><td>32K</td><td data-i18n="r2">Fast reviewer / coder</td></tr>
+          <tr><td><code>qwen3.8:27b-iq2_xxs</code> (Unsloth UD-IQ2_XXS)</td><td>7.2 GB</td><td>9.9 tok/s (load 15.73s)</td><td>32K</td><td data-i18n="r3">Heavy reasoning / complex tasks</td></tr>
+          <tr><td><code>cortical local-loop</code> (1.5b &rarr; 9b &rarr; 8b)</td><td>0 Cloud Tok</td><td>7,700 tok in 44.39s (14.51 out tok/s)</td><td>Dynamic <code>num_ctx</code></td><td data-i18n="r5">3-pass offline reasoning &amp; insight distillation</td></tr>
+          <tr><td><code>cortical-wiki-mcp</code> (<code>server.py</code> med/high)</td><td>SQLite WAL</td><td>460 / 2,007 tok vs 57,725 raw</td><td>4-Tier</td><td data-i18n="r4">99.20% / 96.52% context savings</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="install" data-i18n="h_inst">1-Minute Installation (10+ Coding Agents &amp; Harnesses)</h2>
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('mcp', this)">Antigravity / Cursor / Windsurf / Cline</button>
+      <button class="tab-btn" onclick="showTab('claude', this)">Claude Code</button>
+      <button class="tab-btn" onclick="showTab('codex', this)">OpenAI Codex CLI</button>
+      <button class="tab-btn" onclick="showTab('pi', this)">pi Package</button>
+      <button class="tab-btn" onclick="showTab('opencode', this)">OpenCode</button>
+      <button class="tab-btn" onclick="showTab('zed', this)">Zed / Continue.dev</button>
+      <button class="tab-btn" onclick="showTab('cli', this)">CLI &amp; Benchmarks</button>
+    </div>
+    <pre id="code-mcp">{
+  "mcpServers": {
+    "cortical-wiki": {
+      "command": "python3",
+      "args": ["-m", "cortical.wiki.mcp_server"],
+      "env": {
+        "PYTHONPATH": "/path/to/cortical/src",
+        "CORTICAL_WIKI_DB": "/path/to/cortical/.cortical_data/wiki.db"
+      }
+    }
+  }
+}</pre>
+    <pre id="code-claude" style="display:none;">claude mcp add cortical-wiki \
+  -e PYTHONPATH=/path/to/cortical/src \
+  -e CORTICAL_WIKI_DB=/path/to/cortical/.cortical_data/wiki.db \
+  -- python3 -m cortical.wiki.mcp_server</pre>
+    <pre id="code-codex" style="display:none;"># ~/.codex/config.toml
+[mcp_servers.cortical-wiki]
+command = "python3"
+args = ["-m", "cortical.wiki.mcp_server"]
+
+[mcp_servers.cortical-wiki.env]
+PYTHONPATH = "/path/to/cortical/src"
+CORTICAL_WIKI_DB = "/path/to/cortical/.cortical_data/wiki.db"</pre>
+    <pre id="code-pi" style="display:none;">git clone https://github.com/ccancellieri/cortical.git
+cd cortical &amp;&amp; bash ./scripts/setup.sh
+pi --package .   # loads .pi/extensions + .agents/skills</pre>
+    <pre id="code-opencode" style="display:none;">git clone https://github.com/ccancellieri/cortical.git
+# Copy opencode.json &amp; .agents/skills into your workspace
+cp opencode.json /your/project/opencode.json</pre>
+    <pre id="code-zed" style="display:none;">// Zed (~/.config/zed/settings.json) -&gt; context_servers.cortical-wiki
+// Continue (~/.continue/config.yaml) -&gt; mcpServers: [{ name: cortical-wiki, command: python3, args: ["-m", "cortical.wiki.mcp_server"] }]</pre>
+    <pre id="code-cli" style="display:none;">PYTHONPATH=src python3 -m cortical.cli --db .cortical_data/wiki.db crawl .
+PYTHONPATH=src python3 -m cortical.cli --db .cortical_data/wiki.db local-loop "Audit @wiki:/src/cortical /tier:l1"
+PYTHONPATH=src python3 scripts/benchmark.py                 # Core Merkle &amp; gate benchmarks
+PYTHONPATH=src python3 scripts/benchmark_local_offload.py   # Live 3-model local offload loop</pre>
+
+    <footer>
+      <span>Built by <strong>Carlo Cancellieri</strong> · <a href="https://ccancellieri.github.io" target="_blank" rel="noopener">Personal Portfolio</a> · Lead Software Engineer &amp; Cloud/Geospatial Architect (OGC Member, ISO-TC211)</span>
+      <span><a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">GitHub Repo</a> · <a href="https://linkedin.com/in/ccancellieri" target="_blank" rel="noopener">LinkedIn</a> · <a href="https://orcid.org/0009-0006-4092-4234" target="_blank" rel="noopener">ORCID</a></span>
+    </footer>
+  </div>
+  <script>
+    function showTab(id, btn) {
+      ['mcp', 'claude', 'codex', 'pi', 'opencode', 'zed', 'cli'].forEach((k) => {
+        document.getElementById('code-' + k).style.display = k === id ? 'block' : 'none';
+      });
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+    let IDX_LANG = localStorage.getItem('cortical_lang') || 'en';
+    const IDX_I18N = {
+      it: {
+        k1: 'Riduzione token (indice <code>light</code>: 1.860 vs 255.360 token raw su 43 moduli)',
+        k2: 'Crawl Merkle completo (89.56 ms O(1) delta skip sui file invariati)',
+        k3: 'Latenza deterministica Permission Gate per ogni comando bash',
+        k4: 'Loop offload locale 3-modelli in 44.39s (14.51 out tok/s, 0 token cloud)',
+        h_tools: 'Moduli Principali Plug-and-Play (Zero-Server, Zero DB Vettoriali)',
+        t1: 'Albero Merkle a 4 livelli su Python puro + SQLite FTS5 (<code>light</code> ~50 tok, <code>medium</code> ~250 tok, <code>high</code> ~1000 tok, <code>max</code>) + Macro-Graph + RBAC + MCP <code>resources</code>/<code>prompts</code> nativi. Zero Docker o demoni.',
+        t2_h: '2. Loop Multi-Modello in Locale',
+        t2: 'Concatena modelli locali via Ollama / llama.cpp / mlx-lm (es. <code>qwen2.5:1.5b</code> router &rarr; <code>qwen3.5:9b-q3_k_xl</code> analista &rarr; <code>qwen3:8b</code> revisore) per risolvere task offline e distillare insight a 0 token cloud.',
+        t3_h: '3. Local Privacy Sanitizer &amp; Gate @private:',
+        t3: 'Rimuove metadati binari OOXML/PDF, pseudonimizza termini custom e identità (<code>[EMAIL_1]</code>, <code>[CUSTOM_1]</code>), protegge vault privati con file ignore e controlla l\'egress su <code>@private:</code> / <code>cortical://private/...</code>.',
+        t4_h: '4. Auto-Scaler Contesto 200k Pluggabile',
+        t4: 'Rileva automaticamente i modelli locali (<code>/api/ps</code>, <code>/api/show</code>) e dimensiona <code>num_ctx</code> sulla RAM libera reale (<code>vm_stat</code>/<code>/proc/meminfo</code>) fino a 200k evitando troncamenti a 4096 token.',
+        t5_h: '5. Cortical Skill Engine',
+        t5: 'Gestisce playbook standard <code>SKILL.md</code> (<code>cortical-token-saver</code>, <code>second-brain-3plus1-workflow</code>), consolida skill <code>learned-*</code> collegate alla conoscenza wiki ed evita duplicazioni.',
+        t6_h: '6. Token Analytics a 0 Token &amp; Permission Gate',
+        t6: 'Analizza transcript cloud locali (cache su disco <code>mtime+size</code> ~99 ms), run locali multi-modello e risparmi memoria 3+1 a 0 token cloud, insieme a scoring bash &lt;1 ms.',
+        h_local: 'Genera le Dashboard Private in Locale sulla Tua Macchina',
+        p_local: 'Il tuo Explorer Wiki (<code>html/wiki.html</code>) e il Report ROI live (<code>html/token_report.html</code>) restano 100% privati sulla tua macchina. Generali in locale in 100 ms senza avviare alcun server:',
+        h_bench: 'Benchmark Misurati (Apple M2 Pro · 16 GB Unified Memory)',
+        th_m: 'Modello / Componente', th_f: 'Impronta', th_t: 'Throughput / Latenza', th_c: 'Contesto', th_r: 'Ruolo Verificato',
+        r1: 'LLM locale quotidiano &amp; contesto 131K',
+        r2: 'Revisore / coder veloce',
+        r3: 'Ragionamento pesante / task complessi',
+        r4: 'Risparmio contesto 99.20% / 96.52%',
+        r5: 'Ragionamento offline 3-pass &amp; distillazione insight',
+        h_inst: 'Installazione in 1 Minuto (10+ Coding Agent &amp; Harness)',
+      },
+      en: {
+        k1: 'Token reduction (<code>light</code> root index: 1,860 vs 255,360 raw tokens across 43 modules)',
+        k2: 'Full Merkle crawl (89.56 ms O(1) unchanged delta skip)',
+        k3: 'Deterministic permission gate latency per bash evaluation',
+        k4: '3-model local offload loop in 44.39s (14.51 out tok/s, 0 cloud tokens)',
+        h_tools: 'Core Plug-and-Play Modules (Zero-Server, Zero Vector-DB Bloat)',
+        t1: 'Pure Python + SQLite FTS5 4-tier Merkle Tree (<code>light</code> ~50 tok, <code>medium</code> ~250 tok, <code>high</code> ~1000 tok, <code>max</code>) + Episode Macro-Graph + relational RBAC + native MCP <code>resources</code> &amp; <code>prompts</code>. Zero Docker or daemon bloat.',
+        t2_h: '2. Multi-Model Local Offload Loops',
+        t2: 'Chains fast local models via Ollama / llama.cpp / mlx-lm (e.g. <code>qwen2.5:1.5b</code> router &rarr; <code>qwen3.5:9b-q3_k_xl</code> analyst &rarr; <code>qwen3:8b</code> reviewer) to solve tasks offline and distill insights without burning cloud tokens.',
+        t3_h: '3. Local Privacy Sanitizer &amp; @private: Gate',
+        t3: 'Strips OOXML/PDF metadata, pseudonymizes custom terms &amp; IDs (<code>[EMAIL_1]</code>, <code>[CUSTOM_1]</code>), protects private vaults with harness ignore rules, and resolves <code>@private:</code> / <code>cortical://private/...</code> policies before cloud egress.',
+        t4_h: '4. Pluggable 200k Context Auto-Scaler',
+        t4: 'Auto-discovers loaded local models (<code>/api/ps</code>, <code>/api/show</code>) and dynamically sizes <code>num_ctx</code> to live RAM headroom (<code>vm_stat</code>/<code>/proc/meminfo</code>) up to 200k—preventing silent 4096 truncation and swap thrashing.',
+        t5_h: '5. Cortical Skill Engine',
+        t5: 'Maintains standard <code>SKILL.md</code> playbooks (<code>cortical-token-saver</code>, <code>second-brain-3plus1-workflow</code>), consolidates recurring workflows into knowledge-linked <code>learned-*</code> skills, and tracks real usage without skill bloat.',
+        t6_h: '6. Zero-Token ROI &amp; Permission Gate',
+        t6: 'Parses remote cloud transcripts (<code>mtime+size</code> cached in ~99 ms) alongside local multi-model runs and 3+1 compression savings at 0 cloud tokens, paired with sub-millisecond bash risk scoring.',
+        h_local: 'Run Your Private Static Dashboards Locally',
+        p_local: 'Your personal Wiki Knowledge Explorer (<code>html/wiki.html</code>) and live Token ROI Dashboard (<code>html/token_report.html</code>) never leave your machine. Generate them locally in 100 ms with zero servers running:',
+        h_bench: 'Measured Benchmarks (Apple M2 Pro · 16 GB Unified Memory)',
+        th_m: 'Model / Component', th_f: 'Footprint', th_t: 'Throughput / Latency', th_c: 'Context', th_r: 'Verified Role',
+        r1: 'Daily local LLM &amp; 131K context',
+        r2: 'Fast reviewer / coder',
+        r3: 'Heavy reasoning / complex tasks',
+        r4: '99.20% / 96.52% context savings',
+        r5: '3-pass offline reasoning &amp; insight distillation',
+        h_inst: '1-Minute Installation (10+ Coding Agents &amp; Harnesses)',
+      },
+    };
+    function applyIdxLang() {
+      document.getElementById('idx-lang-btn').textContent = IDX_LANG === 'it' ? '🇮🇹 IT' : '🇬🇧 EN';
+      const lead = document.querySelector('.lead');
+      if (lead) {
+        lead.innerHTML = IDX_LANG === 'it'
+          ? 'Zero-server <strong>Second Brain Merkle 4-Tier MCP</strong>, <strong>Loop Multi-Modello in Locale</strong>, <strong>Local Privacy Sanitizer &amp; Gate <code>@private:</code></strong>, <strong>Auto-Scaler Contesto 200k</strong>, <strong>Cortical Skill Engine</strong> e <strong>Analitica ROI a 0 Token Cloud</strong> per <code>pi</code>, <code>OpenCode</code>, <code>Claude Code</code>, <code>Codex</code> e <code>Antigravity</code>.'
+          : 'Zero-server <strong>4-Tier Merkle Second Brain MCP</strong>, <strong>Multi-Model Local Offload Loops</strong>, <strong>Local Privacy Sanitizer &amp; <code>@private:</code> Egress Gate</strong>, <strong>200k Dynamic Context Auto-Scaler</strong>, <strong>Cortical Skill Engine</strong>, and <strong>Zero-Token ROI Analytics</strong> for <code>pi</code>, <code>OpenCode</code>, <code>Claude Code</code>, <code>Codex</code> &amp; <code>Antigravity</code>.';
+      }
+      const dict = IDX_I18N[IDX_LANG] || IDX_I18N.en;
+      document.querySelectorAll('[data-i18n]').forEach((el) => {
+        const k = el.getAttribute('data-i18n');
+        if (dict[k]) el.innerHTML = dict[k];
+      });
+    }
+    function toggleIdxLang() {
+      IDX_LANG = IDX_LANG === 'it' ? 'en' : 'it';
+      localStorage.setItem('cortical_lang', IDX_LANG);
+      applyIdxLang();
+    }
+    applyIdxLang();
+  </script>
+</body>
+</html>

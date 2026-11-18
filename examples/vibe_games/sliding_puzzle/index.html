@@ -1,223 +1,358 @@
 <!DOCTYPE html>
-<html>
+<html lang="it">
 <head>
-    <title>Puzzle 15</title>
-    <style>
-        body {
-            background-color: #121212;
-            color: #ffffff;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            text-align: center;
-            margin: 0;
-            padding: 0;
-        }
-        h1 {
-            margin-top: 20px;
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(4, 100px);
-            grid-gap: 5px;
-            margin: 20px auto;
-            padding: 10px;
-            background-color: #2a2a2a;
-            border-radius: 10px;
-        }
-        .tile {
-            background-color: #3a3a3a;
-            border: 2px solid #5a5a5a;
-            color: #ffffff;
-            font-size: 24px;
-            font-weight: bold;
-            line-height: 100px;
-            text-align: center;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-        .tile.empty {
-            background-color: #2a2a2a;
-            color: #777;
-        }
-        .controls {
-            margin-top: 20px;
-        }
-        .controls button {
-            padding: 10px 20px;
-            font-size: 16px;
-            margin: 5px;
-            border: none;
-            border-radius: 5px;
-            background-color: #4a4a4a;
-            color: #ffffff;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-        .controls button:hover {
-            background-color: #6a6a6a;
-        }
-        .stats {
-            margin-top: 10px;
-            font-size: 18px;
-        }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cortical Arcade — Puzzle 15 (Sliding Puzzle)</title>
+  <style>
+    :root {
+      --bg: #070b14;
+      --panel: #0f172a;
+      --border: #1e293b;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #131f3a 0%, var(--bg) 65%);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      width: 100%;
+      max-width: 460px;
+      background: rgba(15, 23, 42, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+      text-align: center;
+    }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    .subtitle { font-size: 0.8rem; color: var(--muted); margin-bottom: 14px; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .stat-box {
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 10px;
+    }
+    .stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+    .stat-val { font-size: 1.2rem; font-weight: 800; margin-top: 2px; color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      width: 100%;
+      max-width: 344px;
+      margin: 0 auto 16px;
+      padding: 12px;
+      background: #0b1220;
+      border: 1.5px solid #243247;
+      border-radius: 16px;
+    }
+    .tile {
+      aspect-ratio: 1;
+      border-radius: 11px;
+      border: 1.5px solid #334155;
+      background: linear-gradient(145deg, #1e293b, #152033);
+      color: var(--text);
+      font-size: 1.45rem;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      user-select: none;
+      transition: transform 0.1s, border-color 0.15s, background 0.15s;
+    }
+    .tile:hover:not(.empty) {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .tile.correct:not(.empty) {
+      border-color: rgba(34, 197, 94, 0.65);
+      background: linear-gradient(145deg, rgba(20, 83, 45, 0.55), #132a24);
+      color: #bbf7d0;
+    }
+    .tile.empty {
+      background: rgba(15, 23, 42, 0.35);
+      border: 1.5px dashed #1e293b;
+      cursor: default;
+    }
+    .win-banner {
+      display: none;
+      margin-bottom: 14px;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(34, 197, 94, 0.16);
+      border: 1.5px solid rgba(34, 197, 94, 0.7);
+      color: #86efac;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .win-banner.visible { display: block; }
+    .controls { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #1e293b;
+      color: var(--text);
+      padding: 9px 16px;
+      font-size: 0.84rem;
+      font-weight: 600;
+    }
+    button:hover { background: #273549; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .hint { margin-top: 12px; font-size: 0.74rem; color: var(--muted); }
+  </style>
 </head>
 <body>
-    <h1>Puzzle 15</h1>
-    <div class="grid" id="grid"></div>
-    <div class="controls">
-        <button onclick="shuffleBoard()">Mescola</button>
-        <button onclick="resetBoard()">Reset</button>
-    </div>
+  <main class="card">
+    <h1>🧩 Puzzle 15 (Sliding Puzzle)</h1>
+    <div class="subtitle">Ordina le tessere da 1 a 15 · Supporta click multi-tessera e Frecce/WASD</div>
+
     <div class="stats">
-        <p>Mosse: <span id="moveCount">0</span></p>
-        <p>Tempo: <span id="timer">0</span>s</p>
+      <div class="stat-box">
+        <div class="stat-label">Mosse</div>
+        <div class="stat-val" id="moves">0</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Tempo</div>
+        <div class="stat-val" id="timer">00:00</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Record</div>
+        <div class="stat-val" id="best">—</div>
+      </div>
     </div>
-    <script>
-        const grid = document.getElementById('grid');
-        const moveCountDisplay = document.getElementById('moveCount');
-        const timerDisplay = document.getElementById('timer');
-        let board = [];
-        let emptyTileIndex = 15;
-        let moveCount = 0;
-        let startTime = 0;
-        let timerInterval;
-        let puzzleSolved = false;
 
-        function createBoard() {
-            for (let i = 0; i < 16; i++) {
-                const tile = document.createElement('div');
-                tile.className = 'tile';
-                tile.textContent = i === 15 ? '' : i + 1;
-                tile.style.display = 'flex';
-                tile.style.justifyContent = 'center';
-                tile.style.alignItems = 'center';
-                tile.addEventListener('click', () => handleTileClick(i));
-                grid.appendChild(tile);
-            }
+    <div class="win-banner" id="win-banner"></div>
+    <div class="grid" id="grid" aria-label="Griglia Puzzle 15"></div>
+
+    <div class="controls">
+      <button type="button" class="btn-primary" id="btn-shuffle">🔀 Mescola (Risolvibile)</button>
+      <button type="button" id="btn-solve-preview">✨ Ordina Risolto</button>
+    </div>
+    <div class="hint">Le tessere evidenziate in verde sono già nella loro posizione finale.</div>
+  </main>
+
+  <script>
+    const gridEl = document.getElementById('grid');
+    const movesEl = document.getElementById('moves');
+    const timerEl = document.getElementById('timer');
+    const bestEl = document.getElementById('best');
+    const winBannerEl = document.getElementById('win-banner');
+
+    let board = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0];
+    let emptyIdx = 15;
+    let moves = 0;
+    let elapsedSec = 0;
+    let timerId = null;
+    let started = false;
+    let solved = false;
+    const BEST_KEY = 'cortical_puzzle15_best';
+
+    function loadBest() {
+      try {
+        const raw = localStorage.getItem(BEST_KEY);
+        if (raw) {
+          const b = JSON.parse(raw);
+          bestEl.textContent = `${b.moves}m · ${formatTime(b.sec)}`;
+          return b;
         }
+      } catch {}
+      bestEl.textContent = '—';
+      return null;
+    }
 
-        function handleTileClick(index) {
-            if (puzzleSolved) return;
-            const tile = board[index];
-            const emptyTile = board[emptyTileIndex];
-            const row = Math.floor(index / 4);
-            const col = index % 4;
-            const emptyRow = Math.floor(emptyTileIndex / 4);
-            const emptyCol = emptyTileIndex % 4;
+    function formatTime(sec) {
+      const m = String(Math.floor(sec / 60)).padStart(2, '0');
+      const s = String(sec % 60).padStart(2, '0');
+      return `${m}:${s}`;
+    }
 
-            if (row === emptyRow) {
-                if (Math.abs(col - emptyCol) === 1) {
-                    swapTiles(index, emptyTileIndex);
-                    moveCount++;
-                    moveCountDisplay.textContent = moveCount;
-                    checkWin();
-                }
-            } else if (col === emptyCol) {
-                if (Math.abs(row - emptyRow) === 1) {
-                    swapTiles(index, emptyTileIndex);
-                    moveCount++;
-                    moveCountDisplay.textContent = moveCount;
-                    checkWin();
-                }
-            }
+    function stopTimer() {
+      if (timerId !== null) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+    }
+
+    function ensureTimerRunning() {
+      if (timerId !== null || solved) return;
+      timerId = setInterval(() => {
+        elapsedSec += 1;
+        timerEl.textContent = formatTime(elapsedSec);
+      }, 1000);
+    }
+
+    function isBoardSolved(arr = board) {
+      for (let i = 0; i < 15; i++) {
+        if (arr[i] !== i + 1) return false;
+      }
+      return arr[15] === 0;
+    }
+
+    function neighbors(idx) {
+      const r = Math.floor(idx / 4);
+      const c = idx % 4;
+      const list = [];
+      if (r > 0) list.push(idx - 4);
+      if (r < 3) list.push(idx + 4);
+      if (c > 0) list.push(idx - 1);
+      if (c < 3) list.push(idx + 1);
+      return list;
+    }
+
+    // Performs random legal slides from the solved state -> 100% mathematically solvable
+    function shuffleBoard(steps = 140) {
+      stopTimer();
+      board = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0];
+      emptyIdx = 15;
+      let prevEmpty = -1;
+      for (let s = 0; s < steps; s++) {
+        const opts = neighbors(emptyIdx).filter((n) => n !== prevEmpty);
+        const pick = opts[Math.floor(Math.random() * opts.length)];
+        board[emptyIdx] = board[pick];
+        board[pick] = 0;
+        prevEmpty = emptyIdx;
+        emptyIdx = pick;
+      }
+      if (isBoardSolved()) {
+        const opts = neighbors(emptyIdx);
+        const pick = opts[0];
+        board[emptyIdx] = board[pick];
+        board[pick] = 0;
+        emptyIdx = pick;
+      }
+      moves = 0;
+      elapsedSec = 0;
+      started = false;
+      solved = false;
+      movesEl.textContent = '0';
+      timerEl.textContent = '00:00';
+      winBannerEl.classList.remove('visible');
+      winBannerEl.textContent = '';
+      render();
+    }
+
+    function slideTile(idx) {
+      if (solved || idx === emptyIdx) return false;
+      const r = Math.floor(idx / 4);
+      const c = idx % 4;
+      const er = Math.floor(emptyIdx / 4);
+      const ec = emptyIdx % 4;
+      if (r !== er && c !== ec) return false;
+
+      const step = r === er ? (idx < emptyIdx ? -1 : 1) : (idx < emptyIdx ? -4 : 4);
+      let cur = emptyIdx;
+      while (cur !== idx) {
+        const next = cur + step;
+        board[cur] = board[next];
+        cur = next;
+      }
+      board[idx] = 0;
+      emptyIdx = idx;
+
+      if (!started) {
+        started = true;
+        ensureTimerRunning();
+      }
+      moves += 1;
+      movesEl.textContent = String(moves);
+
+      if (isBoardSolved()) {
+        solved = true;
+        stopTimer();
+        winBannerEl.textContent = `🏆 Puzzle completato in ${moves} mosse e ${formatTime(elapsedSec)}!`;
+        winBannerEl.classList.add('visible');
+        const curBest = loadBest();
+        if (!curBest || moves < curBest.moves || (moves === curBest.moves && elapsedSec < curBest.sec)) {
+          try { localStorage.setItem(BEST_KEY, JSON.stringify({ moves, sec: elapsedSec })); } catch {}
+          loadBest();
         }
+      }
+      render();
+      return true;
+    }
 
-        function swapTiles(index1, index2) {
-            const temp = board[index1];
-            board[index1] = board[index2];
-            board[index2] = temp;
-            renderBoard();
+    function render() {
+      gridEl.innerHTML = '';
+      for (let i = 0; i < 16; i++) {
+        const val = board[i];
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'tile';
+        if (val === 0) {
+          btn.classList.add('empty');
+          btn.setAttribute('aria-label', 'Spazio vuoto');
+          btn.disabled = true;
+        } else {
+          btn.textContent = String(val);
+          if (val === i + 1) btn.classList.add('correct');
+          btn.addEventListener('click', () => slideTile(i));
         }
+        gridEl.appendChild(btn);
+      }
+    }
 
-        function renderBoard() {
-            for (let i = 0; i < 16; i++) {
-                const tile = grid.children[i];
-                tile.textContent = i === 15 ? '' : board[i] + '';
-                tile.classList.toggle('empty', i === 15);
-            }
-        }
+    document.addEventListener('keydown', (e) => {
+      if (solved) return;
+      const er = Math.floor(emptyIdx / 4);
+      const ec = emptyIdx % 4;
+      let target = -1;
+      if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') {
+        if (er < 3) target = emptyIdx + 4;
+      } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') {
+        if (er > 0) target = emptyIdx - 4;
+      } else if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+        if (ec < 3) target = emptyIdx + 1;
+      } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+        if (ec > 0) target = emptyIdx - 1;
+      }
+      if (target >= 0) {
+        e.preventDefault();
+        slideTile(target);
+      }
+    });
 
-        function checkWin() {
-            let isSolved = true;
-            for (let i = 0; i < 16; i++) {
-                if (i === 15) continue;
-                if (board[i] !== i + 1) {
-                    isSolved = false;
-                    break;
-                }
-            }
-            if (isSolved && !puzzleSolved) {
-                puzzleSolved = true;
-                clearInterval(timerInterval);
-                alert('Hai vinto! Mosse: ' + moveCount + ' - Tempo: ' + timerDisplay.textContent + 's');
-            }
-        }
+    document.getElementById('btn-shuffle').addEventListener('click', () => shuffleBoard(140));
+    document.getElementById('btn-solve-preview').addEventListener('click', () => {
+      stopTimer();
+      board = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0];
+      emptyIdx = 15;
+      moves = 0;
+      elapsedSec = 0;
+      started = false;
+      solved = false;
+      movesEl.textContent = '0';
+      timerEl.textContent = '00:00';
+      winBannerEl.classList.remove('visible');
+      render();
+    });
 
-        function shuffleBoard() {
-            if (puzzleSolved) {
-                resetBoard();
-                return;
-            }
-            clearInterval(timerInterval);
-            moveCount = 0;
-            moveCountDisplay.textContent = moveCount;
-            startTime = Date.now();
-            timerDisplay.textContent = 0;
-            timerInterval = setInterval(() => {
-                const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                timerDisplay.textContent = elapsed;
-            }, 1000);
-
-            let shuffled = [...Array(16).keys()].sort(() => Math.random() - 0.5);
-            let valid = false;
-            let tries = 0;
-            while (!valid && tries < 1000) {
-                valid = true;
-                for (let i = 0; i < 16; i++) {
-                    if (i === 15) continue;
-                    if (shuffled[i] !== i + 1) {
-                        const row = Math.floor(i / 4);
-                        const col = i % 4;
-                        const emptyRow = Math.floor(15 / 4);
-                        const emptyCol = 15 % 4;
-                        if (row === emptyRow && Math.abs(col - emptyCol) === 1) {
-                            continue;
-                        } else if (col === emptyCol && Math.abs(row - emptyRow) === 1) {
-                            continue;
-                        } else {
-                            valid = false;
-                            break;
-                        }
-                    }
-                }
-                tries++;
-            }
-            if (tries >= 1000) {
-                alert('Impossibile mescolare');
-                return;
-            }
-            board = shuffled;
-            emptyTileIndex = 15;
-            renderBoard();
-        }
-
-        function resetBoard() {
-            clearInterval(timerInterval);
-            moveCount = 0;
-            moveCountDisplay.textContent = moveCount;
-            startTime = Date.now();
-            timerDisplay.textContent = 0;
-            timerInterval = setInterval(() => {
-                const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                timerDisplay.textContent = elapsed;
-            }, 1000);
-            board = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-            emptyTileIndex = 15;
-            renderBoard();
-        }
-
-        createBoard();
-        renderBoard();
-    </script>
+    loadBest();
+    shuffleBoard(140);
+  </script>
 </body>
 </html>
