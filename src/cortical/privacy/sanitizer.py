@@ -110,6 +110,17 @@ def ocr_image_local(image_bytes: bytes, *, model: Optional[str], config: Optiona
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            detail = str(exc)
+        if "multimodal" in detail.lower():
+            raise FailClosedError(
+                f"Model '{model}' lacks a multimodal vision projector (mmproj). Pull a real vision model (e.g. 'ollama pull qwen2.5vl:3b') and select it in Privacy > Vision."
+            ) from exc
+        raise FailClosedError(f"Local vision model '{model}' HTTP {exc.code}: {detail or exc}") from exc
     except Exception as exc:  # noqa: BLE001
         raise FailClosedError(f"Local vision model '{model}' unavailable ({exc}). Run: ollama pull {model}") from exc
     return str(((data.get("message") or {}).get("content")) or "")

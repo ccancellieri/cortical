@@ -158,7 +158,8 @@ def _build_shared_rules_md(vault_md: str, model_id: str, router_url: str, compos
         f"- **Default Local Model:** `{model_id}` · **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
         f"- **Active Token-Savers:** {', '.join(f'`{t}`' for t in tools_active) if tools_active else '`serena`, `rtk`, `TOON`'}",
         "- **Code Navigation & Edits:** Prefer Serena LSP symbol tools (`get_symbols_overview`, `find_symbol`, `replace_symbol_body`) over reading full files.",
-        "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items or when `routing.mode == 'full_local'`).",
+        "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items).",
+        "- **Force Local LLM (`/local`):** Whenever the user starts a message with `/local` (or when `routing.mode == 'full_local'`), execute the request strictly via `cortical_local_offload` on `cortical-mcp` and return the local Ollama output.",
         "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
     ]
     if vault_md.strip():
@@ -208,6 +209,7 @@ def plan_sync(
         p = paths_map["antigravity"]["mcp"]
         cur = _read_json_safe(p)
         mcps = dict(cur.get("mcpServers") or {})
+        mcps.pop("cortical-wiki", None)
         mcps["serena"] = {"command": serena_bin, "args": _serena_args("antigravity"), "disabled": False}
         mcps["cortical-mcp"] = {**_cortical_mcp_entry(root, v_db), "disabled": False}
         cur["mcpServers"] = mcps

@@ -120,11 +120,16 @@ class CorticalMCPServer:
             export_roi_json(self.vault.db_path.parent, config=cfg)
             return {"hardware": hw, "models": rec, "composers": inspect_composed_tools(), "routing": routing_state}
         if name == "cortical_local_offload":
+            import time as _t
+            from .analytics.roi import export_roi_json
+
             cfg = load_cortical_config()
             prompt = str(args.get("prompt") or "")
             if args.get("vault_alias"):
                 item = self.vault.read_resource(str(args["vault_alias"]), allow_local_only=True)
                 prompt = f"Sanitized local context (@private:{item['alias']}):\n{item['text']}\n\nTask:\n{prompt}"
+            used_model = str(args.get("model") or cfg.get("active_model") or (cfg.get("models_by_role") or {}).get("daily_coder") or "qwen3.5:9b-q3_k_xl")
+            t0 = _t.perf_counter()
             out = invoke_configured_runner(
                 prompt,
                 system_prompt="Reply concisely offline using only provided context.",
@@ -132,7 +137,9 @@ class CorticalMCPServer:
                 model_override=args.get("model") or None,
                 role="mcp_local_offload",
             )
-            return {"completed_locally": True, "response": out}
+            elapsed = round(_t.perf_counter() - t0, 2)
+            export_roi_json(self.vault.db_path.parent, config=cfg)
+            return {"completed_locally": True, "model_used": used_model, "elapsed_sec": elapsed, "response": out}
         raise ValueError(f"Unknown tool: {name}")
 
     def _private_prompt_text(self, alias: str) -> str:

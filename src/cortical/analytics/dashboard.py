@@ -289,6 +289,8 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     let ITEMS = [];
     let SELECTED_FILE = null;
     let SEL_PROFILE = 'max_security';
+    let DRAFT = { alias: '', policy: 'auto', terms: '' };
+    let LAST_SIG = '';
     let INSPECT = null;
     let DIR_HANDLE = null;
     let NEEDS_REAUTH = false;
@@ -401,7 +403,11 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       return true;
     }
 
-    async function syncFolderAndDb() {
+    async function syncFolderAndDb(fromPoll = false) {
+      if (fromPoll) {
+        const ae = document.activeElement;
+        if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return;
+      }
       const merged = new Map();
       (await idbGetAllItems()).forEach((it) => merged.set(it.alias, it));
 
@@ -454,7 +460,11 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
           NEEDS_REAUTH = true;
         }
       }
-      ITEMS = Array.from(merged.values()).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+      const nextItems = Array.from(merged.values()).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+      const sig = JSON.stringify({ i: nextItems.map((x) => [x.alias, x.updated_at, x.profile]), q: QUEUE });
+      ITEMS = nextItems;
+      if (fromPoll && sig === LAST_SIG) return;
+      LAST_SIG = sig;
       render();
     }
 
@@ -803,15 +813,15 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
         const blob = await redactedPngBlob();
         await submitJob(alias + '.png', blob, jobMeta(alias, { custom_terms: customTerms, source_name: file.name, use_local_ner: true }));
         await idbOrig('put', alias, { alias, kind: 'image', text: '', marks: customTerms, keep: [], rects: IMGST ? IMGST.rects.length : 0 });
-        SELECTED_FILE = null; IMGST = null;
-        setBanner('info', T('Immagine in coda: i riquadri neri sono già applicati; il modello locale legge il testo residuo. Esegui "watch" (vedi sotto) o apri un agente.', 'Image queued: black boxes are applied; the local model reads the remaining text. Run "watch" (below) or open an agent.'));
+        SELECTED_FILE = null; IMGST = null; DRAFT.alias = ''; DRAFT.terms = '';
+        setBanner('info', T('Immagine in coda: i riquadri neri sono già applicati; il modello locale legge il testo residuo.', 'Image queued: black boxes are applied; the local model reads remaining text.'));
         return;
       }
 
       const buf = await file.arrayBuffer();
       const u8 = new Uint8Array(buf);
       const nameLower = file.name.toLowerCase();
-      const reqPolicy = document.getElementById('v-policy')?.value || 'auto';
+      const reqPolicy = DRAFT.policy || document.getElementById('v-policy')?.value || 'auto';
       let extracted = ''; let strippedMeta = []; let needsPy = false;
       if (/\.(docx|xlsx|pptx)$/.test(nameLower)) { const r = await extractOoxmlText(u8); extracted = r.text; strippedMeta = r.stripped; }
       else if (nameLower.endsWith('.pdf')) { const r = await extractPdfTextJS(u8); extracted = r.text; strippedMeta = r.stripped; needsPy = !r.readable; }
@@ -821,8 +831,8 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
 
       if (linkedOk() && (useModel() || needsPy)) {
         await submitJob(file.name, u8, jobMeta(alias, { custom_terms: customTerms, source_name: file.name }));
-        SELECTED_FILE = null;
-        setBanner('info', T('In coda per l\'anonimizzazione con il modello locale (' + (pv.ner_model || 'default') + '). Esegui "watch" (vedi sotto) oppure aprirà da solo quando un agente usa cortical-mcp.', 'Queued for anonymization with the local model (' + (pv.ner_model || 'default') + '). Run "watch" (below) or it runs when an agent uses cortical-mcp.'));
+        SELECTED_FILE = null; DRAFT.alias = ''; DRAFT.terms = '';
+        setBanner('info', T('In coda per l\'anonimizzazione con il modello locale (' + (pv.ner_model || 'default') + ').', 'Queued for anonymization with the local model (' + (pv.ner_model || 'default') + ').'));
         return;
       }
       if (needsPy) { setBanner('err', T('Questo PDF richiede il modello/estrattore locale: collega la cartella Cortical.', 'This PDF needs the local model/extractor: link the Cortical folder.')); return; }
@@ -932,6 +942,7 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     async function pickFileObj(f) {
       if (!f) return;
       SELECTED_FILE = f; IMGST = null;
+      DRAFT.alias = f.name.replace(/\.[^.]+$/, '');
       if (IMG_RX.test(f.name)) { try { await loadImageEditor(f); return; } catch {} }
       render();
     }
@@ -988,36 +999,42 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       const pv = CFG.privacy || {};
       const capsList = ENV.installed_model_caps || [];
       const inst = ENV.installed_models || [];
+      const catIds = CATALOG.map((m) => m.model_id);
+      const allOpts = Array.from(new Set(inst.concat(catIds).concat(ENV.vision_suggestions || [])));
       const capLabel = (name) => {
         const found = capsList.find((x) => x.name === name);
-        return found && found.capabilities ? `${name} [${found.capabilities.join(', ')}]` : name;
+        const isInst = inst.includes(name);
+        const caps = found && found.capabilities ? found.capabilities.join(', ') : '';
+        return `${name}${isInst ? ' ✓' : ' (pull)'}${caps ? ' [' + caps + ']' : ''}`;
       };
-      const textOpts = Array.from(new Set(inst.concat(['qwen2.5:1.5b', 'qwen2.5:3b', 'qwen3:8b'])))
-        .map((m) => `<option value="${esc(m)}" label="${esc(capLabel(m))}">`).join('');
+      const curNer = pv.ner_model || 'qwen2.5:1.5b';
+      const nerSet = Array.from(new Set([curNer].concat(allOpts)));
+      const nerOptions = nerSet.map((m) => `<option value="${esc(m)}" ${m === curNer ? 'selected' : ''}>${esc(capLabel(m))}</option>`).join('');
+
       const visInstalled = capsList.filter((c) => (c.capabilities || []).includes('vision')).map((c) => c.name);
-      const visOpts = Array.from(new Set(visInstalled.concat(ENV.vision_suggestions || [])))
-        .map((m) => `<option value="${esc(m)}" label="${esc(capLabel(m))}">`).join('');
-      const vm = pv.vision_model || (visInstalled[0] || '');
-      const vmMissing = vm && inst.length && !inst.includes(vm);
-      const pullName = vm || (ENV.vision_suggestions || ['qwen2.5vl:3b'])[0];
-      const visBanner = visInstalled.length && !pv.vision_model
-        ? `<div class="alert ok" style="display:block;">✅ ${T('Rilevato modello già installato con capacità VISION: ', 'Detected installed model with VISION capability: ')}<code>${esc(visInstalled.join(', '))}</code> <button class="btn" onclick="setPriv('vision_model','${esc(visInstalled[0])}')">${T('Usa questo', 'Use this')}</button></div>`
-        : ((!vm || vmMissing) ? `<div class="alert info" style="display:block;">${vm ? T('Il modello visione non risulta installato.', 'The vision model does not appear installed.') : T('Per le immagini serve un modello con visione.', 'Images need a vision model.')}
-            <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>` : '');
+      const curVis = pv.vision_model || (visInstalled[0] || '');
+      const visSet = Array.from(new Set([''].concat(visInstalled, ENV.vision_suggestions || [], inst)));
+      const visOptions = visSet.map((m) => `<option value="${esc(m)}" ${m === curVis ? 'selected' : ''}>${m ? esc(capLabel(m)) : T('-- Nessuno (solo riquadri neri) --', '-- None (black boxes only) --')}</option>`).join('');
+
+      const vmMissing = curVis && inst.length && !inst.includes(curVis);
+      const vmNoProj = curVis && inst.includes(curVis) && !visInstalled.includes(curVis);
+      const pullName = (curVis && !vmNoProj) ? curVis : (ENV.vision_suggestions || ['qwen2.5vl:3b'])[0];
+      const visBanner = vmNoProj
+        ? `<div class="alert err" style="display:block;">⚠️ <code>${esc(curVis)}</code> ${T('è solo testuale (senza proiettore immagini mmproj). Scarica un modello con visione reale:', 'is text-only (no multimodal mmproj). Pull a real vision model:')} <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>`
+        : ((!curVis || vmMissing) ? `<div class="alert info" style="display:block;">${curVis ? T('Il modello visione selezionato non è ancora scaricato:', 'Selected vision model is not pulled yet:') : T('Per leggere testo dalle immagini scarica un modello visione:', 'To OCR images, pull a vision model:')} <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>` : '');
       return `
         <div class="card">
-          <h2>🧠 ${T('Modelli locali per l\'anonimizzazione (scelti per capacità reali)', 'Local anonymization models (selected by real capabilities)')}</h2>
+          <h2>🧠 ${T('Modelli locali per l\'anonimizzazione (tutti i modelli installati)', 'Local anonymization models (all installed models)')}</h2>
           <div class="grid">
-            <label>${T('Testo: riconosce nomi e aziende', 'Text: finds names & organizations')}
-              <input list="dl-text" value="${esc(pv.ner_model || '')}" placeholder="qwen2.5:1.5b" onchange="setPriv('ner_model', this.value.trim())" /></label>
-            <label>${T('Immagini e PDF scansionati (vision)', 'Images & scanned PDFs (vision)')}
-              <input list="dl-vis" value="${esc(pv.vision_model || '')}" placeholder="${esc(visInstalled[0] || 'qwen2.5vl:3b')}" onchange="setPriv('vision_model', this.value.trim())" /></label>
+            <label>${T('Modello Testo / NER (scegli tra tutti)', 'Text / NER Model (pick any)')}
+              <select onchange="setPriv('ner_model', this.value)">${nerOptions}</select></label>
+            <label>${T('Modello Immagini / Visione', 'Image / Vision Model')}
+              <select onchange="setPriv('vision_model', this.value)">${visOptions}</select></label>
           </div>
-          <datalist id="dl-text">${textOpts}</datalist><datalist id="dl-vis">${visOpts}</datalist>
           <label class="chk" style="margin:10px 0;"><input type="checkbox" ${useModel() ? 'checked' : ''} onchange="setPriv('use_local_ner', this.checked)" />
-            ${T('Usa il modello locale per anonimizzare (consigliato). Se disattivo, solo regole veloci nel browser.', 'Use the local model to anonymize (recommended). If off, quick browser rules only.')}</label>
+            ${T('Usa il modello locale per anonimizzare (consigliato).', 'Use the local model to anonymize (recommended).')}</label>
           ${visBanner}
-          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('Capacità rilevate da Ollama (/api/show). I job in coda partono automaticamente aprendo un harness MCP o con "watch".', 'Capabilities queried from Ollama (/api/show). Queued jobs run automatically via MCP harness or "watch".')}</p>
+          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('✓ = già installato in Ollama con capacità verificate. I job in coda partono con "watch" o aprendo un harness MCP.', '✓ = already installed in Ollama with verified capabilities.')}</p>
         </div>`;
     }
 
@@ -1159,9 +1176,9 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
           ${imgEd}
           <div class="prof-grid">${profCards}</div>
           <div class="grid">
-            <label>${L.aliasLbl}<input id="v-alias" placeholder="alsa" value="${SELECTED_FILE ? esc(SELECTED_FILE.name.replace(/\.[^.]+$/, '')) : ''}" /></label>
-            <label>${L.policyLbl}<select id="v-policy"><option value="auto">auto</option><option value="fail_closed">fail_closed</option><option value="fail_open">fail_open</option></select></label>
-            <label>${L.termsLbl}<input id="v-terms" placeholder="Mario Rossi, Azienda Srl..." /></label>
+            <label>${L.aliasLbl}<input id="v-alias" placeholder="alsa" value="${esc(DRAFT.alias)}" oninput="DRAFT.alias=this.value;" /></label>
+            <label>${L.policyLbl}<select id="v-policy" onchange="DRAFT.policy=this.value;"><option value="auto" ${DRAFT.policy==='auto'?'selected':''}>auto</option><option value="fail_closed" ${DRAFT.policy==='fail_closed'?'selected':''}>fail_closed</option><option value="fail_open" ${DRAFT.policy==='fail_open'?'selected':''}>fail_open</option></select></label>
+            <label>${L.termsLbl}<input id="v-terms" placeholder="Mario Rossi, Azienda Srl..." value="${esc(DRAFT.terms)}" oninput="DRAFT.terms=this.value;" /></label>
           </div>
           <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
             <span style="font-size:0.8rem;color:var(--muted);">${useModel() ? '🧠 ' + T('Modello locale attivo: ', 'Local model on: ') + esc((CFG.privacy || {}).ner_model || 'default') : '⚡ ' + T('Solo regole veloci nel browser', 'Quick browser rules only')}</span>
@@ -1402,7 +1419,7 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli sync</pre>
         </div>`;
       if (IMGST) drawImg();
     }
-    setInterval(() => { if (QUEUE.some((q) => !q.error) && linkedOk() && !document.hidden) { const prev = ITEMS.length; syncFolderAndDb().then(() => { if (ITEMS.length !== prev) setBanner('ok', T('Elaborazione locale completata.', 'Local processing completed.')); }); } }, 4000);
+    setInterval(() => { if (QUEUE.some((q) => !q.error) && linkedOk() && !document.hidden) { const prev = ITEMS.length; syncFolderAndDb(true).then(() => { if (ITEMS.length !== prev) setBanner('ok', T('Elaborazione locale completata.', 'Local processing completed.')); }); } }, 4000);
 
     window.saveCfg = async function() {
       const txt = JSON.stringify(CFG, null, 2) + '\n';

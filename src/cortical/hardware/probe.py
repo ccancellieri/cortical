@@ -147,7 +147,7 @@ def _probe_discrete_gpu() -> tuple[str, float]:
 
 
 def _probe_ollama_capabilities(model_name: str, base_url: str = "http://127.0.0.1:11434", timeout: float = 0.6) -> list[str]:
-    """Queries Ollama `/api/show` for real model capabilities (`vision`, `tools`, `thinking`, `completion`)."""
+    """Queries Ollama `/api/show` for real model capabilities (verifying multimodal projector when `model_info` is present)."""
     url = f"{base_url.rstrip('/')}/api/show"
     try:
         body = json.dumps({"model": model_name}).encode("utf-8")
@@ -155,6 +155,13 @@ def _probe_ollama_capabilities(model_name: str, base_url: str = "http://127.0.0.
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         caps = [str(c).strip().lower() for c in (data.get("capabilities") or []) if str(c).strip()]
+        if "vision" in caps and ("model_info" in data or "projector_info" in data):
+            mi = data.get("model_info") or {}
+            has_proj = bool(data.get("projector_info")) or any(
+                any(w in k.lower() for w in ("vision", "clip", "mmproj")) for k in mi
+            )
+            if not has_proj:
+                caps = [c for c in caps if c != "vision"]
         return caps or ["completion"]
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return ["completion"]

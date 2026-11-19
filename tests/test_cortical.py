@@ -646,6 +646,12 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
         self.assertIn("vision", caps)
         self.assertIn("thinking", caps)
 
+        # Model without mmproj (projector_info=None & empty model_info vision keys) must NOT advertise vision
+        with patch("urllib.request.urlopen", return_value=_MockResp(json.dumps({"capabilities": ["completion", "vision", "tools"], "projector_info": None, "model_info": {"general.architecture": "qwen35"}}))):
+            caps_no_proj = _probe_ollama_capabilities("qwen3.5:9b-q3_k_xl")
+        self.assertNotIn("vision", caps_no_proj)
+        self.assertIn("completion", caps_no_proj)
+
         # 2. 3+1 Brain: public file returns raw at `max`; private returns sanitized at `max`; concepts/skills factorized
         with tempfile.TemporaryDirectory() as tmp:
             tpath = Path(tmp)
