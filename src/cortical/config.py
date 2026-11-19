@@ -105,6 +105,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "use_local_ner": True,
         "custom_terms": [],
     },
+    "routing": {
+        "mode": "auto",  # "auto" (mixed), "full_local", "cloud_first"
+        "cloud_token_threshold": 50000,
+        "cloud_budget_tokens": 200000,
+        "fallback_on_rate_limit": True,
+    },
+    "brain": {
+        "auto_distill": True,
+        "factorize_jaccard_threshold": 0.35,
+    },
     "compression": {
         "enable_toon": True,
         "min_toon_saving_pct": 10.0,

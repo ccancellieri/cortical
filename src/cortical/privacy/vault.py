@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..compression.engine import compress_structured, fit_to_token_budget
+from .brain import LocalBrain
 from .sanitizer import FailClosedError, classify_and_sanitize
 
 VERIFIED_PRESEND_HARNESSES: frozenset[str] = frozenset({
@@ -54,6 +55,14 @@ class PrivacyVault:
                        updated_at REAL NOT NULL
                    )"""
             )
+        self.brain = LocalBrain(self._connect)
+
+    def _write_brain_json(self) -> Path:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        out = self.db_path.parent / "brain.json"
+        snap = self.brain.get_snapshot(include_local_only=True)
+        out.write_text(json.dumps(snap, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return out
 
     def _write_item_json(self, record: dict[str, Any]) -> Path:
         """Persists sanitized vault record to `.cortical_data/vault/<alias>.json` for zero-server static UI sync."""
@@ -147,6 +156,7 @@ class PrivacyVault:
                             encoding="utf-8",
                         )
 
+            imported_for_brain: list[tuple[str, str, bool]] = []
             if self.vault_dir.is_dir():
                 with self._connect() as conn:
                     existing = {
@@ -195,7 +205,12 @@ class PrivacyVault:
                                 disk_ts,
                             ),
                         )
+                        imported_for_brain.append((eff_alias, content, prof == "max_context"))
                         imported += 1
+            for b_alias, b_content, b_pub in imported_for_brain:
+                self.brain.distill_and_factorize(b_alias, b_content, is_public=b_pub)
+            if imported or deleted or inbox_processed:
+                self._write_brain_json()
             return {"inbox_processed": inbox_processed, "imported": imported, "deleted": deleted}
         finally:
             _PROC_LOCK.release()
@@ -280,6 +295,19 @@ class PrivacyVault:
             "sha256_hash": digest,
             "updated_at": now,
         })
+        brain_cfg = (config or {}).get("brain") or {}
+        if brain_cfg.get("auto_distill", True):
+            self.brain.distill_and_factorize(
+                eff_alias,
+                res["sanitized_text"],
+                is_public=(res["profile"] == "max_context"),
+                jaccard_threshold=float(brain_cfg.get("factorize_jaccard_threshold") or 0.35),
+                use_local_llm=bool(use_local_ner and llm_fn is not None),
+                llm_fn=llm_fn,
+                model=model,
+                config=config,
+            )
+            self._write_brain_json()
         return {
             "alias": eff_alias,
             "uri": f"cortical://private/{eff_alias}",
@@ -363,9 +391,13 @@ class PrivacyVault:
         disk_p = self.vault_dir / f"{eff_alias}.json"
         had_disk = disk_p.is_file()
         disk_p.unlink(missing_ok=True)
+        self.brain.delete_alias(eff_alias)
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM vault_items WHERE alias = ?", (eff_alias,))
-            return cur.rowcount > 0 or had_disk
+            deleted = cur.rowcount > 0 or had_disk
+        if deleted:
+            self._write_brain_json()
+        return deleted
 
     def re_sanitize(
         self,
@@ -438,6 +470,16 @@ class PrivacyVault:
             "sha256_hash": digest,
             "updated_at": now,
         })
+        self.brain.distill_and_factorize(
+            eff_alias,
+            res["sanitized_text"],
+            is_public=(res["profile"] == "max_context"),
+            use_local_llm=bool(use_local_ner and llm_fn is not None),
+            llm_fn=llm_fn,
+            model=model,
+            config=config,
+        )
+        self._write_brain_json()
         return {
             "alias": eff_alias,
             "uri": f"cortical://private/{eff_alias}",
@@ -472,8 +514,8 @@ class PrivacyVault:
             })
         return out
 
-    def read_resource(self, alias_or_uri: str, allow_local_only: bool = False) -> dict[str, Any]:
-        """Channel 1: Reads sanitized content; blocks `max_security` items from remote cloud egress."""
+    def read_resource(self, alias_or_uri: str, allow_local_only: bool = False, tier: str = "max") -> dict[str, Any]:
+        """Channel 1: Reads sanitized/public content at `light|medium|high|max`; blocks `max_security` from cloud."""
         self.sync_from_disk()
         alias = str(alias_or_uri).replace("cortical://private/", "").lstrip("@").strip()
         with self._connect() as conn:
@@ -482,14 +524,18 @@ class PrivacyVault:
             raise KeyError(f"Vault item not found: {alias}")
         if row["local_only"] and not allow_local_only:
             raise FailClosedError(f"Vault item '{alias}' is marked max_security (local-only); cloud egress blocked.")
+        eff_tier = str(tier or "max").lower().strip()
+        tier_text = self.brain.read_tier(row["alias"], eff_tier) if eff_tier not in {"max", "l4"} else None
+        text_out = tier_text if tier_text is not None else row["sanitized_content"]
         return {
             "uri": f"cortical://private/{row['alias']}",
             "alias": row["alias"],
+            "tier": eff_tier,
             "resolved_policy": row["resolved_policy"],
             "profile": row["profile"],
             "format_used": row["format_used"],
-            "tokens_est": int(row["tokens_est"]),
-            "text": row["sanitized_content"],
+            "tokens_est": int(row["tokens_est"]) if tier_text is None else max(1, len(text_out) // 4),
+            "text": text_out,
         }
 
     def export_sanitized_memory_markdown(self, num_ctx: int = 16384, max_share: float = 0.15) -> str:

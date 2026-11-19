@@ -187,3 +187,65 @@ def format_roi_markdown(report: dict[str, Any]) -> str:
         f"| **Remote Cloud (Turn)** | {r.get('input_tokens', 0):,} in · {r.get('output_tokens', 0):,} out · {r.get('active_tokens', 0):,} act ({r.get('cache_read_tokens', 0):,} cache) | {r.get('planner_steps', 0)} steps · {r.get('tool_calls', 0)} tools | ~${r.get('estimated_cost_usd', 0.0):.2f} |",
         f"| **Cortical Local (Window)** | {l.get('input_tokens', 0):,} in · {l.get('output_tokens', 0):,} out · {l.get('total_tokens', 0):,} tot | {l.get('run_count', 0)} runs · {l.get('elapsed_sec', 0.0):.1f}s ({models}) | $0 · **Saved ~${l.get('usd_saved_est', 0.0):.2f}** ({ct.get('offload_share_pct', 0.0):.1f}% offload) |",
     ])
+
+
+def evaluate_routing_state(
+    *,
+    config: Optional[dict[str, Any]] = None,
+    db_path: Path | str | None = None,
+    brain_dir: Optional[Path] = None,
+    conversation_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Determines effective LLM routing (`full_local` | `mixed` | `cloud`) from mode & remaining cloud token budget."""
+    from ..config import load_cortical_config
+
+    cfg = config or load_cortical_config()
+    rt = cfg.get("routing") or {}
+    mode = str(rt.get("mode") or "auto").lower().strip()
+    budget = int(rt.get("cloud_budget_tokens") or 200000)
+    threshold = int(rt.get("cloud_token_threshold") or 50000)
+
+    report = build_roi_report(db_path=db_path, brain_dir=brain_dir, conversation_id=conversation_id)
+    turn_rem = (report.get("current_turn") or {}).get("remote") or {}
+    used_active = int(turn_rem.get("active_tokens") or 0)
+    remaining = max(0, budget - used_active)
+
+    if mode == "full_local":
+        eff = "full_local"
+        reason = "User selected Full Local mode: route all turns offline to Ollama."
+    elif mode == "cloud_first":
+        eff = "cloud"
+        reason = "Cloud First mode active."
+    else:
+        if remaining <= threshold:
+            eff = "full_local"
+            reason = f"Remaining cloud budget ({remaining:,} tok) <= threshold ({threshold:,} tok): switching to local LLM."
+        else:
+            eff = "mixed"
+            reason = f"Mixed (Auto): {remaining:,} cloud tokens remaining above threshold ({threshold:,})."
+
+    return {
+        "configured_mode": mode,
+        "effective_mode": eff,
+        "cloud_budget_tokens": budget,
+        "cloud_token_threshold": threshold,
+        "remote_active_tokens": used_active,
+        "cloud_remaining_tokens": remaining,
+        "reason": reason,
+        "roi": report,
+    }
+
+
+def export_roi_json(
+    data_dir: Path | str,
+    *,
+    config: Optional[dict[str, Any]] = None,
+    db_path: Path | str | None = None,
+) -> Path:
+    """Writes `roi.json` into the Cortical data folder for zero-server static UI charts/tables."""
+    out_dir = Path(data_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state = evaluate_routing_state(config=config, db_path=db_path)
+    p = out_dir / "roi.json"
+    p.write_text(json.dumps(state, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    return p

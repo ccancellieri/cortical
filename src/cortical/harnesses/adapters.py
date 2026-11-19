@@ -147,16 +147,19 @@ def _cortical_mcp_entry(repo_root: Path, db_path: Path, python_exe: Optional[str
     }
 
 
-def _build_shared_rules_md(vault_md: str, model_id: str, router_url: str, composed: dict[str, Any]) -> str:
+def _build_shared_rules_md(vault_md: str, model_id: str, router_url: str, composed: dict[str, Any], routing: Optional[dict[str, Any]] = None) -> str:
     tools_active = [k for k, v in composed.items() if (v.get("installed") if isinstance(v, dict) else bool(v))]
+    rt = routing or {}
+    r_mode = str(rt.get("mode") or "auto")
+    r_thresh = int(rt.get("cloud_token_threshold") or 50000)
     lines = [
         "# Cortical Unified Harness Contract",
         "",
-        f"- **Default Local Model:** `{model_id}`" + (f" · **Optional HTTP Router:** `{router_url}`" if router_url else ""),
+        f"- **Default Local Model:** `{model_id}` · **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
         f"- **Active Token-Savers:** {', '.join(f'`{t}`' for t in tools_active) if tools_active else '`serena`, `rtk`, `TOON`'}",
         "- **Code Navigation & Edits:** Prefer Serena LSP symbol tools (`get_symbols_overview`, `find_symbol`, `replace_symbol_body`) over reading full files.",
-        "- **Shell & Test Hygiene:** Compress shell output via `rtk` (or `-q` / summary flags); run tests single-shot after edits.",
-        "- **Privacy Vault:** Never read raw files inside `.cortical_data/private_vault/`; reference `@private:<alias>` or sanitized MCP resources.",
+        "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items or when `routing.mode == 'full_local'`).",
+        "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
     ]
     if vault_md.strip():
         lines.extend(["", vault_md.strip()])
@@ -193,7 +196,7 @@ def plan_sync(
     ollama_v1 = "http://127.0.0.1:11434/v1"
     eff_base_url = router_url or ollama_v1
 
-    rules_body = _build_shared_rules_md(vault_markdown, daily_model, router_url, hw.get("binaries") or {})
+    rules_body = _build_shared_rules_md(vault_markdown, daily_model, router_url, hw.get("binaries") or {}, routing=config.get("routing"))
     changes: list[FileChange] = []
 
     def _add(harness: str, path: Path, content: str, kind: str, detail: str) -> None:

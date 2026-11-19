@@ -21,10 +21,13 @@ from .privacy.vault import PrivacyVault
 TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "cortical_vault_read",
-        "description": "Read a locally sanitized, TOON-compressed item by alias or `cortical://private/<alias>` URI without touching raw files (blocks max_security).",
+        "description": "Read a Vault item at 3+1 depth (`light`, `medium`, `high`, `max`: raw if public, anonymized if private; blocks max_security from cloud).",
         "inputSchema": {
             "type": "object",
-            "properties": {"alias": {"type": "string", "description": "Vault alias or cortical://private/<alias> URI"}},
+            "properties": {
+                "alias": {"type": "string", "description": "Vault alias or cortical://private/<alias> URI"},
+                "tier": {"type": "string", "enum": ["light", "medium", "high", "max"], "default": "max"},
+            },
             "required": ["alias"],
         },
     },
@@ -93,7 +96,7 @@ class CorticalMCPServer:
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "cortical_vault_read":
-            return self.vault.read_resource(str(args.get("alias") or ""), allow_local_only=False)
+            return self.vault.read_resource(str(args.get("alias") or ""), allow_local_only=False, tier=str(args.get("tier") or "max"))
         if name == "cortical_ingest_private":
             cfg = load_cortical_config()
             priv = cfg.get("privacy") or {}
@@ -108,10 +111,14 @@ class CorticalMCPServer:
         if name == "cortical_compress":
             return compress_structured(str(args.get("text") or ""), fmt=str(args.get("format") or "auto"))
         if name == "cortical_doctor_status":
+            from .analytics.roi import evaluate_routing_state, export_roi_json
+
             cfg = load_cortical_config()
             hw = probe_hardware(runners_probe=False)
             rec = recommend_models_for_hardware(hw, custom_models=cfg.get("custom_models"))
-            return {"hardware": hw, "models": rec, "composers": inspect_composed_tools()}
+            routing_state = evaluate_routing_state(config=cfg)
+            export_roi_json(self.vault.db_path.parent, config=cfg)
+            return {"hardware": hw, "models": rec, "composers": inspect_composed_tools(), "routing": routing_state}
         if name == "cortical_local_offload":
             cfg = load_cortical_config()
             prompt = str(args.get("prompt") or "")
@@ -174,11 +181,17 @@ class CorticalMCPServer:
                 out = self._dispatch_tool(tname, targs)
                 result = {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=2)}], "isError": False}
             elif method == "resources/list":
-                result = {"resources": self.vault.list_resources(include_local_only=False)}
+                res = self.vault.list_resources(include_local_only=False)
+                res.append({"uri": "cortical://brain", "name": "cortical-brain", "description": "Factorized 3+1 Local Brain (concepts, tasks, skills)", "mimeType": "application/json"})
+                result = {"resources": res}
             elif method == "resources/read":
                 uri = str(params.get("uri") or "")
-                item = self.vault.read_resource(uri, allow_local_only=False)
-                result = {"contents": [{"uri": item["uri"], "mimeType": "text/plain", "text": item["text"]}]}
+                if uri == "cortical://brain":
+                    snap = self.vault.brain.get_snapshot(include_local_only=False)
+                    result = {"contents": [{"uri": "cortical://brain", "mimeType": "application/json", "text": json.dumps(snap, ensure_ascii=False, indent=2)}]}
+                else:
+                    item = self.vault.read_resource(uri, allow_local_only=False)
+                    result = {"contents": [{"uri": item["uri"], "mimeType": "text/plain", "text": item["text"]}]}
             elif method == "completion/complete":
                 prefix = str((params.get("argument") or {}).get("value") or "").lower()
                 vals = [r["name"] for r in self.vault.list_resources(include_local_only=False) if r["name"].lower().startswith(prefix)]

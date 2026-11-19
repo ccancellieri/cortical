@@ -21,11 +21,17 @@ def _tilde(p: Path) -> str:
     return "~" + raw[len(home):] if raw.startswith(home) else raw
 
 
-def _installed_models() -> list[str]:
+def _installed_model_caps() -> list[dict[str, Any]]:
     try:
         from ..hardware.probe import _probe_ollama_tags
         _on, tags = _probe_ollama_tags()
-        return [str(t.get("name") if isinstance(t, dict) else t) for t in tags]
+        return [
+            {
+                "name": str(t.get("name") if isinstance(t, dict) else t),
+                "capabilities": list(t.get("capabilities") or ["completion"]) if isinstance(t, dict) else ["completion"],
+            }
+            for t in tags
+        ]
     except Exception:  # noqa: BLE001
         return []
 
@@ -41,13 +47,16 @@ def build_dashboard_env(repo_root: Optional[Path] = None, os_name: Optional[str]
         return {
             "public": True,
             "repo_display": "<cartella-cortical>",
-            "data_display": "<cartella-cortical>/.cortical_data",
+            "data_display": "Documents/Cortical",
             "harness_status": {},
             "sync_cmd_base": f"cd /path/to/cortical && {base_cmd}",
             "setup_cmd": {"posix": f"cd /path/to/cortical && {_CLI_POSIX} setup", "win": f"cd C:\\path\\to\\cortical && {_CLI_WIN} setup"},
             "watch_cmd": {"posix": f"{_CLI_POSIX} watch", "win": f"{_CLI_WIN} watch"},
             "installed_models": [],
+            "installed_model_caps": [],
             "vision_suggestions": ["qwen2.5vl:3b", "qwen2.5vl:7b"],
+            "initial_brain": None,
+            "initial_roi": None,
         }
     root = Path(repo_root or Path.cwd()).resolve()
     paths = resolve_user_paths(os_name=os_name)
@@ -68,16 +77,35 @@ def build_dashboard_env(repo_root: Optional[Path] = None, os_name: Optional[str]
         status[h] = {"detected": detected, "linked": linked, "config": _tilde(cfg_p)}
     rd = _tilde(root)
     cd = rd if " " not in rd else f'"{rd}"'
+    caps = _installed_model_caps()
+
+    init_brain: Optional[dict[str, Any]] = None
+    init_roi: Optional[dict[str, Any]] = None
+    try:
+        from ..config import default_data_dir
+        from ..privacy.vault import PrivacyVault
+        from .roi import evaluate_routing_state
+
+        dd = default_data_dir()
+        if (dd / "vault.db").is_file():
+            init_brain = PrivacyVault(dd / "vault.db").brain.get_snapshot(include_local_only=True)
+        init_roi = evaluate_routing_state(db_path=dd / "telemetry.db")
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "public": False,
         "repo_display": rd,
-        "data_display": rd + "/.cortical_data",
+        "data_display": "Documents/Cortical",
         "harness_status": status,
         "sync_cmd_base": f"cd {cd} && {base_cmd}",
         "setup_cmd": {"posix": f"cd {cd} && {_CLI_POSIX} setup", "win": f"cd {cd} && {_CLI_WIN} setup"},
         "watch_cmd": {"posix": f"cd {cd} && {_CLI_POSIX} watch", "win": f"cd {cd} && {_CLI_WIN} watch"},
-        "installed_models": _installed_models(),
+        "installed_models": [c["name"] for c in caps],
+        "installed_model_caps": caps,
         "vision_suggestions": ["qwen2.5vl:3b", "qwen2.5vl:7b"],
+        "initial_brain": init_brain,
+        "initial_roi": init_roi,
     }
 
 
@@ -85,7 +113,7 @@ def _nav_links(is_help: bool, public_docs: bool) -> str:
     home = '<a href="./index.html" style="color:var(--accent);">🏠 Home</a>'
     gh = '<a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a>'
     if is_help:
-        return f'<a href="./settings.html" style="color:var(--accent);">🛡️ Privacy Vault &amp; Settings</a> · {home} · {gh}'
+        return f'{home} · {gh}' if public_docs else f'<a href="./settings.html" style="color:var(--accent);">🛡️ Privacy Vault &amp; Settings</a> · {home} · {gh}'
     base = f'<a href="./help.html" style="color:var(--accent);">❓ Help</a> · {home} · {gh}'
     return base if public_docs else f'{home} · {base}'
 
@@ -169,9 +197,10 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
         tabs: {
           setup: '🚀 Guided Setup',
           vault: '🛡️ Privacy Vault',
-          models: '🧠 Hardware & Models',
+          brain: '🧠 Local Brain (3+1)',
+          models: '⚙️ Hardware & Models',
           harnesses: '🔌 8 Harnesses & Composer',
-          compression: '🗜️ TOON, Auto-Tuner & ROI',
+          compression: '📊 ROI, Routing & TOON',
         },
         syncUnset: 'Zero-Server Mode: Vault stored in browser IndexedDB. Click to link local .cortical_data folder for auto-sync with MCP & CLI.',
         syncLinked: 'Linked to folder: ',
@@ -208,9 +237,10 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
         tabs: {
           setup: '🚀 Setup guidato',
           vault: '🛡️ Privacy Vault',
-          models: '🧠 Hardware & Modelli',
+          brain: '🧠 Local Brain (3+1)',
+          models: '⚙️ Hardware & Modelli',
           harnesses: '🔌 8 Harness & Compositore',
-          compression: '🗜️ TOON, Auto-Tuner & ROI',
+          compression: '📊 ROI, Routing & TOON',
         },
         syncUnset: 'Modalità Zero-Server: Vault salvato nel browser (IndexedDB). Collega la cartella locale .cortical_data per sincronizzare con MCP/CLI.',
         syncLinked: 'Cartella collegata: ',
@@ -249,6 +279,10 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     let QUEUE = [];
     let IMGST = null;
     let ORIG = null;
+    let BRAIN_DATA = ENV.initial_brain || null;
+    let ROI_DATA = ENV.initial_roi || null;
+    let BRAIN_VIEW = 'concept';
+    let BRAIN_FILE_TIER = 'l1';
     const T = (it, en) => (LANG === 'it' ? it : en);
     const IS_WIN = /win/i.test(navigator.platform || '') && !/darwin|mac/i.test(navigator.platform || '');
     const IMG_RX = /\.(png|jpe?g|webp|gif|bmp)$/i;
@@ -407,6 +441,14 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
               } else raws.push(name);
             }
             raws.forEach((n) => QUEUE.push({ name: n, error: errs.get(n) || '' }));
+          } catch {}
+          try {
+            const bf = await (await root.getFileHandle('brain.json')).getFile();
+            BRAIN_DATA = JSON.parse(await bf.text());
+          } catch {}
+          try {
+            const rf = await (await root.getFileHandle('roi.json')).getFile();
+            ROI_DATA = JSON.parse(await rf.text());
           } catch {}
         } catch (err) {
           NEEDS_REAUTH = true;
@@ -937,29 +979,45 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     }
     function cliCmd(kind) { const c = (ENV[kind] || {}); return IS_WIN ? c.win : c.posix; }
 
+    function copyLocalUse(alias) {
+      const cmd = `Usa cortical_local_offload(vault_alias="${alias}") sul modello Ollama locale (solo locale, zero invio cloud).`;
+      copyText(cmd, T('Copiato comando locale per Ollama: ', 'Copied local Ollama prompt: ') + alias);
+    }
+
     function modelCard() {
       const pv = CFG.privacy || {};
+      const capsList = ENV.installed_model_caps || [];
       const inst = ENV.installed_models || [];
-      const textOpts = Array.from(new Set(inst.concat(['qwen2.5:1.5b', 'qwen2.5:3b', 'qwen3:8b']))).map((m) => `<option value="${esc(m)}">`).join('');
-      const visOpts = Array.from(new Set(inst.filter((m) => /vl|vision|llava|minicpm-v|gemma3/i.test(m)).concat(ENV.vision_suggestions || []))).map((m) => `<option value="${esc(m)}">`).join('');
-      const vm = pv.vision_model || '';
+      const capLabel = (name) => {
+        const found = capsList.find((x) => x.name === name);
+        return found && found.capabilities ? `${name} [${found.capabilities.join(', ')}]` : name;
+      };
+      const textOpts = Array.from(new Set(inst.concat(['qwen2.5:1.5b', 'qwen2.5:3b', 'qwen3:8b'])))
+        .map((m) => `<option value="${esc(m)}" label="${esc(capLabel(m))}">`).join('');
+      const visInstalled = capsList.filter((c) => (c.capabilities || []).includes('vision')).map((c) => c.name);
+      const visOpts = Array.from(new Set(visInstalled.concat(ENV.vision_suggestions || [])))
+        .map((m) => `<option value="${esc(m)}" label="${esc(capLabel(m))}">`).join('');
+      const vm = pv.vision_model || (visInstalled[0] || '');
       const vmMissing = vm && inst.length && !inst.includes(vm);
       const pullName = vm || (ENV.vision_suggestions || ['qwen2.5vl:3b'])[0];
+      const visBanner = visInstalled.length && !pv.vision_model
+        ? `<div class="alert ok" style="display:block;">✅ ${T('Rilevato modello già installato con capacità VISION: ', 'Detected installed model with VISION capability: ')}<code>${esc(visInstalled.join(', '))}</code> <button class="btn" onclick="setPriv('vision_model','${esc(visInstalled[0])}')">${T('Usa questo', 'Use this')}</button></div>`
+        : ((!vm || vmMissing) ? `<div class="alert info" style="display:block;">${vm ? T('Il modello visione non risulta installato.', 'The vision model does not appear installed.') : T('Per le immagini serve un modello con visione.', 'Images need a vision model.')}
+            <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>` : '');
       return `
         <div class="card">
-          <h2>🧠 ${T('Modelli locali per l\'anonimizzazione (tutto resta sul tuo computer)', 'Local anonymization models (everything stays on your computer)')}</h2>
+          <h2>🧠 ${T('Modelli locali per l\'anonimizzazione (scelti per capacità reali)', 'Local anonymization models (selected by real capabilities)')}</h2>
           <div class="grid">
             <label>${T('Testo: riconosce nomi e aziende', 'Text: finds names & organizations')}
               <input list="dl-text" value="${esc(pv.ner_model || '')}" placeholder="qwen2.5:1.5b" onchange="setPriv('ner_model', this.value.trim())" /></label>
-            <label>${T('Immagini e PDF scansionati (visione)', 'Images & scanned PDFs (vision)')}
-              <input list="dl-vis" value="${esc(vm)}" placeholder="qwen2.5vl:3b" onchange="setPriv('vision_model', this.value.trim())" /></label>
+            <label>${T('Immagini e PDF scansionati (vision)', 'Images & scanned PDFs (vision)')}
+              <input list="dl-vis" value="${esc(pv.vision_model || '')}" placeholder="${esc(visInstalled[0] || 'qwen2.5vl:3b')}" onchange="setPriv('vision_model', this.value.trim())" /></label>
           </div>
           <datalist id="dl-text">${textOpts}</datalist><datalist id="dl-vis">${visOpts}</datalist>
           <label class="chk" style="margin:10px 0;"><input type="checkbox" ${useModel() ? 'checked' : ''} onchange="setPriv('use_local_ner', this.checked)" />
             ${T('Usa il modello locale per anonimizzare (consigliato). Se disattivo, solo regole veloci nel browser.', 'Use the local model to anonymize (recommended). If off, quick browser rules only.')}</label>
-          ${(!vm || vmMissing) ? `<div class="alert info" style="display:block;">${vm ? T('Il modello visione non risulta installato.', 'The vision model does not appear installed.') : T('Per le immagini serve un modello con visione.', 'Images need a vision model.')}
-            <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>` : ''}
-          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('Il modello gira in Ollama sul tuo computer. La pagina prepara la richiesta; la esegue il comando "watch" o un agente collegato.', 'The model runs in Ollama on your computer. The page prepares the request; the "watch" command or a linked agent runs it.')}</p>
+          ${visBanner}
+          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('Capacità rilevate da Ollama (/api/show). I job in coda partono automaticamente aprendo un harness MCP o con "watch".', 'Capabilities queried from Ollama (/api/show). Queued jobs run automatically via MCP harness or "watch".')}</p>
         </div>`;
     }
 
@@ -1074,7 +1132,9 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       const rows = ITEMS.map((it) => {
         const badge = it.local_only ? '<span class="pill pill-warn">🔒 SOLO LOCALE</span>'
           : (it.profile === 'max_context' ? '<span class="pill pill-pub">🌐 PUBBLICO</span>' : '<span class="pill pill-ok">🛡️ SICURO PER CHAT</span>');
-        const copyBtn = it.local_only ? `<button class="btn" disabled title="${esc(L.localTip)}">${L.copyBtn}</button>` : `<button class="btn" onclick="copyAliasRef('${esc(it.alias)}')">${L.copyBtn}</button>`;
+        const copyBtn = it.local_only
+          ? `<button class="btn" disabled title="${esc(L.localTip)}">${L.copyBtn}</button><button class="btn btn-em" onclick="copyLocalUse('${esc(it.alias)}')">🤖 ${T('Usa in Locale', 'Run Locally')}</button>`
+          : `<button class="btn" onclick="copyAliasRef('${esc(it.alias)}')">${L.copyBtn}</button>`;
         return `<tr><td>${badge}</td><td><code>@private:${esc(it.alias)}</code></td><td>${esc(it.source_name)}</td><td>${esc(it.resolved_policy)} / ${esc(it.profile)}</td><td>${it.entity_count || 0}</td><td>${it.tokens_est || 0}</td>
           <td style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" onclick="openInspect('${esc(it.alias)}')">${L.inspectBtn}</button>${copyBtn}
           <button class="btn" onclick="downloadOneVaultJson('${esc(it.alias)}')">${L.exportOneBtn}</button><button class="btn btn-danger" onclick="removeVaultItem('${esc(it.alias)}')">${L.delBtn}</button></td></tr>`;
@@ -1208,26 +1268,112 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli sync</pre>
         </div>`;
     }
 
+    function renderBrainPanel() {
+      const b = BRAIN_DATA || { stats: { files: 0, concepts: 0, skills: 0, tasks: 0 }, by_concept: [], by_task: [], by_file: [], by_skill: [] };
+      const st = b.stats || {};
+      const views = [
+        ['concept', T('📚 Per Argomento / Concetto', '📚 By Topic / Concept')],
+        ['task', T('📌 Per Task', '📌 By Task')],
+        ['file', T('📄 Per File (3+1)', '📄 By File (3+1)')],
+        ['skill', T('⚡ Skill Fattorizzate', '⚡ Factorized Skills')],
+      ];
+      const nav = views.map(([k, lbl]) => `<button class="btn ${BRAIN_VIEW===k?'btn-primary':''}" onclick="BRAIN_VIEW='${k}'; render();">${lbl}</button>`).join('');
+      let content = '';
+      if (BRAIN_VIEW === 'concept') {
+        content = (b.by_concept || []).length === 0 ? `<p style="color:var(--muted);">${T('Nessun concetto distillato ancora. Carica un file nel Vault.', 'No concepts distilled yet. Upload a file to Vault.')}</p>` :
+          (b.by_concept || []).map((c) => `<div style="border-bottom:1px solid var(--border);padding:10px 0;">
+            <b>${esc(c.title)}</b> <span style="font-size:0.76rem;color:var(--muted);">(${(c.sources||[]).map(s=>'@private:'+s).join(', ')})</span>
+            <div style="font-size:0.84rem;color:var(--muted);margin-top:4px;">${esc(c.summary)}</div>
+            <div style="margin-top:4px;">${(c.keywords||[]).map(k=>`<span class="pill pill-pub" style="margin-right:4px;">${esc(k)}</span>`).join('')}</div>
+          </div>`).join('');
+      } else if (BRAIN_VIEW === 'task') {
+        content = (b.by_task || []).length === 0 ? `<p style="color:var(--muted);">${T('Nessun task associato.', 'No tasks linked yet.')}</p>` :
+          (b.by_task || []).map((t) => `<div style="border-bottom:1px solid var(--border);padding:10px 0;"><b>📌 ${esc(t.task)}</b>
+            <ul>${(t.concepts||[]).map(c=>`<li><b>${esc(c.title)}</b> (${(c.sources||[]).join(', ')})</li>`).join('')}</ul></div>`).join('');
+      } else if (BRAIN_VIEW === 'file') {
+        const tierBtns = [['l1','L1 Light'],['l2','L2 Medium'],['l3','L3 High'],['max','Max (Raw/Anon)']].map(([tk,tl])=>`<button class="btn ${BRAIN_FILE_TIER===tk?'btn-primary':''}" onclick="BRAIN_FILE_TIER='${tk}'; render();">${tl}</button>`).join('');
+        content = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">${tierBtns}</div>` +
+          ((b.by_file || []).map((f) => {
+            const tr = f.tiers || {};
+            let snippet = BRAIN_FILE_TIER === 'l1' ? tr.tier_light : (BRAIN_FILE_TIER === 'l2' ? tr.tier_medium : (BRAIN_FILE_TIER === 'l3' ? tr.tier_high : ((ITEMS.find(x=>x.alias===f.alias)||{}).sanitized_content || '')));
+            return `<div style="border-bottom:1px solid var(--border);padding:10px 0;">
+              <b>@private:${esc(f.alias)}</b> · <span>${esc(f.source_name)}</span> · <span class="pill ${f.profile==='max_context'?'pill-pub':'pill-ok'}">${f.profile==='max_context'?'Max = RAW':'Max = ANONIMIZZATO'}</span>
+              <pre style="margin-top:6px;">${esc(snippet || T('(carica/sincronizza per vedere)', '(load/sync to view)'))}</pre>
+            </div>`;
+          }).join('') || `<p style="color:var(--muted);">${T('Nessun file.', 'No files.')}</p>`);
+      } else {
+        content = (b.by_skill || []).length === 0 ? `<p style="color:var(--muted);">${T('Nessuna skill procedurale estratta dai file ancora.', 'No procedural skills extracted yet.')}</p>` :
+          (b.by_skill || []).map((sk) => `<div style="border-bottom:1px solid var(--border);padding:10px 0;"><b>⚡ ${esc(sk.title)}</b> <span style="font-size:0.76rem;color:var(--muted);">(${(sk.sources||[]).join(', ')})</span>
+            <pre style="margin-top:6px;">${esc(sk.procedure_md)}</pre></div>`).join('');
+      }
+      return `
+        <div class="card">
+          <h2>🧠 ${T('Local Brain (3+1 & Conoscenza Fattorizzata)', 'Local Brain (3+1 & Factorized Knowledge)')}</h2>
+          <div class="stats">
+            <div class="stat-box">File: <b>${st.files||0}</b></div><div class="stat-box">${T('Concetti','Concepts')}: <b>${st.concepts||0}</b></div>
+            <div class="stat-box">Skill: <b>${st.skills||0}</b></div><div class="stat-box">Task: <b>${st.tasks||0}</b></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${nav}</div>
+          ${content}
+        </div>`;
+    }
+
     function renderCompressionPanel() {
       const c = CFG.compression || {};
       const rep = CFG.report || {};
+      const rt = CFG.routing || { mode: 'auto', cloud_token_threshold: 50000, cloud_budget_tokens: 200000 };
+      const rState = ROI_DATA || {};
+      const ct = (rState.roi || {}).current_turn || {};
+      const loc = ct.local || {};
+      const rem = ct.remote || {};
       return `
         <div class="card">
-          <h2>Deterministic Compression (TOON) &amp; Auto-Sizing</h2>
+          <h2>🔀 ${T('Switch Modello LLM & Soglia Token Cloud', 'LLM Routing Switch & Cloud Token Threshold')}</h2>
+          <p style="font-size:0.84rem;color:var(--muted);margin:0 0 10px;">
+            ${T('Gli harness con hook/baseURL (pi, OpenCode, OpenClaw, Codex, Claude Code, dsh) instradano in automatico verso Ollama sotto soglia; su Antigravity le regole condivise indicano di delegare a cortical_local_offload.', 'Harnesses with hooks/baseURL (pi, OpenCode, OpenClaw, Codex, Claude Code, dsh) route automatically to Ollama below threshold; on Antigravity shared rules trigger cortical_local_offload.')}
+          </p>
+          <div class="grid">
+            <label>${T('Modalità LLM', 'LLM Mode')}
+              <select onchange="CFG.routing=CFG.routing||{}; CFG.routing.mode=this.value; persistConfigToFolder(); render();">
+                <option value="auto" ${rt.mode==='auto'?'selected':''}>Auto / Misto (Local sotto soglia)</option>
+                <option value="full_local" ${rt.mode==='full_local'?'selected':''}>Full Local (Sempre Ollama)</option>
+                <option value="cloud_first" ${rt.mode==='cloud_first'?'selected':''}>Cloud First</option>
+              </select>
+            </label>
+            <label>${T('Soglia Token Cloud Residui (passa a Locale sotto)', 'Remaining Cloud Token Threshold')}
+              <input type="number" step="5000" value="${rt.cloud_token_threshold ?? 50000}" oninput="CFG.routing=CFG.routing||{}; CFG.routing.cloud_token_threshold=Number(this.value||50000); persistConfigToFolder();" />
+            </label>
+            <label>${T('Budget Sessione Cloud (Token)', 'Cloud Session Budget (Tokens)')}
+              <input type="number" step="10000" value="${rt.cloud_budget_tokens ?? 200000}" oninput="CFG.routing=CFG.routing||{}; CFG.routing.cloud_budget_tokens=Number(this.value||200000); persistConfigToFolder();" />
+            </label>
+          </div>
+          ${rState.effective_mode ? `<div class="alert info" style="display:block;margin-top:10px;">Stato attuale: <b>${esc(rState.effective_mode)}</b> — ${esc(rState.reason)}</div>` : ''}
+        </div>
+        <div class="card">
+          <h2>📊 ${T('Report Uso Local LLM vs Remote Cloud (0 Token Cloud)', 'Local LLM vs Remote Cloud Usage Report')}</h2>
+          <div class="stats">
+            <div class="stat-box">Local Runs: <b>${loc.run_count||0}</b></div>
+            <div class="stat-box">Local Tokens: <b>${(loc.total_tokens||0).toLocaleString()}</b></div>
+            <div class="stat-box">Offload Share: <b>${ct.offload_share_pct||0}%</b></div>
+            <div class="stat-box">USD Saved Est: <b>$${Number(loc.usd_saved_est||0).toFixed(2)}</b></div>
+            <div class="stat-box">Remote Turn Active: <b>${(rem.active_tokens||0).toLocaleString()}</b></div>
+          </div>
+          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('Aggiornato da roi.json in ~/Documents/Cortical/ quando esegui cortical-mcp o setup.', 'Updated from roi.json in ~/Documents/Cortical/ when cortical-mcp or setup runs.')}</p>
+        </div>
+        <div class="card">
+          <h2>🗜️ Deterministic Compression (TOON) &amp; Auto-Sizing</h2>
           <div class="grid">
             <label class="chk"><input type="checkbox" ${c.enable_toon!==false?'checked':''} onchange="CFG.compression.enable_toon=this.checked;" /> Enable Lossless TOON Encoder</label>
             <label>Minimum TOON Saving Guard (%)<input type="number" step="1" value="${c.min_toon_saving_pct ?? 10}" oninput="CFG.compression.min_toon_saving_pct=Number(this.value||10);" /></label>
             <label>Max Memory Context Share<input type="number" step="0.01" value="${c.max_context_share ?? 0.15}" oninput="CFG.compression.max_context_share=Number(this.value||0.15);" /></label>
             <label>Report Language<select onchange="CFG.report.language=this.value;"><option value="auto" ${rep.language==='auto'?'selected':''}>auto</option><option value="en" ${rep.language==='en'?'selected':''}>English</option><option value="it" ${rep.language==='it'?'selected':''}>Italiano</option></select></label>
           </div>
-          <pre style="margin-top:12px;">PYTHONPATH=src .venv/bin/python -m cortical.cli tune
-PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare</pre>
         </div>`;
     }
 
     function render() {
       const L = I18N[LANG] || I18N.en;
-      const body = TAB === 'setup' ? renderSetupPanel(L) : TAB === 'vault' ? renderVaultPanel(L) : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
+      const body = TAB === 'setup' ? renderSetupPanel(L) : TAB === 'vault' ? renderVaultPanel(L) : TAB === 'brain' ? renderBrainPanel() : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
       const sidebar = Object.entries(L.tabs).map(([k, lbl]) => `<button class="tab ${TAB===k?'active':''}" onclick="TAB='${k}'; render();">${lbl}</button>`).join('');
       const syncStatus = DIR_HANDLE
         ? (NEEDS_REAUTH

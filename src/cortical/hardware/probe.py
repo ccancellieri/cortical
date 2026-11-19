@@ -146,6 +146,20 @@ def _probe_discrete_gpu() -> tuple[str, float]:
     return ("", 0.0)
 
 
+def _probe_ollama_capabilities(model_name: str, base_url: str = "http://127.0.0.1:11434", timeout: float = 0.6) -> list[str]:
+    """Queries Ollama `/api/show` for real model capabilities (`vision`, `tools`, `thinking`, `completion`)."""
+    url = f"{base_url.rstrip('/')}/api/show"
+    try:
+        body = json.dumps({"model": model_name}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        caps = [str(c).strip().lower() for c in (data.get("capabilities") or []) if str(c).strip()]
+        return caps or ["completion"]
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return ["completion"]
+
+
 def _probe_ollama_tags(base_url: str = "http://127.0.0.1:11434", timeout: float = 0.8) -> tuple[bool, list[dict[str, Any]]]:
     url = f"{base_url.rstrip('/')}/api/tags"
     try:
@@ -159,6 +173,7 @@ def _probe_ollama_tags(base_url: str = "http://127.0.0.1:11434", timeout: float 
                 out.append({
                     "name": name,
                     "size_gb": round(int(m.get("size") or 0) / (1024 ** 3), 2),
+                    "capabilities": _probe_ollama_capabilities(name, base_url=base_url),
                 })
         return (True, out)
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):

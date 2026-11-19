@@ -626,6 +626,75 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
             self.assertIn("watch_cmd", env)
             self.assertIn("qwen2.5vl:3b", env["vision_suggestions"])
 
+    def test_brain_3plus1_factorization_routing_threshold_and_capabilities(self) -> None:
+        from cortical.analytics.roi import evaluate_routing_state
+        from cortical.hardware.probe import _probe_ollama_capabilities
+
+        # 1. Mock Ollama /api/show capability probing (`vision` detected on qwen3.5)
+        class _MockResp:
+            def __init__(self, body: str) -> None:
+                self._b = body.encode("utf-8")
+            def read(self) -> bytes:
+                return self._b
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        with patch("urllib.request.urlopen", return_value=_MockResp(json.dumps({"capabilities": ["completion", "vision", "tools", "thinking"]}))):
+            caps = _probe_ollama_capabilities("qwen3.5:9b-q3_k_xl")
+        self.assertIn("vision", caps)
+        self.assertIn("thinking", caps)
+
+        # 2. 3+1 Brain: public file returns raw at `max`; private returns sanitized at `max`; concepts/skills factorized
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            db_p = tpath / "vault.db"
+            vault = PrivacyVault(db_p)
+            vault.ingest(
+                "1. Install uv tool\n2. Run pytest suite\n3. Deploy docker container for service alpha",
+                alias="deploy_a",
+                policy="fail_open",
+                profile="max_context",
+            )
+            vault.ingest(
+                "1. Install uv tool\n2. Run pytest suite\n3. Deploy docker container for Mario Rossi (mario@example.org)",
+                alias="deploy_b",
+                policy="auto",
+                profile="medium",
+                custom_terms=["Mario Rossi"],
+            )
+            pub_max = vault.read_resource("deploy_a", tier="max")
+            self.assertIn("service alpha", pub_max["text"])
+            priv_l1 = vault.read_resource("deploy_b", tier="light")
+            self.assertIn("L1 LIGHT", priv_l1["text"])
+            self.assertNotIn("mario@example.org", priv_l1["text"])
+            priv_max = vault.read_resource("deploy_b", tier="max")
+            self.assertNotIn("Mario Rossi", priv_max["text"])
+
+            snap = vault.brain.get_snapshot(include_local_only=True)
+            self.assertEqual(snap["stats"]["files"], 2)
+            # Shared concepts/skills factorized (fewer than 2 separate unmerged entries!)
+            self.assertEqual(snap["stats"]["concepts"], 1)
+            self.assertEqual(snap["stats"]["skills"], 1)
+            self.assertEqual(sorted(snap["by_concept"][0]["sources"]), ["deploy_a", "deploy_b"])
+
+            # 3. MCP Server tier read + cortical://brain resource + routing threshold switch
+            srv = CorticalMCPServer(vault_db=db_p)
+            tr = srv.handle_request({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "cortical_vault_read", "arguments": {"alias": "deploy_b", "tier": "light"}}})
+            self.assertIn("L1 LIGHT", tr["result"]["content"][0]["text"])
+            br = srv.handle_request({"jsonrpc": "2.0", "id": 12, "method": "resources/read", "params": {"uri": "cortical://brain"}})
+            self.assertIn("deploy_a", br["result"]["contents"][0]["text"])
+
+            cfg_low = json.loads(json.dumps(DEFAULT_CONFIG))
+            cfg_low["routing"] = {"mode": "auto", "cloud_budget_tokens": 100000, "cloud_token_threshold": 150000}
+            rs_auto = evaluate_routing_state(config=cfg_low, db_path=db_p, brain_dir=tpath / "none")
+            self.assertEqual(rs_auto["effective_mode"], "full_local")
+
+            cfg_low["routing"] = {"mode": "cloud_first", "cloud_budget_tokens": 200000, "cloud_token_threshold": 50000}
+            rs_cf = evaluate_routing_state(config=cfg_low, db_path=db_p, brain_dir=tpath / "none")
+            self.assertEqual(rs_cf["effective_mode"], "cloud")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -424,6 +424,10 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         print(f"Linked. Backup id: {res['backup_id']} (undo: cortical sync --rollback {res['backup_id']})")
     else:
         print("Skipped linking (use --yes to apply). Re-run anytime.")
+    from .analytics.roi import export_roi_json
+
+    PrivacyVault(data / "vault.db")._write_brain_json()
+    export_roi_json(data, config=cfg)
     s_path, _h = export_static_dashboard(data, config=cfg, hw=hw, public_docs=False)
     print(f"Open this page in Chrome/Edge/Arc and click 'Choose folder' -> Documents > Cortical:\n  {s_path}")
     if not args.no_open:
@@ -440,6 +444,8 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         while True:
             res = vault.sync_from_disk(process_inbox=True)
             if res["inbox_processed"] or res["imported"] or res["deleted"]:
+                from .analytics.roi import export_roi_json
+                export_roi_json(vault.db_path.parent)
                 print(f"  processed={res['inbox_processed']} imported={res['imported']} deleted={res['deleted']}")
             if args.once:
                 return 0
