@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import os
 import tempfile
-import threading
 import unittest
-import urllib.error
-import urllib.request
 import zipfile
 import zlib
 from contextlib import redirect_stdout
@@ -18,8 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cortical.analytics.benchmark import run_comparative_benchmark
-from cortical.analytics.dashboard import export_static_dashboard
-from cortical.analytics.local_ui import create_local_ui_server, render_local_ui_html
+from cortical.analytics.dashboard import export_static_dashboard, render_static_settings_html
 from cortical.analytics.roi import build_roi_report, format_roi_markdown
 from cortical.analytics.tuner import analyze_and_tune
 from cortical.cli import main as cli_main
@@ -463,7 +458,7 @@ def _build_synthetic_pdf(text: str, *, compressed: bool = True, author: str = "S
     return bytes(out)
 
 
-class TestPDFVaultManagementAndLocalUI(unittest.TestCase):
+class TestFileBackedZeroServerVault(unittest.TestCase):
     def test_compressed_pdf_extraction_empty_pdf_fail_closed_and_vault_crud(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tpath = Path(tmp)
@@ -487,6 +482,8 @@ class TestPDFVaultManagementAndLocalUI(unittest.TestCase):
             ing = vault.ingest_bytes("alsa.pdf", pdf_path.read_bytes(), profile="max_security", custom_terms=["Mario Rossi"])
             self.assertEqual(ing["alias"], "alsa")
             self.assertTrue(ing["local_only"])
+            # Persists disk JSON mirror cleanly
+            self.assertTrue((tpath / "vault" / "alsa.json").is_file())
 
             # Local management lists max_security; cloud MCP resources hide it
             all_items = vault.list_items(include_local_only=True)
@@ -504,70 +501,73 @@ class TestPDFVaultManagementAndLocalUI(unittest.TestCase):
 
             self.assertTrue(vault.delete_item("alsa"))
             self.assertEqual(vault.list_items(), [])
+            self.assertFalse((tpath / "vault" / "alsa.json").exists())
 
-    def test_local_ui_server_e2e_and_cli_vault_commands(self) -> None:
+    def test_static_ui_json_tombstone_inbox_ingest_and_cli_vault(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tpath = Path(tmp)
             db_p = tpath / "vault.db"
-            cfg_p = tpath / "cfg.json"
-            srv = create_local_ui_server(vault_db=db_p, port=0, config_path=cfg_p)
-            port = srv.server_address[1]
-            thread = threading.Thread(target=srv.serve_forever, daemon=True)
-            thread.start()
-            try:
-                base = f"http://127.0.0.1:{port}"
-                with urllib.request.urlopen(f"{base}/") as r:
-                    html = r.read().decode("utf-8")
-                self.assertIn("Privacy Vault", html)
+            vault = PrivacyVault(db_p)
 
-                pdf_bytes = _build_synthetic_pdf("ALSA Private Test bob@alsa.example IBAN IT60X0542811101000000123456", compressed=True)
-                req = urllib.request.Request(
-                    f"{base}/api/vault/upload",
-                    data=json.dumps({
-                        "filename": "alsa.pdf",
-                        "content_base64": base64.b64encode(pdf_bytes).decode("ascii"),
-                        "policy": "auto",
-                        "profile": "max_security",
-                        "custom_terms": ["ALSA Private Test"],
-                    }).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req) as r:
-                    up_res = json.loads(r.read().decode("utf-8"))
-                self.assertEqual(up_res["alias"], "alsa")
-                self.assertTrue(up_res["local_only"])
+            # 1. Static UI drops a max_security JSON record directly in .cortical_data/vault/alsa.json
+            vault.vault_dir.mkdir(parents=True, exist_ok=True)
+            (vault.vault_dir / "alsa.json").write_text(json.dumps({
+                "alias": "alsa",
+                "source_name": "alsa.pdf",
+                "resolved_policy": "fail_closed",
+                "profile": "max_security",
+                "local_only": True,
+                "format_used": "text",
+                "sanitized_content": "ALSA extracted text with [REDACTED]",
+                "entity_count": 2,
+                "tokens_est": 8,
+                "updated_at": 2000000000.0,
+            }), encoding="utf-8")
 
-                # Vault listing MUST display the max_security file!
-                with urllib.request.urlopen(f"{base}/api/vault") as r:
-                    items = json.loads(r.read().decode("utf-8"))["items"]
-                self.assertEqual([i["alias"] for i in items], ["alsa"])
-                self.assertTrue(items[0]["local_only"])
+            # Vault immediately sees max_security locally while cloud MCP keeps blocking it
+            items = vault.list_items(include_local_only=True)
+            self.assertEqual([i["alias"] for i in items], ["alsa"])
+            self.assertTrue(items[0]["local_only"])
+            self.assertEqual(vault.list_resources(include_local_only=False), [])
+            local_read = vault.read_resource("alsa", allow_local_only=True)
+            self.assertIn("[REDACTED]", local_read["text"])
 
-                # Preview endpoint returns extracted stripped & sanitized text
-                with urllib.request.urlopen(f"{base}/api/vault/alsa") as r:
-                    det = json.loads(r.read().decode("utf-8"))
-                self.assertNotIn("bob@alsa.example", det["text"])
-                self.assertNotIn("ALSA Private Test", det["text"])
+            # 2. Static UI writes tombstone deletion -> sync_from_disk() deletes from SQLite & removes tombstone
+            (vault.vault_dir / "alsa.json").write_text(json.dumps({"alias": "alsa", "deleted": True}), encoding="utf-8")
+            self.assertEqual(vault.list_items(include_local_only=True), [])
+            self.assertFalse((vault.vault_dir / "alsa.json").exists())
 
-                # CLI vault list / show --local-ok / update / delete smoke tests
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    self.assertEqual(cli_main(["vault", "list", "--db", str(db_p), "--json"]), 0)
-                    self.assertEqual(cli_main(["vault", "show", "alsa", "--local-ok", "--db", str(db_p), "--json"]), 0)
-                    self.assertEqual(cli_main(["vault", "update", "alsa", "--profile", "medium", "--db", str(db_p), "--json"]), 0)
-                    self.assertEqual(cli_main(["vault", "delete", "alsa", "--db", str(db_p), "--json"]), 0)
-                self.assertIn("alsa", buf.getvalue())
+            # 3. Complex PDF dropped in vault_inbox/ -> automatically extracted, sanitized, JSON-mirrored & raw PDF shredded
+            vault.inbox_dir.mkdir(parents=True, exist_ok=True)
+            pdf_bytes = _build_synthetic_pdf("ALSA Confidential bob@alsa.example IBAN IT60X0542811101000000123456", compressed=True)
+            (vault.inbox_dir / "alsa.pdf").write_bytes(pdf_bytes)
+            (vault.inbox_dir / "alsa.pdf.meta.json").write_text(json.dumps({
+                "alias": "alsa",
+                "policy": "auto",
+                "profile": "max_security",
+                "custom_terms": ["ALSA Confidential"],
+            }), encoding="utf-8")
 
-                with urllib.request.urlopen(f"{base}/api/vault") as r:
-                    self.assertEqual(json.loads(r.read().decode("utf-8"))["items"], [])
-                with urllib.request.urlopen(f"{base}/api/sync-preview") as r:
-                    sync_p = json.loads(r.read().decode("utf-8"))
-                self.assertTrue(sync_p["dry_run"])
-            finally:
-                srv.shutdown()
-                srv.server_close()
-                thread.join(timeout=2.0)
+            items_after = vault.list_items(include_local_only=True)
+            self.assertEqual([i["alias"] for i in items_after], ["alsa"])
+            self.assertFalse((vault.inbox_dir / "alsa.pdf").exists())
+            self.assertFalse((vault.inbox_dir / "alsa.pdf.meta.json").exists())
+
+            # 4. CLI vault list / show --local-ok / update / delete smoke tests
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(cli_main(["vault", "list", "--db", str(db_p), "--json"]), 0)
+                self.assertEqual(cli_main(["vault", "show", "alsa", "--local-ok", "--db", str(db_p), "--json"]), 0)
+                self.assertEqual(cli_main(["vault", "update", "alsa", "--profile", "medium", "--db", str(db_p), "--json"]), 0)
+                self.assertEqual(cli_main(["vault", "delete", "alsa", "--db", str(db_p), "--json"]), 0)
+            self.assertIn("alsa", buf.getvalue())
+
+            # 5. Static HTML contains zero localhost/port refs & includes pure-JS DecompressionStream + Vault UI
+            static_html = render_static_settings_html(cfg=DEFAULT_CONFIG, public_docs=True)
+            self.assertIn("DecompressionStream", static_html)
+            self.assertIn("showDirectoryPicker", static_html)
+            self.assertNotIn("localhost:8765", static_html)
+            self.assertNotIn("cortical.cli ui", static_html)
 
 
 if __name__ == "__main__":

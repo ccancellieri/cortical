@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 from .analytics.benchmark import run_comparative_benchmark
 from .analytics.dashboard import export_static_dashboard
-from .analytics.local_ui import serve_local_ui
 from .analytics.roi import build_roi_report, format_roi_markdown
 from .analytics.tuner import analyze_and_tune
 from .compression.engine import compress_structured
@@ -256,19 +255,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         return 0
     print(f"Ingested {res['uri']} (policy={res['resolved_policy']}, profile={res['profile']}, format={res['format_used']}, tokens={res['tokens_est']})")
     if res["local_only"]:
-        print("  NOTE: max_security (LOCAL-ONLY) — stored in Privacy Vault & visible in 'cortical vault list' / 'cortical ui'; blocked from remote cloud MCP.")
+        print("  NOTE: max_security (LOCAL-ONLY) — stored in Privacy Vault & visible in 'cortical vault list' / static settings.html; blocked from remote cloud MCP.")
     if res["requires_confirmation"]:
         print(f"  NOTE: confirmation requested ({', '.join(res.get('reasons') or [])})")
     return 0
-
-
-def _cmd_ui(args: argparse.Namespace) -> int:
-    return serve_local_ui(
-        vault_db=args.db,
-        host=args.host,
-        port=args.port,
-        open_browser=not args.no_open,
-    )
 
 
 def _cmd_vault(args: argparse.Namespace) -> int:
@@ -281,7 +271,7 @@ def _cmd_vault(args: argparse.Namespace) -> int:
             _print_json({"items": items})
             return 0
         if not items:
-            print("Privacy Vault is empty. Upload files via 'cortical ui' or 'cortical ingest <path>'.")
+            print("Privacy Vault is empty. Upload files via static 'html/settings.html' or 'cortical ingest <path>'.")
             return 0
         for it in items:
             tag = "[LOCAL-ONLY max_security]" if it["local_only"] else f"[CHAT-SAFE {it['profile']}]"
@@ -520,13 +510,6 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--db", default=None)
     ing.add_argument("--json", action="store_true")
     ing.set_defaults(func=_cmd_ingest)
-
-    ui_p = sub.add_parser("ui", help="Start clean foreground localhost UI for Privacy Vault uploads, preview & settings")
-    ui_p.add_argument("--host", default="127.0.0.1")
-    ui_p.add_argument("--port", type=int, default=8765)
-    ui_p.add_argument("--no-open", action="store_true")
-    ui_p.add_argument("--db", default=None)
-    ui_p.set_defaults(func=_cmd_ui)
 
     vlt = sub.add_parser("vault", help="List, inspect, re-sanitize, or delete Privacy Vault entries (including max_security)")
     vlt_sub = vlt.add_subparsers(dest="vault_action", required=True)

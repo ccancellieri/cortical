@@ -14,36 +14,35 @@
     .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:16px; }
     .card h2 { margin:0 0 8px; font-size:1.08rem; color:var(--accent); }
     code, pre { background:#060a14; border:1px solid var(--border); border-radius:6px; padding:2px 6px; font-size:0.82rem; color:var(--emerald); }
-    pre { padding:12px; overflow-x:auto; color:#cbd5e1; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="top">
       <div>
-        <h1 id="ht">❓ Cortical Reference &amp; CLI Guide</h1>
-        <div style="font-size:0.84rem;color:var(--muted);"><a href="./settings.html" style="color:var(--accent);">⚙️ Settings</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a></div>
+        <h1 id="ht">❓ Cortical Reference &amp; Zero-Server Guide</h1>
+        <div style="font-size:0.84rem;color:var(--muted);"><a href="./settings.html" style="color:var(--accent);">🛡️ Privacy Vault &amp; Settings</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a></div>
       </div>
       <button class="btn" id="hl" onclick="LANG=LANG==='en'?'it':'en'; localStorage.setItem('cortical_lang',LANG); applyL();">🇬🇧 EN</button>
     </div>
     <div id="c-en">
-      <div class="card"><h2>1. Hardware Preflight &amp; Variable-Quantization Models</h2><p>Run <code>cortical doctor</code> and <code>cortical models recommend</code> to inspect RAM/VRAM across macOS, Linux &amp; Windows (including Tier 1A <code>16 GB RAM + 4 GB VRAM</code> hybrids and Tier 1B <code>16 GB unified</code> running <code>27B</code> dynamic 4-bit XXS at <code>8.1 GB</code>). Add custom models in Settings or via <code>cortical models add</code>.</p></div>
-      <div class="card"><h2>2. 8-Harness Sync &amp; Best-of-Breed Composition</h2><p>Run <code>cortical sync --dry-run</code> then <code>cortical sync</code> to configure Serena LSP, RTK shell compression, PinchTab/Playwright snapshots, <code>context-mode</code>, optional HTTP Router, and shared rules across Antigravity, pi, OpenCode, OpenClaw, Codex, Claude Code, DeepSeek Harness (<code>dsh</code>) &amp; Unsloth Studio with timestamped backups and <code>--rollback</code>.</p></div>
-      <div class="card"><h2>3. Dynamic Privacy Vault (`auto` | `fail_closed` | `fail_open`) &amp; TOON</h2><p>Ingest sensitive docs via Dashboard or <code>cortical ingest file.docx --policy auto</code>. Sensitive items resolve to <code>fail_closed</code> and expose clean <code>cortical://private/&lt;alias&gt;</code> MCP resources + auto-sized memory without pasting files into cloud chats. Use <code>cortical compress</code> for lossless TOON compression.</p></div>
+      <div class="card"><h2>1. 100% Zero-Server Privacy Vault (settings.html)</h2><p>Open <code>settings.html</code> with zero background daemons or open ports. Drop PDF, DOCX, XLSX, PPTX, TXT or JSON files to anonymize them client-side, manage both <code>🔒 Local-Only (max_security)</code> and <code>🛡️ Chat-Ready (@private:&lt;alias&gt;)</code> items, and link your <code>.cortical_data</code> folder via File System Access API for automatic sync with MCP/CLI.</p></div>
+      <div class="card"><h2>2. Hardware Preflight &amp; Variable-Quantization Models</h2><p>Supports macOS, Linux &amp; Windows across Tier 1A (<code>16 GB RAM + 4 GB VRAM</code>) and Tier 1B (<code>16 GB unified</code> with Unsloth variable <code>27B 4-bit XXS 8.1 GB</code>). Configure custom models directly inside <code>settings.html</code> or via <code>cortical models add</code>.</p></div>
+      <div class="card"><h2>3. 8-Harness Sync &amp; Lossless TOON Compression</h2><p>Syncs Serena, RTK, PinchTab/Playwright, <code>context-mode</code>, optional Router, and auto-sized sanitized memory across Antigravity, pi, OpenCode, OpenClaw, Codex, Claude Code, DeepSeek Harness (<code>dsh</code>) &amp; Unsloth Studio.</p></div>
     </div>
     <div id="c-it" style="display:none;">
-      <div class="card"><h2>1. Preflight Hardware &amp; Quantizzazione Variabile</h2><p>Esegui <code>cortical doctor</code> e <code>cortical models recommend</code> su macOS, Linux o Windows (incluso Tier 1A <code>16 GB RAM + 4 GB VRAM</code> e Tier 1B <code>16 GB</code> unificati con <code>27B</code> 4-bit XXS da <code>8.1 GB</code>). Aggiungi nuovi modelli in Configurazione o con <code>cortical models add</code>.</p></div>
-      <div class="card"><h2>2. Sync su 8 Harness &amp; Tool Composti</h2><p>Esegui <code>cortical sync --dry-run</code> poi <code>cortical sync</code> per configurare Serena, RTK, PinchTab/Playwright, <code>context-mode</code>, Router HTTP opzionale e regole condivise su Antigravity, pi, OpenCode, OpenClaw, Codex, Claude Code, <code>dsh</code> e Unsloth Studio con backup e <code>--rollback</code>.</p></div>
-      <div class="card"><h2>3. Privacy Vault Dinamico (`auto` | `fail_closed` | `fail_open`) &amp; TOON</h2><p>Carica documenti con <code>cortical ingest doc.docx --policy auto</code>: i file sensibili diventano <code>fail_closed</code> e vengono esposti come risorse <code>cortical://private/&lt;alias&gt;</code> o memoria auto-dimensionata senza allegati grezzi in chat. Usa <code>cortical compress</code> per TOON lossless.</p></div>
+      <div class="card"><h2>1. Privacy Vault 100% Zero-Server (settings.html)</h2><p>Apri <code>settings.html</code> senza alcun servizio o porta aperta. Carica PDF, DOCX, XLSX, PPTX, TXT o JSON in locale nel browser, visualizza sempre sia i file <code>🔒 Solo Locale (max_security)</code> sia quelli pronti come <code>@private:&lt;alias&gt;</code>, e collega la cartella <code>.cortical_data</code> per sincronizzare automaticamente con gli agenti MCP.</p></div>
+      <div class="card"><h2>2. Hardware Preflight &amp; Quantizzazione Variabile</h2><p>Supporta macOS, Linux e Windows inclusi laptop ibridi Tier 1A (<code>16 GB RAM + 4 GB VRAM</code>) e Tier 1B (<code>16 GB unificati</code> con <code>27B 4-bit XXS 8.1 GB</code>). Aggiungi nuovi modelli direttamente da <code>settings.html</code>.</p></div>
+      <div class="card"><h2>3. Sync su 8 Harness &amp; Compressione TOON Lossless</h2><p>Configura Serena, RTK, PinchTab/Playwright, router opzionale e memoria anonimizzata sotto budget su Antigravity, pi, OpenCode, OpenClaw, Codex, Claude Code, <code>dsh</code> e Unsloth Studio.</p></div>
     </div>
   </div>
   <script>
-    let LANG = localStorage.getItem('cortical_lang') || 'en';
+    let LANG = localStorage.getItem('cortical_lang') || ((navigator.language || '').toLowerCase().startsWith('it') ? 'it' : 'en');
     function applyL() {
       document.getElementById('c-en').style.display = LANG === 'en' ? 'block' : 'none';
       document.getElementById('c-it').style.display = LANG === 'it' ? 'block' : 'none';
       document.getElementById('hl').textContent = LANG === 'it' ? '🇮🇹 IT' : '🇬🇧 EN';
-      document.getElementById('ht').textContent = LANG === 'it' ? '❓ Cortical Guida & Riferimento CLI' : '❓ Cortical Reference & CLI Guide';
+      document.getElementById('ht').textContent = LANG === 'it' ? '❓ Cortical Guida Zero-Server' : '❓ Cortical Reference & Zero-Server Guide';
     }
     applyL();
   </script>

@@ -99,10 +99,10 @@ See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for all 8 harnesses (`antigra
 ## Daily CLI Commands & Verification
 
 ```bash
-# Launch clean localhost UI to upload/anonymize PDF/DOCX/TXT & inspect Vault (incl. max_security)
-PYTHONPATH=src .venv/bin/python -m cortical.cli ui
+# Export & open 100% Zero-Server static UI (`html/settings.html` — PDF/DOCX/TXT upload, Vault, Models & Harnesses)
+PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
 
-# Or ingest & manage Privacy Vault directly from CLI (`auto` | `fail_closed` | `fail_open`)
+# Or ingest & inspect Privacy Vault directly from CLI (`auto` | `fail_closed` | `fail_open`)
 PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.pdf --alias client_brief --policy auto --profile medium
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault list
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault show client_brief --local-ok
@@ -111,10 +111,9 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli vault update client_brief --cust
 # Lossless TOON / XML / YAML / log compression
 PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json
 
-# Run local Auto-Tuner, ROI report, and static browser dashboard
+# Run local Auto-Tuner & ROI report (0 cloud tokens)
 PYTHONPATH=src .venv/bin/python -m cortical.cli tune --apply
 PYTHONPATH=src .venv/bin/python -m cortical.cli roi
-PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
 
 # Run offline benchmark & full unit test suite
 PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
