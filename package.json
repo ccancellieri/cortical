@@ -1,7 +1,7 @@
 {
   "name": "cortical-pi-harness",
-  "version": "0.2.0",
-  "description": "Zero-Dependency 4-Tier Merkle Second Brain MCP, Dynamic 200k Context Auto-Scaler, Zero-Token ROI Analytics & Adaptive Permission Gate for pi / OpenCode",
+  "version": "0.3.0",
+  "description": "Cross-Platform Zero-Server Agent Control Plane & Declarative Composer with Dynamic Privacy Vault, Lossless TOON Compression & Variable-Quant Model Auto-Tuner",
   "license": "Apache-2.0",
   "author": "Carlo Cancellieri (https://github.com/ccancellieri)",
   "homepage": "https://ccancellieri.github.io/cortical/",
@@ -12,10 +12,12 @@
   "keywords": [
     "pi-package",
     "opencode",
+    "deepseek-harness",
     "mcp",
-    "agentskills",
-    "second-brain",
-    "ollama"
+    "privacy-vault",
+    "toon",
+    "ollama",
+    "unsloth"
   ],
   "pi": {
     "extensions": [
@@ -29,7 +31,9 @@
   "scripts": {
     "setup": "bash ./scripts/setup.sh",
     "doctor": "PYTHONPATH=src python3 -m cortical.cli doctor",
-    "token-report": "PYTHONPATH=src python3 -m cortical.cli token-report --narrative",
+    "sync": "PYTHONPATH=src python3 -m cortical.cli sync",
+    "bench": "PYTHONPATH=src python3 -m cortical.cli bench --compare",
+    "roi": "PYTHONPATH=src python3 -m cortical.cli roi",
     "test": ".venv/bin/python -m unittest discover -s tests -v"
   }
 }

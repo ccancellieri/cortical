@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "==> [1/4] Creating isolated Python virtual environment (.venv)..."
+echo "==> [1/3] Creating isolated Python virtual environment (.venv)..."
 if python3 -m venv .venv 2>/dev/null; then
   .venv/bin/pip install --upgrade pip --quiet 2>/dev/null || true
   .venv/bin/pip install -e . --quiet 2>/dev/null || true
@@ -16,26 +16,25 @@ else
   python3 -m venv --without-pip .venv
 fi
 
-# Ensure src/ is always importable inside .venv even without pip/setuptools
 SITE_PKGS="$(".venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
 mkdir -p "$SITE_PKGS"
 echo "$ROOT_DIR/src" > "$SITE_PKGS/cortical.pth"
 
-# Create convenient CLI wrappers in .venv/bin
 cat > .venv/bin/cortical <<EOF
 #!/usr/bin/env bash
 exec "$ROOT_DIR/.venv/bin/python" -m cortical.cli "\$@"
 EOF
-cat > .venv/bin/cortical-wiki-mcp <<EOF
+cat > .venv/bin/cortical-mcp <<EOF
 #!/usr/bin/env bash
-exec "$ROOT_DIR/.venv/bin/python" -m cortical.wiki.mcp_server "\$@"
+exec "$ROOT_DIR/.venv/bin/python" -m cortical.mcp_server "\$@"
 EOF
-chmod +x .venv/bin/cortical .venv/bin/cortical-wiki-mcp
+chmod +x .venv/bin/cortical .venv/bin/cortical-mcp
 
-echo "==> [2/4] Running Cortical Hardware Auto-Profiler & Endpoint Discovery..."
+echo "==> [2/3] Running Cortical Hardware Preflight & Composed OSS Tool Check..."
 .venv/bin/python -m cortical.cli doctor --out-dir "$ROOT_DIR/.pi" --repo-root "$ROOT_DIR"
 
-echo "==> [3/4] Initializing empty Second Brain DB (no auto-crawl of framework source)..."
-.venv/bin/python -c "from cortical.wiki.db import CorticalWikiDB, AccessContext; db = CorticalWikiDB('$ROOT_DIR/.cortical_data/wiki.db'); db.ensure_workspace(AccessContext()); db.clear_unattached_self_repo_nodes(AccessContext())"
+echo "==> [3/3] Exporting Static Dashboard (html/) & Dry-Run Sync Plan..."
+.venv/bin/python -m cortical.cli dashboard --out-dir "$ROOT_DIR/html"
+.venv/bin/python -m cortical.cli sync --dry-run
 
-echo "==> [4/4] Setup complete! Generated .pi/mcp.json and .pi/hardware_profile.json."
+echo "Setup complete! Run '.venv/bin/cortical sync' to configure your harnesses or '.venv/bin/cortical dashboard --open'."

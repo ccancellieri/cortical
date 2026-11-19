@@ -1,26 +1,17 @@
 ---
 name: cortical-second-brain
 description: >
-  Navigate, search, fact-check, and update Cortical's 4-Tier Deterministic Merkle Second Brain
-  (light, medium, high, max) and High-Level Episode Macro-Graph. Use at the start of any task
-  to fetch compact context and at the end of a task to consolidate learned knowledge.
+  Navigate codebases via composed OSS tools (Serena LSP, RTK, PinchTab/Playwright), compress
+  structured payloads with lossless TOON, and manage Cortical's zero-cloud-PII Privacy Vault.
 ---
 
-# Cortical Second Brain Skill (`cortical-second-brain`)
+# Cortical Composed Architecture & Privacy Memory
 
-## 1. Progressive Context Depth Strategy (Token Optimization)
-Never load raw files (`max`) upfront when exploring a domain or codebase. Always escalate progressively:
-1. **`light` (~50 tokens/node):** Use `wiki_navigate(path="/", depth="light")` first to inspect the subtree map and Macro-Graph links.
-2. **`medium` (~250 tokens/node):** Drill into relevant subtrees with `depth="medium"` or `wiki_search(query="...", depth="medium")`.
-3. **`high` (~1000 tokens/node):** Request `depth="high"` when designing architecture, comparing APIs, or synthesizing reports.
-4. **`max` (Full Raw Source):** Request `depth="max"` ONLY on the exact leaf node where surgical code edits or verbatim quote extractions are needed.
+## 1. Code Navigation & Shell Compression (OSS Composition)
+Prefer composed best-of-breed tools synced by `cortical sync`:
+1. **Serena MCP:** Semantic symbol navigation (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`) instead of loading whole files.
+2. **RTK (`rtk`):** Compresses CLI test/git/build output by 60–90% before reaching the model context.
+3. **Cortical MCP (`cortical.mcp_server`):** Exposes only 5 lean tools (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`) + native `resources` (`cortical://private/<alias>`) & `prompts`.
 
-## 2. Mandatory Citation Verification (Fact-Checking Gate)
-Before presenting any factual claim derived from the knowledge base:
-- Call `wiki_verify_citation(claim_text, source_path, quoted_span)`.
-- Only include claims whose verdict is `"verified"` (`entailment >= 0.65` and `span_verified == true`).
-
-## 3. Post-Task Memory Consolidation
-At the end of every task:
-1. Run `wiki_crawl_delta(root_dir=".")` if any files were created or modified.
-2. Call `wiki_record_episode(...)` linking the completed episode (`relates_to`, `modifies`, `derived_from`) to the touched Merkle subtree roots so future agents inherit the lesson immediately.
+## 2. Zero-Cloud-PII Memory Sync & Budget Scaling
+All synced sanitized memory (`export_sanitized_memory_markdown`) is strictly compressed (`TOON` w/ `>=10%` guard vs compact JSON) and auto-budgeted to `<= 15%` of `num_ctx` computed dynamically for the machine's RAM/VRAM headroom.

@@ -1,89 +1,102 @@
-# Cortical Integrations Guide (Coding Agents, MCP Resources & Local Offload)
+# Cortical Integrations Guide (8 Coding Harnesses, MCP & OSS Composition)
 
 > **Live Site:** `https://ccancellieri.github.io/cortical/`
 
-Cortical exposes standard **MCP (JSON-RPC 2.0 over stdio)** (Tools + `resources` + `prompts`), **Agent Skills (`SKILL.md`)**, and **Zero-Dependency CLI** interfaces so it integrates cleanly across modern coding agents and IDE harnesses without background servers.
+Cortical runs **Zero-Server by default** (`python3 -m cortical.mcp_server` over `stdio`) across **macOS, Linux, and Windows** (`dependencies = []`), composing best-of-breed OSS tools (`Serena`, `RTK`, `PinchTab` / `Playwright`, `context-mode`) alongside Cortical's 3-Channel Privacy Vault and lossless `TOON` compression.
 
 ---
 
-## 1. MCP Server Setup Across 10+ Coding Agents & Harnesses
+## 1. One-Shot Cross-Platform Harness Sync (`cortical sync`)
 
-Use `python3 -m cortical.wiki.mcp_server` (or the installed `cortical-wiki-mcp` binary).
-
-### Claude Code
 ```bash
-claude mcp add cortical-wiki \
-  -e PYTHONPATH=/path/to/cortical/src \
-  -e CORTICAL_WIKI_DB=/path/to/cortical/.cortical_data/wiki.db \
-  -- python3 -m cortical.wiki.mcp_server
+# Preview changes across all 8 harnesses without writing files
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run
+
+# Apply idempotently (creates timestamped backups for clean rollback)
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync
+
+# Sync only specific harnesses (e.g. deepseek-harness & pi) or rollback
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --harness dsh,pi
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --rollback <backup_id>
 ```
-Skills: symlink `.agents/skills/cortical-*` and `.agents/skills/second-brain-3plus1-workflow` into `~/.claude/skills/` or `.claude/skills/`.
+
+| Harness | Pre-Send Attachment Interception | Config Synced (`macOS` / `Linux` / `Windows`) |
+| --- | --- | --- |
+| `pi` | **100% Verified** (Channel 3 extension) | `~/.pi/agent/{mcp,settings,models}.json` + `AGENTS.md` |
+| `claude-code` | **100% Verified** (`PreToolUse` / hook) | `~/.claude.json` + `~/.claude/CLAUDE.md` |
+| `opencode` | **100% Verified** (plugin/MCP) | `$XDG_CONFIG_HOME/opencode/config.json` + `AGENTS.md` |
+| `openclaw` | **100% Verified** (hook) | `~/.openclaw/openclaw.json` + `~/.openclaw/AGENTS.md` |
+| `codex` | **100% Verified** (hook/MCP) | `~/.codex/config.toml` + `~/.codex/AGENTS.md` |
+| `dsh` (`deepseek-harness`) | **100% Verified** (hook) | `~/.dsh/settings.yaml` (`@deepseek-ai/dsh-mcp-client`) |
+| `antigravity` | Not guaranteed (use Channels 1 & 2) | `~/.gemini/config/mcp_config.json` + `~/.gemini/GEMINI.md` |
+| `unsloth-studio` | Runner integration | `~/.cortical/unsloth-studio-mcp.json` |
+
+---
+
+## 2. Standard 5-Tool MCP Server Setup (`stdio` JSON-RPC 2.0)
+
+Use `python3 -m cortical.mcp_server` (or installed `cortical-mcp` script).
 
 ### Antigravity / Gemini CLI (`~/.gemini/config/mcp_config.json`)
 ```json
 {
   "mcpServers": {
-    "cortical-wiki": {
+    "cortical": {
       "command": "python3",
-      "args": ["-m", "cortical.wiki.mcp_server"],
+      "args": ["-m", "cortical.mcp_server"],
       "env": {
         "PYTHONPATH": "/path/to/cortical/src",
-        "CORTICAL_WIKI_DB": "/path/to/cortical/.cortical_data/wiki.db"
+        "CORTICAL_VAULT_DB": "/path/to/cortical/.cortical_data/vault.db"
       }
     }
   }
 }
 ```
 
+### Claude Code
+```bash
+claude mcp add cortical \
+  -e PYTHONPATH=/path/to/cortical/src \
+  -e CORTICAL_VAULT_DB=/path/to/cortical/.cortical_data/vault.db \
+  -- python3 -m cortical.mcp_server
+```
+
 ### OpenAI Codex CLI (`~/.codex/config.toml`)
 ```toml
-[mcp_servers.cortical-wiki]
+[mcp_servers.cortical]
 command = "python3"
-args = ["-m", "cortical.wiki.mcp_server"]
+args = ["-m", "cortical.mcp_server"]
 
-[mcp_servers.cortical-wiki.env]
+[mcp_servers.cortical.env]
 PYTHONPATH = "/path/to/cortical/src"
-CORTICAL_WIKI_DB = "/path/to/cortical/.cortical_data/wiki.db"
-```
-Codex automatically discovers `.agents/skills/*/SKILL.md`.
-
-### `pi` (`@earendil-works/pi-coding-agent`)
-Included `package.json` (`pi-package`) auto-registers `.pi/extensions` and `.agents/skills`:
-```bash
-pi --package /path/to/cortical
+CORTICAL_VAULT_DB = "/path/to/cortical/.cortical_data/vault.db"
 ```
 
-### OpenCode (`opencode.json`), Cursor, Windsurf, Cline, Continue.dev & Zed
-- **OpenCode:** copy `opencode.json` and Cortical skills into your workspace.
-- **Cursor / Windsurf / Cline / Roo Code:** add `mcpServers.cortical-wiki` (same JSON block as above).
-- **Continue.dev:** add `- name: cortical-wiki` under `mcpServers` in `~/.continue/config.yaml`.
-- **Zed:** add `context_servers.cortical-wiki` in `~/.config/zed/settings.json`.
+### DeepSeek Harness (`dsh`) & OpenCode & `pi`
+- **DeepSeek Harness (`dsh`):** managed via `cortical sync --harness dsh` (`~/.dsh/settings.yaml`).
+- **OpenCode (`opencode.json`):** included in repo root pointing to `python3 -m cortical.mcp_server`.
+- **`pi` (`@earendil-works/pi-coding-agent`):** `pi --package /path/to/cortical` registers `.pi/extensions/cortical-harness.ts` (Channel 3 pre-send interception) and `.agents/skills/`.
 
 ---
 
-## 2. MCP Tools, Universal `@` / `/` Addressing & Native Resources
+## 3. Lean 5-Tool MCP Surface + Native Resources & Prompts
 
-| Surface | Identifier / Command | Purpose |
-| --- | --- | --- |
-| Progressive Navigation | `wiki_navigate` (`light`/`medium`/`high`/`max`) | Traverse 4-tier Merkle tree (~50 to raw tok) |
-| Full-Text Search | `wiki_search` | SQLite FTS5 search across codebase, episodes & concepts |
-| Incremental Crawl | `wiki_crawl_delta` | Bottom-up `sha256` Merkle delta indexing ($O(1)$ unchanged skip) |
-| Citation Check | `wiki_verify_citation` | Deterministic span + file hash verification |
-| Universal Ref Resolver | `wiki_resolve_references` / `@wiki:`, `@private:`, `@concept:`, `@skill:` | Zero-path resolution & Privacy Egress Gate |
-| Multi-Model Local Loop | `cortical_local_loop` / `/local` | Runs 2–3 local Ollama passes (`router -> analyst -> reviewer`) offline |
-| Privacy Sanitizer | `privacy_read_sanitized` / `@private:<alias>:max_security` | OOXML/PDF metadata strip + offline pseudonymization |
-| Native MCP Resources | `cortical://private/<alias>`, `cortical://node/...`, `cortical://concept/...`, `cortical://skill/...` | Standard MCP resource autocomplete without exposing raw paths |
-| Native MCP Prompts | `/cortical-local`, `/cortical-wiki`, `/cortical-sanitize` | One-click harness slash prompts |
-| Memory & Graph | `wiki_record_episode`, `wiki_get_knowledge_graph` | Persist episodes, insights, and Macro-Graph links |
+| MCP Tool / Surface | Purpose |
+| --- | --- |
+| `cortical_vault_read` | Read sanitized, compressed `@private:<alias>` or `cortical://private/<alias>` item (`blocks max_security`) |
+| `cortical_ingest_private` | Ingest file/text with `auto` \| `fail_closed` \| `fail_open` classification & metadata stripping |
+| `cortical_compress` | Deterministic lossless TOON / XML / YAML / log compression (`>= 10%` guard vs compact JSON) |
+| `cortical_doctor_status` | Hardware tier, GPU/VRAM, composed OSS tools & model recommendations |
+| `cortical_local_offload` | Delegate prompt/task offline to local LLM runner (records SQLite telemetry at `$0` cloud cost) |
+| Native `resources` & `prompts` | `@`-autocomplete `cortical://private/<alias>`, plus `/cortical-private` & `/cortical-local` prompts |
 
 ---
 
-## 3. Reproducible Benchmarks
+## 4. On-Demand Streamable HTTP Bridge (`serve-mcp`)
+
+Cortical keeps zero open ports by default. When connecting a browser or remote harness over Streamable HTTP:
 
 ```bash
-# Core Merkle tree, token reduction & permission gate benchmarks
-PYTHONPATH=src .venv/bin/python scripts/benchmark.py
-
-# Multi-model local offload loop benchmark (requires local Ollama)
-PYTHONPATH=src .venv/bin/python scripts/benchmark_local_offload.py
+PYTHONPATH=src .venv/bin/python -m cortical.cli serve-mcp serena --project . --port 9121 --dry-run
+PYTHONPATH=src .venv/bin/python -m cortical.cli serve-mcp cortical --project . --port 9122
 ```

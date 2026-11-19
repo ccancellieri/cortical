@@ -1,0 +1,430 @@
+"""Comprehensive 100%-offline unit test suite for redesigned Cortical Control Plane."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import tempfile
+import unittest
+import zipfile
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+from cortical.analytics.benchmark import run_comparative_benchmark
+from cortical.analytics.dashboard import export_static_dashboard
+from cortical.analytics.roi import build_roi_report, format_roi_markdown
+from cortical.analytics.tuner import analyze_and_tune
+from cortical.cli import main as cli_main
+from cortical.compression.engine import compress_structured, fit_to_token_budget
+from cortical.compression.toon import decode_toon, encode_toon
+from cortical.composers.tools import build_serve_mcp_command, inspect_composed_tools, serve_mcp_http
+from cortical.config import (
+    DEFAULT_CONFIG,
+    ensure_telemetry_schema,
+    invoke_configured_runner,
+    load_cortical_config,
+    register_runner_adapter,
+    save_cortical_config,
+)
+from cortical.harnesses.adapters import (
+    ALL_HARNESSES,
+    apply_sync,
+    get_harness_presend_matrix,
+    plan_sync,
+    resolve_user_paths,
+    rollback_sync,
+)
+from cortical.hardware.context_window import (
+    compute_dynamic_num_ctx,
+    get_model_context_window,
+    register_model_context_provider,
+)
+from cortical.hardware.models import (
+    add_custom_model,
+    pull_model,
+    recommend_models_for_hardware,
+    remove_custom_model,
+)
+from cortical.hardware.probe import classify_hardware_tier
+from cortical.mcp_server import CorticalMCPServer
+from cortical.privacy.sanitizer import (
+    FailClosedError,
+    classify_and_sanitize,
+    ensure_privacy_ignore_files,
+)
+from cortical.privacy.vault import PrivacyVault
+
+FIXTURES_PATH = Path(__file__).resolve().parent / "fixtures" / "api_fixtures.json"
+
+
+def _load_fixtures() -> dict:
+    return json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
+
+
+class TestHardwareAndModels(unittest.TestCase):
+    def test_classify_all_five_tiers_and_fixtures(self) -> None:
+        fx = _load_fixtures()["hardware_profiles"]
+
+        # Tier 0 Lean
+        t0 = classify_hardware_tier({"total_ram_gb": 8.0, "free_ram_gb": 3.0, "vram_gb": 0.0, "unified_memory": False, "disk_free_gb": 40.0})
+        self.assertEqual(t0["tier"], "tier_0_lean")
+        self.assertFalse(t0["local_llm_viable"])
+
+        # Tier 1A Hybrid Laptop (16GB RAM + 4GB VRAM NVIDIA MX250 from fixture)
+        mx = fx["linux_laptop_mx250"]
+        t1a = classify_hardware_tier({
+            "total_ram_gb": mx["ram_total_gb"],
+            "free_ram_gb": 10.0,
+            "vram_gb": mx["vram_gb"],
+            "unified_memory": mx["unified_memory"],
+            "disk_free_gb": 80.0,
+        })
+        self.assertEqual(t1a["tier"], "tier_1a_hybrid_laptop")
+        self.assertTrue(t1a["local_llm_viable"])
+
+        # Tier 1B Unified 16GB (Apple M2 Pro fixture)
+        m2 = fx["mac_m2_pro_16gb"]
+        t1b = classify_hardware_tier({
+            "total_ram_gb": m2["ram_total_gb"],
+            "free_ram_gb": 11.0,
+            "vram_gb": m2["vram_gb"],
+            "unified_memory": m2["unified_memory"],
+            "disk_free_gb": 80.0,
+        })
+        self.assertEqual(t1b["tier"], "tier_1b_unified_16_24")
+        self.assertIn("27B", t1b["recommendation"])
+
+        # Tier 2 Workstation & Tier 3 Studio
+        t2 = classify_hardware_tier({"total_ram_gb": 32.0, "free_ram_gb": 22.0, "vram_gb": 24.0, "unified_memory": False, "disk_free_gb": 200.0})
+        t3 = classify_hardware_tier({"total_ram_gb": 64.0, "free_ram_gb": 48.0, "vram_gb": 48.0, "unified_memory": True, "disk_free_gb": 500.0})
+        self.assertEqual(t2["tier"], "tier_2_workstation")
+        self.assertEqual(t3["tier"], "tier_3_studio")
+
+    def test_recommend_variable_quant_27b_and_custom_models(self) -> None:
+        hw_tier0 = {"total_ram_gb": 8.0, "free_ram_gb": 3.0, "vram_gb": 0.0, "unified_memory": False}
+        hw_tier0["classification"] = classify_hardware_tier(hw_tier0)
+        rec0 = recommend_models_for_hardware(hw_tier0)
+        self.assertFalse(rec0["local_llm_viable"])
+        self.assertEqual(rec0["recommended_by_role"], {})
+
+        hw_1b = {"total_ram_gb": 16.0, "free_ram_gb": 11.5, "vram_gb": 11.2, "unified_memory": True}
+        hw_1b["classification"] = classify_hardware_tier(hw_1b)
+        rec1b = recommend_models_for_hardware(hw_1b, installed_models=[])
+        deep = rec1b["recommended_by_role"]["deep_reasoner"]
+        self.assertEqual(deep["model_id"], "qwen3.8:27b-q4_xxs")
+        self.assertEqual(deep["memory_gb"], 8.1)
+        self.assertGreaterEqual(deep["recommended_num_ctx"], 16384)
+
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        entry = add_custom_model(cfg, {
+            "model_id": "custom/coder:q4_xxs",
+            "memory_gb": 6.5,
+            "native_ctx": 65536,
+            "quantization": "Unsloth Q4_XXS",
+            "is_variable_quant": True,
+            "roles": ["daily_coder", "deep_reasoner"],
+        })
+        self.assertEqual(entry["model_id"], "custom/coder:q4_xxs")
+        self.assertTrue(remove_custom_model(cfg, "custom/coder:q4_xxs"))
+        self.assertFalse(remove_custom_model(cfg, "custom/coder:q4_xxs"))
+
+        dry = pull_model("qwen3.8:27b-q4_xxs", dry_run=True)
+        self.assertTrue(dry["ok"])
+        self.assertTrue(dry["dry_run"])
+        self.assertEqual(dry["command"], "ollama pull qwen3.8:27b-q4_xxs")
+
+    def test_dynamic_ctx_and_provider_registration(self) -> None:
+        ctx_ok = compute_dynamic_num_ctx(32768, "qwen3.8:27b-q4_xxs", ram_available_gb=12.0, unified_memory=True, model_ram_gb=8.1)
+        ctx_tight = compute_dynamic_num_ctx(32768, "qwen3.8:27b-q4_xxs", ram_available_gb=3.0, unified_memory=True, model_ram_gb=8.1)
+        self.assertEqual(ctx_ok, 32768)
+        self.assertEqual(ctx_tight, 4096)
+
+        register_model_context_provider(lambda mid: {"context_length": 65536, "parameter_size": "27B"} if mid == "mock:27b" else None)
+        win = get_model_context_window("mock:27b")
+        self.assertEqual(win, 65536)
+
+
+class TestCompression(unittest.TestCase):
+    def test_toon_roundtrip_and_saving_guard(self) -> None:
+        payload = {
+            "meta": {"env": "prod:eu", "note": "hello, world"},
+            "items": [
+                {"id": 1, "name": "alpha", "ok": True, "score": 9.5},
+                {"id": 2, "name": "beta, inc", "ok": False, "score": 8.0},
+                {"id": 3, "name": "123", "ok": True, "score": 7.25},
+                {"id": 4, "name": "true", "ok": False, "score": 6.0},
+            ],
+        }
+        encoded = encode_toon(payload)
+        decoded = decode_toon(encoded)
+        self.assertEqual(decoded, payload)
+
+        # Uniform table compresses >=10% better than compact JSON
+        uniform_big = {"rows": [{"id": i, "mod": f"m{i}", "status": "ok", "local": True} for i in range(15)]}
+        comp = compress_structured(json.dumps(uniform_big, indent=2), fmt="json", min_saving_pct=10.0)
+        self.assertEqual(comp["format_used"], "toon")
+        self.assertTrue(comp["lossless"])
+        self.assertGreater(comp["saving_pct"], 50.0)
+
+        # When saving is below threshold guard, falls back cleanly to compact_json
+        tiny = compress_structured('{"a": 1, "b": 2}', fmt="json", min_saving_pct=90.0)
+        self.assertEqual(tiny["format_used"], "compact_json")
+
+        # XML and ANSI log compaction
+        xml_c = compress_structured("<root>\n  <!-- ignore -->\n  <item>ok</item>\n</root>", fmt="xml")
+        self.assertEqual(xml_c["compressed"], "<root><item>ok</item></root>")
+
+        log_raw = "\x1b[32mINFO ok\x1b[0m\n" * 6
+        log_c = compress_structured(log_raw, fmt="log")
+        self.assertEqual(log_c["format_used"], "log_compacted")
+        self.assertIn("[repeated x5]", log_c["compressed"])
+
+    def test_fit_to_token_budget(self) -> None:
+        blocks = [
+            {"alias": "b1", "content": "A " * 800, "priority": 90},
+            {"alias": "b2", "content": "B " * 800, "priority": 80},
+        ]
+        fitted = fit_to_token_budget(blocks, num_ctx=4096, max_share=0.15)
+        self.assertLessEqual(fitted["budget_tokens"], int(4096 * 0.15) + 1)
+        self.assertLessEqual(fitted["used_tokens"], fitted["budget_tokens"] + 32)
+
+
+class TestPrivacyVault(unittest.TestCase):
+    def test_zero_false_positives_and_dynamic_policies(self) -> None:
+        prose = (
+            "Architectural Summary: Cortical Control Plane connects Serena Language Server, "
+            "Dynamic Context Scaling, Python Stdlib, and Apache License."
+        )
+        clean = classify_and_sanitize(prose, policy="auto", profile="medium")
+        self.assertEqual(clean["resolved_policy"], "fail_open")
+        self.assertFalse(clean["requires_confirmation"])
+        self.assertEqual(clean["sanitized_text"], prose)
+
+        pii_text = f"{prose}\nContact: alice@example.org, IBAN IT60X0542811101000000123456, Project Orion."
+        masked = classify_and_sanitize(pii_text, policy="auto", profile="medium", custom_terms=["Project Orion"])
+        self.assertEqual(masked["resolved_policy"], "fail_closed")
+        self.assertTrue(masked["requires_confirmation"])
+        self.assertNotIn("alice@example.org", masked["sanitized_text"])
+        self.assertNotIn("IT60X0542811101000000123456", masked["sanitized_text"])
+        self.assertNotIn("Project Orion", masked["sanitized_text"])
+        self.assertIn("Cortical Control Plane", masked["sanitized_text"])
+        self.assertIn("Serena Language Server", masked["sanitized_text"])
+
+        # FailClosedError on failed local NER under fail_closed
+        with self.assertRaises(FailClosedError):
+            classify_and_sanitize(
+                pii_text,
+                policy="fail_closed",
+                profile="medium",
+                use_local_ner=True,
+                llm_fn=lambda _p: (_ for _ in ()).throw(RuntimeError("offline")),
+            )
+
+        # Successful injectable local JSON NER (tests both {"entities": [...]} and direct list)
+        ner_res = classify_and_sanitize(
+            "Internal review with mario rossi for Client Alpha.",
+            policy="fail_closed",
+            profile="low",
+            use_local_ner=True,
+            llm_fn=lambda _p: json.dumps({"entities": [
+                {"text": "mario rossi", "category": "PERSON_NAME"},
+                {"text": "Client Alpha", "category": "ORG"},
+            ]}),
+        )
+        self.assertNotIn("mario rossi", ner_res["sanitized_text"])
+        self.assertNotIn("Client Alpha", ner_res["sanitized_text"])
+
+    def test_ooxml_metadata_strip_and_channels_1_to_3(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            docx_path = tpath / "sensitive_contract.docx"
+            with zipfile.ZipFile(docx_path, "w") as zf:
+                zf.writestr("docProps/core.xml", "<cp:coreProperties><dc:creator>Real Author</dc:creator></cp:coreProperties>")
+                zf.writestr("word/document.xml", "<w:t>Agreement for bob@acme.example and €5,000 budget.</w:t>")
+
+            ignores = ensure_privacy_ignore_files(tpath)
+            self.assertEqual(len(ignores), 3)
+            self.assertTrue((tpath / ".geminiignore").is_file())
+
+            vault = PrivacyVault(tpath / "vault.db")
+            ing1 = vault.ingest(docx_path, alias="contract_pub", policy="auto", profile="medium")
+            self.assertEqual(ing1["resolved_policy"], "fail_closed")
+            self.assertNotIn("bob@acme.example", ing1["sanitized_preview"])
+            self.assertNotIn("Real Author", ing1["sanitized_preview"])
+
+            ing2 = vault.ingest("Secret key sk-1234567890abcdefghij", alias="local_sec", policy="fail_closed", profile="max_security")
+            self.assertTrue(ing2["local_only"])
+
+            res_list = vault.list_resources(include_local_only=False)
+            aliases = [r["uri"] for r in res_list]
+            self.assertIn("cortical://private/contract_pub", aliases)
+            self.assertNotIn("cortical://private/local_sec", aliases)
+
+            with self.assertRaises(FailClosedError):
+                vault.read_resource("local_sec", allow_local_only=False)
+            local_ok = vault.read_resource("local_sec", allow_local_only=True)
+            self.assertNotIn("sk-1234567890abcdefghij", local_ok["text"])
+
+            # Channel 2 budgeted markdown
+            md = vault.export_sanitized_memory_markdown(num_ctx=16384, max_share=0.15)
+            self.assertIn("@private:contract_pub", md)
+            self.assertNotIn("local_sec", md)
+
+            # Channel 3 pre-send verification matrix
+            sample_f = tpath / "note.txt"
+            sample_f.write_text("Send to clara@example.net", encoding="utf-8")
+            ic_pi = vault.intercept_pre_send("pi", "Check attached note", [sample_f])
+            self.assertTrue(ic_pi["supported"])
+            self.assertTrue(ic_pi["blocked_raw_upload"])
+            self.assertNotIn("clara@example.net", ic_pi["proposed_remote_prompt"])
+
+            ic_dsh = vault.intercept_pre_send("dsh", "Check attached note", [sample_f])
+            self.assertTrue(ic_dsh["supported"])
+
+            ic_agy = vault.intercept_pre_send("antigravity", "Check attached note", [sample_f])
+            self.assertFalse(ic_agy["supported"])
+
+
+class TestComposersAndHarnesses(unittest.TestCase):
+    def test_cross_platform_composers_sync_and_rollback(self) -> None:
+        tools_mac = inspect_composed_tools("macos")
+        tools_win = inspect_composed_tools("windows")
+        self.assertIn("brew", tools_mac["rtk"]["install_cmd"].lower())
+        self.assertEqual(tools_win["rtk"]["install_cmd"], "cargo install rtk")
+
+        cmd = build_serve_mcp_command("serena", Path("."), port=9121)
+        self.assertIn("9121", cmd)
+        srv = serve_mcp_http("cortical", Path("."), port=9122, dry_run=True)
+        self.assertTrue(srv["dry_run"])
+        self.assertEqual(srv["url"], "http://127.0.0.1:9122/mcp")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp) / "home"
+            fake_app = Path(tmp) / "appdata"
+            paths_mac = resolve_user_paths("macos", home=fake_home)
+            paths_lin = resolve_user_paths("linux", home=fake_home, xdg_config=fake_home / ".xdg")
+            paths_win = resolve_user_paths("windows", home=fake_home, appdata=fake_app)
+            self.assertIn(".gemini", str(paths_mac["antigravity"]["mcp"]))
+            self.assertIn(".xdg", str(paths_lin["opencode"]["config"]))
+            self.assertIn("appdata", str(paths_win["opencode"]["config"]))
+
+            # Preserve unrelated pre-existing keys across JSON/TOML configs
+            paths_mac["antigravity"]["mcp"].parent.mkdir(parents=True, exist_ok=True)
+            paths_mac["antigravity"]["mcp"].write_text(json.dumps({
+                "mcpServers": {"user-existing": {"command": "echo", "args": ["ok"]}}
+            }), encoding="utf-8")
+            paths_mac["codex"]["config"].parent.mkdir(parents=True, exist_ok=True)
+            paths_mac["codex"]["config"].write_text('model = "gpt-5"\n', encoding="utf-8")
+
+            hw = {"os": "macos", "total_ram_gb": 16.0, "free_ram_gb": 11.0, "vram_gb": 11.2, "unified_memory": True, "binaries": {"serena": "serena"}}
+            hw["classification"] = classify_hardware_tier(hw)
+            rec = recommend_models_for_hardware(hw, installed_models=[])
+
+            self.assertEqual(len(ALL_HARNESSES), 8)
+            self.assertIn("dsh", ALL_HARNESSES)
+            self.assertTrue(get_harness_presend_matrix()["dsh"])
+
+            changes = plan_sync(
+                DEFAULT_CONFIG,
+                hw,
+                rec,
+                vault_markdown="## Vault\n- safe",
+                repo_root=fake_home / "repo",
+                vault_db_path=fake_home / "vault.db",
+                user_paths=paths_mac,
+            )
+            harnesses_covered = {c.harness for c in changes}
+            self.assertEqual(harnesses_covered, set(ALL_HARNESSES))
+
+            backup_root = Path(tmp) / "backups"
+            res = apply_sync(changes, backup_root=backup_root)
+            self.assertIsNotNone(res["backup_id"])
+            self.assertGreater(res["changed_count"], 5)
+
+            merged_agy = json.loads(paths_mac["antigravity"]["mcp"].read_text(encoding="utf-8"))
+            self.assertIn("user-existing", merged_agy["mcpServers"])
+            self.assertIn("cortical-mcp", merged_agy["mcpServers"])
+            codex_txt = paths_mac["codex"]["config"].read_text(encoding="utf-8")
+            self.assertIn('model = "gpt-5"', codex_txt)
+            self.assertIn("[mcp_servers.cortical_mcp]", codex_txt)
+            dsh_txt = paths_mac["dsh"]["settings"].read_text(encoding="utf-8")
+            self.assertIn("@deepseek-ai/dsh-mcp-client", dsh_txt)
+
+            rb = rollback_sync(res["backup_id"], backup_root=backup_root)
+            self.assertGreater(rb["restored"], 0)
+            restored_agy = json.loads(paths_mac["antigravity"]["mcp"].read_text(encoding="utf-8"))
+            self.assertNotIn("cortical-mcp", restored_agy["mcpServers"])
+            self.assertEqual(paths_mac["codex"]["config"].read_text(encoding="utf-8"), 'model = "gpt-5"\n')
+            self.assertFalse(paths_mac["dsh"]["settings"].exists())
+
+
+class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
+    def test_config_telemetry_and_mcp_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            cfg_p = tpath / "cortical.config.json"
+            cfg = load_cortical_config(cfg_p)
+            cfg["active_model"] = "qwen3.8:27b-q4_xxs"
+            save_cortical_config(cfg, cfg_p)
+            reloaded = load_cortical_config(cfg_p)
+            self.assertEqual(reloaded["active_model"], "qwen3.8:27b-q4_xxs")
+
+            telem_db = tpath / "vault.db"
+            ensure_telemetry_schema(telem_db).close()
+            register_runner_adapter("mock_local", lambda sys_p, usr_p, _cfg: f"LOCAL_OK: {usr_p[:30]}")
+            with patch.dict(os.environ, {"CORTICAL_TELEMETRY_DB": str(telem_db)}):
+                cfg["active_runner"] = "mock_local"
+                ans = invoke_configured_runner("Summarize architecture", config=cfg, model_override="qwen3.8:27b-q4_xxs")
+                self.assertIn("LOCAL_OK", ans)
+
+                srv = CorticalMCPServer(vault_db=telem_db)
+                init_r = srv.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+                self.assertEqual(init_r["result"]["serverInfo"]["name"], "cortical-mcp")
+
+                list_r = srv.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+                self.assertEqual(len(list_r["result"]["tools"]), 5)
+
+                srv.handle_request({
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "cortical_ingest_private", "arguments": {"path_or_text": "Email test@example.org", "alias": "memo"}},
+                })
+                res_r = srv.handle_request({"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": "cortical://private/memo"}})
+                self.assertNotIn("test@example.org", res_r["result"]["contents"][0]["text"])
+
+                pr_r = srv.handle_request({"jsonrpc": "2.0", "id": 5, "method": "prompts/get", "params": {"name": "cortical-private", "arguments": {"alias": "memo"}}})
+                self.assertIn("memo", pr_r["result"]["messages"][0]["content"]["text"])
+                self.assertIsNone(srv.handle_request({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
+
+    def test_analytics_and_cli_smoke(self) -> None:
+        bench = run_comparative_benchmark()
+        self.assertEqual(bench["lean_mcp"]["tool_count"], 5)
+        self.assertEqual(bench["compression_before_vs_after"]["format_used"], "toon")
+        self.assertGreater(bench["compression_before_vs_after"]["saving_vs_compact_pct"], 50.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            s_html, h_html = export_static_dashboard(tpath / "out", config=DEFAULT_CONFIG, public_docs=True)
+            self.assertTrue(s_html.is_file())
+            self.assertTrue(h_html.is_file())
+
+            cfg_p = tpath / "c.json"
+            tuned = analyze_and_tune(config=json.loads(json.dumps(DEFAULT_CONFIG)), apply_changes=True, config_path=cfg_p)
+            self.assertTrue(tuned["applied"])
+            self.assertTrue(cfg_p.is_file())
+
+            roi = build_roi_report(db_path=tpath / "none.db", brain_dir=tpath / "no_brain")
+            self.assertIn("Cortical Token & Offload Report", format_roi_markdown(roi))
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(cli_main(["bench", "--compare", "--json"]), 0)
+                self.assertEqual(cli_main(["models", "list", "--json"]), 0)
+                self.assertEqual(cli_main(["serve-mcp", "cortical", "--dry-run", "--json"]), 0)
+                self.assertEqual(cli_main(["dashboard", "--out-dir", str(tpath / "html"), "--json"]), 0)
+            self.assertIn("compression_before_vs_after", buf.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

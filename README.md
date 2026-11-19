@@ -1,55 +1,61 @@
 # Cortical
 
-[![Live Demo & Brand Site](https://img.shields.io/badge/Demo_&_Docs-ccancellieri.github.io%2Fcortical-38bdf8)](https://ccancellieri.github.io/cortical/)
+[![Live Demo & Docs](https://img.shields.io/badge/Demo_&_Docs-ccancellieri.github.io%2Fcortical-38bdf8)](https://ccancellieri.github.io/cortical/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-34d399)](LICENSE)
 [![Python 3.10+ Stdlib Only](https://img.shields.io/badge/Dependencies-0_External_(Stdlib_Only)-fbbf24)](pyproject.toml)
 
-**Zero-Server 4-Tier Merkle Second Brain MCP, Multi-Model Local Offload Engine, Local Privacy Sanitizer (`@private:` Egress Gate), Pluggable 200k Dynamic Context Auto-Scaler, and Cortical Skill Engine**
+**Cross-Platform Zero-Server Agent Control Plane & Declarative Composer** · **Dynamic Privacy Vault (`auto` | `fail_closed` | `fail_open`)** · **Deterministic Lossless `TOON` Compression** · **Hardware/Variable-Quant Model Manager & Auto-Tuner**
 
-- **Live Brand Site & Interactive Demo:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/)
-- **Interactive Browser Configurator:** [`https://ccancellieri.github.io/cortical/settings.html`](https://ccancellieri.github.io/cortical/settings.html)
-- **Platforms:** macOS (Apple Silicon Metal) & Linux (NVIDIA CUDA / Vulkan / CPU) · **Pure Python 3.10+ stdlib (`dependencies = []`)**
-- **License:** `Apache-2.0` · **Author:** Carlo Cancellieri ([GitHub](https://github.com/ccancellieri) · ORCID `0009-0006-4092-4234`)
-
----
-
-## Core Architecture (Zero-Server, Zero Vector-DB Bloat)
-
-Cortical runs with **no background daemon, no Docker, no external vector DB, and no mandatory pip packages**. State stays in local SQLite (`WAL + FTS5`) and static HTML exports, plugging cleanly into **`pi`, `OpenCode`, `Claude Code`, `Codex CLI`, `Cursor`, `Windsurf`, `Cline`, `Zed`, `Continue.dev`, and `Antigravity`**.
-
-1. **4-Tier Merkle + Macro-Graph Second Brain MCP (`src/cortical/wiki/`):**
-   - Progressive retrieval tiers: `light` (~50 tok), `medium` (~250 tok), `high` (~1,000 tok), `max` (raw file).
-   - Bottom-up `sha256` Merkle delta crawler ($O(1)$ skip for unchanged files), SQLite FTS5 search, relational RBAC/ACL, and native MCP `resources` (`cortical://private/...`, `cortical://node/...`, `cortical://concept/...`) & `prompts`.
-2. **Multi-Model Local Offload Loops (`cortical local-loop` / `cortical_local_loop`):**
-   - Chains pluggable local runners (`ollama`, `llama_cpp`, `mlx_lm`, `openai_compatible`) across router, analyst, and reviewer models (e.g. `qwen2.5:1.5b` &rarr; `qwen3.5:9b-q3_k_xl` &rarr; `qwen3:8b`) to resolve tasks offline and distill durable insights at **$0 cloud cost**.
-3. **Local Privacy Sanitizer & `@private:` Egress Gate (`src/cortical/privacy_sanitizer.py`):**
-   - Strips OOXML/PDF binary metadata, pseudonymizes emails/IDs/names/custom terms locally, protects private vaults via `.geminiignore`/`.cursorignore`/`.claudeignore`, and gates `@private:<alias>` / `cortical://private/...` egress across configurable profiles (`max_security`, `low`, `medium`, `max_context`).
-4. **Pluggable 200k Dynamic Context Auto-Scaler (`src/cortical/context_window.py`):**
-   - Auto-discovers loaded models (`/api/ps`, `/api/show`, or custom `register_model_context_provider()`) and scales `num_ctx` to live RAM headroom (`vm_stat` / `/proc/meminfo`) up to configurable `max_context_window` (default `200,000`), avoiding silent `4096`-token clipping and swap thrashing.
-5. **Cortical Skill Engine (`src/cortical/skills_hub.py` + `.agents/skills/`):**
-   - Ships portable `SKILL.md` playbooks (`cortical-token-saver`, `second-brain-3plus1-workflow`) alongside local skill consolidation and knowledge-graph linking.
-6. **Zero-Token ROI Analytics & Adaptive Permission Gate (`src/cortical/token_analytics.py`, `src/cortical/permissions/gate.py`):**
-   - Evaluates bash/tool risk deterministically in `<1 ms` and computes local offload + compression savings offline into static local dashboards.
+- **Live Documentation & Browser Configurator:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/) · [`settings.html`](https://ccancellieri.github.io/cortical/settings.html)
+- **Platforms:** `macOS` (Apple Silicon Metal), `Linux` (CUDA / Vulkan / CPU), `Windows` (MSVC / NVIDIA / WMIC-PowerShell)
+- **Zero External Runtime Dependencies:** `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only)
+- **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` or HTTP router integration
+- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; redesigned architecture (`~4.2K` Python LOC across 6 packages) reduces codebase surface by **~86.9%** while composing best-of-breed OSS tools.
 
 ---
 
-## Reproducible Benchmarks (Apple M2 Pro · 16 GB Unified Memory)
+## Core Architecture (6 Packages + Lean 5-Tool MCP)
 
-Run the included benchmark scripts to measure directly on your own hardware:
+Cortical composes best-of-breed OSS tools (`Serena` LSP, `RTK` shell compressor, `PinchTab` / `Playwright` accessibility browser, `context-mode` output sandbox, optional `LiteLLM` / `OmniRoute` / `claude-code-router`) and handles the four gaps OSS leaves open:
 
-| Benchmark | Measured Result | Scope | Script |
+1. **Hardware Preflight, Model Manager & Dynamic Variable Quantization (`src/cortical/hardware/`):**
+   - Evaluates CPU RAM, discrete VRAM, unified memory, disk headroom, and active Ollama/CLI runners across 5 tiers (`tier_0_lean` through `tier_3_studio`).
+   - Explicitly supports **Tier 1A Hybrid Laptops (`16 GB RAM + 4–6 GB VRAM`)** (`qwen2.5:1.5b`/`3b` in VRAM + `7B–9B` hybrid offload) and **Tier 1B Unified (`16–24 GB`)** running `qwen3.5:9b-q3_k_xl` (`5.1 GB`) alongside **Unsloth variable-quantized `27B` models** such as `qwen3.8:27b-q4_xxs` (`8.1 GB` 4-bit XXS) and `qwen3.8:27b-iq2_xxs` (`7.2 GB` `UD-IQ2_XXS`) for deep reasoning and orchestration without swap thrashing.
+   - Manage built-in or user-configured custom/variable-quant models via `cortical models` (`list`, `recommend`, `add`, `remove`, `pull`) or the static configurator (`docs/settings.html`).
+2. **Declarative Cross-Platform Harness Sync (`src/cortical/harnesses/`, `src/cortical/composers/`):**
+   - Synchronizes MCP configs, router settings, and auto-sized rule files idempotently across **8 harnesses**: `antigravity`, `pi`, `opencode`, `openclaw`, `codex`, `claude-code`, `dsh` ([`deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness)), and `unsloth-studio`.
+   - Every `cortical sync` creates timestamped backups enabling exact `cortical sync --rollback <id>` without overwriting existing user credentials or unrelated config keys.
+3. **Dynamic Privacy Vault & 3-Channel Zero-Attachment Exposure (`src/cortical/privacy/`):**
+   - Strips OOXML/PDF metadata, runs structured PII + custom-term pseudonymization, optionally runs offline local LLM JSON NER (eliminating legacy Title-Case regex false positives on technical terms), and classifies items dynamically as **`auto`**, **`fail_closed`**, or **`fail_open`**.
+   - **Channel 1 (`cortical://private/<alias>`):** Native MCP resource + `@private:<alias>` read (`blocks max_security` cloud egress).
+   - **Channel 2 (`cortical sync`):** Injects sanitized memory blocks auto-capped at `<= 15% num_ctx`.
+   - **Channel 3 (`cortical intercept`):** Deterministic pre-send attachment interception strictly on 100%-verified harnesses (`pi`, `claude-code`, `opencode`, `openclaw`, `codex`, `dsh`).
+4. **Deterministic Lossless Compression (`src/cortical/compression/`):**
+   - Native pure-Python lossless `TOON` encoder/decoder with deterministic round-trip fidelity, ANSI/log compaction, XML/YAML whitespace normalization, and an automatic `>= 10%` saving guard vs compact JSON.
+5. **Lean 5-Tool MCP Server (`src/cortical/mcp_server.py`):**
+   - Minimal surface (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`) + native MCP `resources` & `prompts`.
+6. **Zero-Token Analytics, Auto-Tuner & Comparative Benchmark (`src/cortical/analytics/`):**
+   - Offline ROI reporting (`cortical roi`), local Auto-Tuner (`cortical tune`), static zero-server dashboard (`cortical dashboard`), and reproducible comparative benchmarks (`cortical bench --compare`).
+
+---
+
+## Reproducible Comparative Benchmarks (`before vs after`)
+
+Measured offline with `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare` and `scripts/benchmark.py`:
+
+| Capability | Baseline / Before | Cortical / After | Measured Result |
 | --- | --- | --- | --- |
-| **Root `light` Merkle Reduction** | **99.27%** (`1,860` vs `255,360` raw tok) | 43 Python modules | [`scripts/benchmark.py`](scripts/benchmark.py) |
-| **Merkle Crawl / Delta Skip** | **283.35 ms** cold / **89.56 ms** $O(1)$ skip | 43 Python modules | [`scripts/benchmark.py`](scripts/benchmark.py) |
-| **Single-File Reduction (`server.py`)** | **460** (`medium`) / **2,007** (`high`) vs `57,725` raw | `99.20%` / `96.52%` saved | [`scripts/benchmark.py`](scripts/benchmark.py) |
-| **Adaptive Permission Gate** | **951.7 µs** per bash evaluation | Deterministic scorer | [`scripts/benchmark.py`](scripts/benchmark.py) |
-| **3-Model Local Offload Loop** | **7,700 tok in 44.39s** (`14.51` out tok/s, `$0` cloud) | `1.5b -> 9b -> 8b` | [`scripts/benchmark_local_offload.py`](scripts/benchmark_local_offload.py) |
+| **Lossless Payload Compression** | `745` pretty / `430` compact JSON tok | `163` tok (`toon`) | **`-78.12%` vs pretty · `-62.09%` vs compact JSON** |
+| **Privacy Sanitizer Precision** | Naive Title-Case false positives | `100.0%` technical prose preserved | **`100%` PII masked · `policy=fail_closed`** |
+| **Tier 1A Hybrid (`16 GB + 4 GB VRAM`)** | Static defaults / OOM risk | `qwen2.5:3b` (VRAM) + `qwen3.5:9b-q3_k_xl` | **Swap-free hybrid fit** |
+| **Tier 1B Unified (`16 GB` + `27B 4-bit XXS`)** | `4096` silent Ollama clipping | `qwen3.8:27b-q4_xxs` (`8.1 GB`) @ `32,768` ctx | **Variable quant deep reasoner** |
+| **Lean MCP Tool Surface** | Heavy server + 12+ tools | `5` tools + native Resources & Prompts | **`~1.1–1.9 ms` ingest+read handshake** |
 
 ---
 
-## How to Install
+## Quickstart & Installation
 
-### 1. Local Environment (`.venv`)
+### 1. Clone & Create Zero-Dependency `.venv`
 ```bash
 git clone https://github.com/ccancellieri/cortical.git
 cd cortical
@@ -57,55 +63,54 @@ python3 -m venv .venv
 .venv/bin/pip install --no-deps -e .
 ```
 
-### 2. Connect to Your Coding Agent (MCP `stdio`)
+### 2. Preflight Hardware, Select / Add Models & Sync Harnesses
+```bash
+# Inspect OS, GPU/VRAM, RAM headroom, composed OSS tools & model recommendations
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
+
+# Inspect role-based recommendations or register custom variable-quant models
+PYTHONPATH=src .venv/bin/python -m cortical.cli models recommend
+PYTHONPATH=src .venv/bin/python -m cortical.cli models add qwen3.8:27b-q4_xxs --mem 8.1 --ctx 32768 --quant "Unsloth 4-bit XXS" --variable
+
+# Preview and apply cross-platform config sync across 8 harnesses
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync
+```
+
+### 3. Connect Your MCP Client (`stdio` JSON-RPC 2.0)
 ```json
 {
   "mcpServers": {
-    "cortical-wiki": {
+    "cortical": {
       "command": "python3",
-      "args": ["-m", "cortical.wiki.mcp_server"],
+      "args": ["-m", "cortical.mcp_server"],
       "env": {
         "PYTHONPATH": "/path/to/cortical/src",
-        "CORTICAL_WIKI_DB": "/path/to/cortical/.cortical_data/wiki.db"
+        "CORTICAL_VAULT_DB": "/path/to/cortical/.cortical_data/vault.db"
       }
     }
   }
 }
 ```
-See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for Claude Code, Codex CLI, Cursor, Windsurf, Cline, `pi`, OpenCode, Zed, Continue.dev, and Antigravity examples.
+See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for all 8 harnesses (`antigravity`, `pi`, `opencode`, `openclaw`, `codex`, `claude-code`, `dsh`, `unsloth-studio`).
 
 ---
 
-## How to Use, Reproduce & Test
+## Daily CLI Commands & Verification
 
 ```bash
-# 1. Run full offline test suite (39 unit tests, zero external deps)
+# Privacy Vault ingestion (dynamic auto | fail_closed | fail_open)
+PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.docx --alias client_brief --policy auto --profile medium
+
+# Lossless TOON / XML / YAML / log compression
+PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json
+
+# Run local Auto-Tuner, ROI report, and static browser dashboard
+PYTHONPATH=src .venv/bin/python -m cortical.cli tune --apply
+PYTHONPATH=src .venv/bin/python -m cortical.cli roi
+PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
+
+# Run offline benchmark & full unit test suite
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q
-
-# 2. Reproduce core Merkle, token reduction & Permission Gate benchmarks
-PYTHONPATH=src .venv/bin/python scripts/benchmark.py
-
-# 3. Reproduce 3-model local offload loop benchmark (requires local Ollama)
-PYTHONPATH=src .venv/bin/python scripts/benchmark_local_offload.py --tmp
-
-# 4. Crawl a repo & execute a local multi-model reasoning loop
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db crawl .
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db local-loop \
-  "Summarize @wiki:/src/cortical/context_window.py /tier:l1" --loops 3
-
-# 5. Sanitize a sensitive document offline
-PYTHONPATH=src .venv/bin/python -m cortical.cli sanitize ./document.docx --profile medium
-
-# 6. Export private static dashboards locally (kept on disk, ignored by git)
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db wiki-dashboard --output html/wiki.html
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db token-report --html html/token_report.html
-PYTHONPATH=src .venv/bin/python -m cortical.cli settings-dashboard --output html/settings.html
 ```
-
----
-
-## Documentation
-
-- **Brand Page, Interactive Demo & Configurator:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/)
-- **Agent & IDE Integrations:** [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)
-- **Vibe-Coding Examples:** [`docs/USE_CASES_VIBE_CODING.md`](docs/USE_CASES_VIBE_CODING.md)

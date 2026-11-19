@@ -1,60 +1,40 @@
 ---
 name: cortical-token-saver
-description: Local-first multi-model offload, privacy sanitization, and universal @wiki:/@concept:/@skill: MCP context addressing across all coding harnesses (ChatGPT, Claude Code, Codex, OpenCode, Cursor, pi, Antigravity).
+description: Local-first multi-model offload, variable-quantization model routing, dynamic Privacy Vault sanitization, and lossless TOON context compression across 8 coding harnesses.
 ---
 
-# Cortical Token-Saver, Multi-Model Local Loops & Universal `@` / `/` MCP Addressing
+# Cortical Control Plane & Token-Saver
 
-Use this skill to maximize **local LLM execution** (`0` cloud tokens, full GDPR/privacy isolation) and minimize remote cloud spend across **any harness or agent**. Remote cloud LLMs are reserved strictly for genuine architectural blockers after Cortical's local multi-model loop has distilled skills, Wiki nodes, and anonymized briefs.
+Use this skill to maximize **local LLM execution** (`0` cloud tokens, full GDPR/privacy isolation), compress structured data deterministically (`TOON`), and choose the right local model for the machine's RAM/VRAM budget.
 
-## 1. Local-First Multi-Model Loop (Default Before Any Remote Escalation)
-
-Run Cortical's iterative multi-model chain (`qwen2.5:1.5b` fast router/grounding → `qwen3.5:9b-q3_k_xl` analyst/synthesizer) locally first, automatically logging token telemetry to `agent_runs`:
-
-* **Via MCP Tool (`cortical_local_loop`)** or **MCP Slash Prompt (`/mcp:cortical-wiki:cortical-local`):**
-  ```json
-  {
-    "prompt": "Explain @concept:merkle-context-compression with @skill:learned-cortical-architecture /privacy:medium",
-    "max_loops": 2
-  }
-  ```
-* **Via Zero-Server CLI (`local-loop`):**
-  ```bash
-  PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db local-loop \
-    "Analyze @wiki:/src/cortical/privacy_sanitizer.py @concept:local-privacy-gdpr-sanitizer /privacy:low" \
-    --models qwen2.5:1.5b,qwen3.5:9b-q3_k_xl --loops 2
-  ```
-
-**Decision Rule:**
-1. If `completed_locally == true` (default for privacy-sensitive, single-repo, synthesis, test, or doc tasks), **return `local_answer` directly** (`$0.00` remote cost).
-2. Forward `sanitized_remote_prompt` to the remote LLM **only** when `needs_remote_escalation == true` (never send raw files containing PII/secrets).
-
----
-
-## 2. Universal Wiki & Knowledge Addressing (`@` and `/`) Across All Harnesses
-
-Cortical exposes Wiki knowledge uniformly in two portable ways so every agent/harness resolves the same targets:
-
-1. **Inline Universal Syntax (works in any prompt, CLI, HTTP, `wiki_enhance_prompt`, `wiki_resolve_references`, `cortical_local_loop`):**
-   - `@wiki:<path>` or `@node:<path>` (e.g. `@wiki:/src/cortical/cli.py`) → loads L2 structured summary (override with `/tier:l1`, `/tier:l2`, `/tier:l3`, `/tier:max`)
-   - `@concept:<slug>` (e.g. `@concept:merkle-context-compression`, `@concept:local-privacy-gdpr-sanitizer`, `@concept:zero-token-roi-analytics`) → loads canonical concept + matching L1 nodes + distilled insights
-   - `@skill:<skill_id>` (e.g. `@skill:learned-cortical-architecture`) → loads procedural capability playbook
-   - `@insight:<id_or_keyword>` → loads distilled memory rule
-   - `@task:<episode_id>` → loads task 3+1 synthesis
-   - `@root:workspace` / `@root:private_notes` → lists reconciled context files
-   - **Slash Directives:** `/local` (block remote escalation), `/privacy:max_security` | `/privacy:low` | `/privacy:medium`, `/tier:l1` | `/tier:l2` | `/tier:l3` | `/tier:max`
-2. **Standard MCP Native Protocol (`cortical-wiki-mcp` over stdio JSON-RPC 2.0):**
-   - **MCP Resources (`@` picker in Claude Code, Cursor, Zed, Windsurf, OpenCode):** `resources/list` + `resources/read` exposing `cortical://node/{path}`, `cortical://concept/{slug}`, `cortical://skill/{skill_id}`, `cortical://insight/{insight_id}`, `cortical://root/workspace`, `cortical://root/private_notes`.
-   - **MCP Prompts (`/` slash commands in compliant harnesses):** `cortical-local`, `cortical-wiki`, `cortical-sanitize`.
-
----
-
-## 3. Compact Per-Response Token Report (Turn-Only Default)
-
-Never burn remote cloud tokens to count usage. Execute locally:
+## 1. Preflight Hardware, Composed Tools & Models
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m cortical.cli --db .cortical_data/wiki.db token-report
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
+PYTHONPATH=src .venv/bin/python -m cortical.cli models recommend
 ```
 
-- By default `token-report` prints **only the current response / active turn** (`turn_only=True`), keeping chat clutter minimal while linking directly to `html/token_report.html` and `html/wiki.html` (use `--full` only when lifetime history is explicitly requested in CLI).
+- **Tier 1A Hybrid Laptop (16 GB RAM + 4–6 GB VRAM):** `qwen2.5:1.5b` (fast sanitizer/router in VRAM) + `qwen3:8b` (`7B–8B` Q4 hybrid CPU+GPU).
+- **Tier 1B Unified (16–24 GB Unified RAM):** `qwen3.5:9b-q3_k_xl` (`~4.9 GB` daily coder) + **Unsloth variable-quantized `27B` (`qwen3.8:27b-q4_xxs` `8.1 GB` or `qwen3.8:27b-iq2_xxs` `7.2 GB`)** for deep reasoning & multi-agent orchestration.
+- **Add Custom Model:** `cortical models add <model_id> --mem <gb> --ctx <num_ctx> --quant <q> --variable`.
+
+## 2. Dynamic Privacy Vault (`auto` | `fail_closed` | `fail_open`)
+
+Never attach raw files containing PII/secrets to remote cloud prompts:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./notes.docx --alias client_brief --policy auto --profile medium
+```
+
+- **Channel 1 (MCP Resource):** read `@private:client_brief` or `cortical://private/client_brief` via `cortical.mcp_server` (`cortical_vault_read`).
+- **Channel 2 (Auto-Sized Memory Sync):** `cortical sync` injects sanitized context capped at `<= 15% num_ctx` into all enabled harness rule files.
+- **Channel 3 (Verified Pre-Send Interception):** automatically intercepts prompt attachments in `pi`, `claude-code`, `opencode`, `openclaw`, `codex`, `dsh`.
+
+## 3. Lossless Compression & Comparative Telemetry
+
+```bash
+PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
+PYTHONPATH=src .venv/bin/python -m cortical.cli tune --apply
+PYTHONPATH=src .venv/bin/python -m cortical.cli roi
+```

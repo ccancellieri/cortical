@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortical-agent"
-version = "0.2.0"
-description = "Cortical: Zero-Dependency 4-Tier Merkle/Macro-Graph Second Brain MCP, Pluggable 200k Dynamic Context Auto-Scaler, Zero-Token ROI Analytics, and Adaptive Permission Gate for pi, OpenCode & Unsloth."
+version = "0.3.0"
+description = "Cortical: Cross-Platform Zero-Server Agent Control Plane & Declarative Composer with Dynamic Privacy Vault, Lossless TOON Compression, Hardware/Variable-Quant Model Manager & Local Auto-Tuner."
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
@@ -21,7 +21,7 @@ Issues = "https://github.com/ccancellieri/cortical/issues"
 
 [project.scripts]
 cortical = "cortical.cli:main"
-cortical-wiki-mcp = "cortical.wiki.mcp_server:main"
+cortical-mcp = "cortical.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

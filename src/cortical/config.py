@@ -1,18 +1,11 @@
-"""Zero-dependency configuration & pluggable LLM RunnerRegistry for Cortical.
-
-Supports `cortical.config.json` for configuring:
-  - Pluggable LLM runners (`ollama`, `llama_cpp`, `mlx_lm`, `openai_compatible`)
-  - Context window cap (`max_context_window`, default 200,000)
-  - Token report & retention (`auto_report`, `default_range_days`, `retention_days`)
-  - Skill compilation tuning (`auto_compile`, `consolidation_overlap`, etc.)
-  - Extensible privacy profiles (`max_security`, `low`, `medium`, `max_context`, custom)
-"""
+"""Zero-dependency declarative configuration, pluggable LLM runners & local telemetry store."""
 
 from __future__ import annotations
 
 import copy
 import json
 import os
+import sqlite3
 import time
 import urllib.request
 from pathlib import Path
@@ -20,68 +13,35 @@ from typing import Any, Callable, Optional
 
 DEFAULT_CONFIG_PATH = Path("cortical.config.json")
 DEFAULT_CONFIG_DIR = Path("cortical.config.d")
+DEFAULT_TELEMETRY_DB = Path(".cortical_data/telemetry.db")
+DEFAULT_VAULT_DB = Path(".cortical_data/vault.db")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "active_runner": "ollama",
     "active_model": "",
     "max_context_window": 200000,
-    "components": {
-        "wiki_mcp": {
-            "enabled": True,
-            "module": "cortical.wiki.mcp_server",
-            "title_it": "Second Brain Wiki 4-Tier (MCP)",
-            "title_en": "4-Tier Second Brain Wiki (MCP)",
-            "desc_it": "Indicizza cartelle/file allegati in un albero Merkle a 4 livelli (Light ~50 tok, Medium ~250, High ~1000, Max) con ricerca FTS5 e RBAC SQLite.",
-            "desc_en": "Indexes attached folders/files into a 4-tier Merkle tree (Light ~50 tok, Medium ~250, High ~1000, Max) with FTS5 search and SQLite RBAC.",
-        },
-        "token_analytics": {
-            "enabled": True,
-            "module": "cortical.token_analytics",
-            "title_it": "Analitica Token & ROI",
-            "title_en": "Token Analytics & ROI",
-            "desc_it": "Misura consumo locale/remoto dalle trascrizioni a 0 token cloud con cache su disco e calcolo costi su preset LiteLLM.",
-            "desc_en": "Measures local/remote usage from local transcripts at 0 cloud tokens with disk caching and LiteLLM-aligned cost estimation.",
-        },
-        "privacy_sanitizer": {
-            "enabled": True,
-            "module": "cortical.privacy_sanitizer",
-            "title_it": "Privacy Sanitizer & GDPR",
-            "title_en": "Privacy Sanitizer & GDPR",
-            "desc_it": "Rimuove metadati OOXML/PDF, pseudonimizza ID e termini personalizzati, e filtra quasi-identificatori tramite LLM locale offline.",
-            "desc_en": "Strips OOXML/PDF metadata, pseudonymizes IDs & custom terms, and rewrites GDPR quasi-identifiers via offline local LLM.",
-        },
-        "skills_hub": {
-            "enabled": True,
-            "module": "cortical.skills_hub",
-            "title_it": "Cortical Skill Engine",
-            "title_en": "Cortical Skill Engine",
-            "desc_it": "Motore interno di routing ed evoluzione delle skill procedurali (SKILL.md), consolidamento e collegamento ai task nel Macro-Graph.",
-            "desc_en": "Internal procedural skill router & evolution engine (SKILL.md), consolidating overlapping lessons and linking tasks in the Macro-Graph.",
-        },
-        "permission_gate": {
-            "enabled": True,
-            "module": "cortical.permissions.gate",
-            "title_it": "Adaptive Permission Gate",
-            "title_en": "Adaptive Permission Gate",
-            "desc_it": "Valutazione deterministica sub-millisecondo dei comandi bash/tool con guardrail hard e apprendimento progressivo del rischio.",
-            "desc_en": "Sub-millisecond deterministic bash/tool risk evaluation with hard guardrails and progressive pattern learning.",
-        },
-        "context_window": {
-            "enabled": True,
-            "module": "cortical.context_window",
-            "title_it": "Auto-Scaler Contesto 200k",
-            "title_en": "200k Dynamic Context Auto-Scaler",
-            "desc_it": "Scopre automaticamente modello attivo e contesto nativo (/api/ps, /api/show) scalando num_ctx sulla RAM libera fino al cap configurato.",
-            "desc_en": "Auto-discovers active model & native context (/api/ps, /api/show) and scales num_ctx to live RAM headroom up to the configured cap.",
-        },
+    "custom_models": [],
+    "models_by_role": {
+        "router": "qwen2.5:1.5b",
+        "ner": "qwen2.5:1.5b",
+        "daily_coder": "qwen3.5:9b-q3_k_xl",
+        "deep_reasoner": "qwen3.8:27b-q4_xxs",
+        "orchestrator": "qwen3.8:27b-q4_xxs",
     },
     "runners": {
         "ollama": {
             "type": "ollama",
             "base_url": "http://127.0.0.1:11434",
             "default_model": "qwen3.5:9b-q3_k_xl",
-            "heavy_model": "qwen3.8:27b-iq2_xxs",
+            "heavy_model": "qwen3.8:27b-q4_xxs",
             "enabled": True,
+        },
+        "unsloth": {
+            "type": "openai_compatible",
+            "base_url": "http://127.0.0.1:8888/v1",
+            "default_model": "qwen3.5:9b-q3_k_xl",
+            "heavy_model": "qwen3.8:27b-q4_xxs",
+            "enabled": False,
         },
         "llama_cpp": {
             "type": "openai_compatible",
@@ -99,87 +59,50 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "openai_compatible": {
             "type": "openai_compatible",
-            "base_url": "http://127.0.0.1:8888/v1",
+            "base_url": "http://127.0.0.1:4000/v1",
             "default_model": "local-model",
             "heavy_model": "local-model",
             "enabled": False,
         },
     },
+    "router": {
+        "enabled": False,
+        "provider": "litellm",
+        "base_url": "http://127.0.0.1:4000/v1",
+    },
+    "composers": {
+        "serena": True,
+        "rtk": True,
+        "pinchtab": True,
+        "playwright_mcp": True,
+        "context_mode": True,
+    },
+    "harnesses": {
+        "antigravity": True,
+        "pi": True,
+        "opencode": True,
+        "openclaw": True,
+        "codex": True,
+        "claude-code": True,
+        "dsh": True,
+        "unsloth-studio": True,
+    },
+    "privacy": {
+        "default_policy": "auto",
+        "default_profile": "medium",
+        "ner_model": "qwen2.5:1.5b",
+        "use_local_ner": False,
+        "custom_terms": [],
+    },
+    "compression": {
+        "enable_toon": True,
+        "min_toon_saving_pct": 10.0,
+        "max_context_share": 0.15,
+    },
     "report": {
         "auto_report": True,
         "language": "auto",
-        "default_range_days": 30,
-        "retention_days": 90,
         "cloud_preset": "cloud_standard",
-    },
-    "privacy_sanitizer": {
-        "sanitizer_model": "qwen2.5:1.5b",
-        "custom_terms": [],
-        "enable_person_name_heuristic": True,
-    },
-    "skills": {
-        "auto_compile": True,
-        "min_terms": 4,
-        "consolidation_overlap": 3,
-        "consolidation_jaccard": 0.30,
-        "require_verified_artifact": True,
-    },
-    "local_loop": {
-        "enabled": True,
-        "router_model": "qwen2.5:1.5b",
-        "analyst_model": "qwen3.5:9b-q3_k_xl",
-        "reviewer_model": "qwen3:8b",
-        "reasoner_model": "qwen3:8b",
-        "heavy_model": "qwen3.8:27b-iq2_xxs",
-        "max_iterations": 3,
-        "default_privacy_profile": "medium",
-        "escalate_to_remote_only_when_needed": True,
-    },
-    "privacy_profiles": {
-        "max_security": {
-            "description": "Local-only reasoning: never sends raw files or excerpts to remote LLMs.",
-            "local_only": True,
-            "allow_local_conclusions": True,
-            "summary_only": True,
-            "strip_metadata": True,
-            "use_local_llm": True,
-            "redact": True,
-            "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"],
-            "preserve_categories": [],
-        },
-        "low": {
-            "description": "Ultra-sanitized summary: sends only an anonymized high-level summary.",
-            "local_only": False,
-            "allow_local_conclusions": True,
-            "summary_only": True,
-            "strip_metadata": True,
-            "use_local_llm": True,
-            "redact": True,
-            "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"],
-            "preserve_categories": [],
-        },
-        "medium": {
-            "description": "Selective domain-aware pseudonymization: hides personal IDs, keeps financial/domain metrics.",
-            "local_only": False,
-            "allow_local_conclusions": True,
-            "summary_only": False,
-            "strip_metadata": True,
-            "use_local_llm": False,
-            "redact": False,
-            "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"],
-            "preserve_categories": ["AMOUNTS", "METRICS"],
-        },
-        "max_context": {
-            "description": "Full raw file passthrough (only use for non-sensitive public/code files).",
-            "local_only": False,
-            "allow_local_conclusions": False,
-            "summary_only": False,
-            "strip_metadata": False,
-            "use_local_llm": False,
-            "redact": False,
-            "strip_categories": [],
-            "preserve_categories": ["ALL"],
-        },
     },
 }
 
@@ -198,7 +121,7 @@ def load_cortical_config(
     config_path: Optional[Path] = None,
     config_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Loads `DEFAULT_CONFIG` + `cortical.config.d/*.json` drop-ins + `cortical.config.json`."""
+    """Loads `DEFAULT_CONFIG` + `cortical.config.d/*.json` + `cortical.config.json`."""
     merged = copy.deepcopy(DEFAULT_CONFIG)
     d_path = Path(config_dir or os.environ.get("CORTICAL_CONFIG_DIR") or DEFAULT_CONFIG_DIR)
     if d_path.is_dir():
@@ -221,38 +144,38 @@ def load_cortical_config(
     return merged
 
 
-def is_component_enabled(name: str, config: Optional[dict[str, Any]] = None) -> bool:
-    """Returns True if an optional Cortical component/MCP is enabled in config."""
-    cfg = config or load_cortical_config()
-    comp = (cfg.get("components") or {}).get(name)
-    if comp is None:
-        return True
-    return bool(comp.get("enabled", True))
-
-
-def resolve_component(name: str, config: Optional[dict[str, Any]] = None) -> Any:
-    """Safely imports an optional Cortical component if enabled and installed, else None."""
-    cfg = config or load_cortical_config()
-    if not is_component_enabled(name, cfg):
-        return None
-    comp = (cfg.get("components") or {}).get(name) or {}
-    mod_name = str(comp.get("module") or "").strip()
-    if not mod_name:
-        return None
-    try:
-        import importlib
-
-        return importlib.import_module(mod_name)
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def save_cortical_config(cfg: dict[str, Any], config_path: Optional[Path] = None) -> Path:
-    """Persists user configuration overrides cleanly to disk (preserving `cortical.config.d` modularity)."""
+    """Persists user configuration cleanly to disk."""
     p = Path(config_path or os.environ.get("CORTICAL_CONFIG_PATH") or DEFAULT_CONFIG_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return p
+
+
+def ensure_telemetry_schema(db_path: Path | str) -> sqlite3.Connection:
+    """Opens telemetry SQLite WAL DB and ensures `agent_runs` table exists."""
+    p = Path(db_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS agent_runs (
+               run_id TEXT PRIMARY KEY,
+               episode_id TEXT NOT NULL,
+               role TEXT NOT NULL,
+               model TEXT NOT NULL,
+               provider TEXT NOT NULL,
+               status TEXT NOT NULL,
+               goal TEXT NOT NULL,
+               input_tokens INTEGER NOT NULL DEFAULT 0,
+               output_tokens INTEGER NOT NULL DEFAULT 0,
+               total_tokens INTEGER NOT NULL DEFAULT 0,
+               elapsed_sec REAL NOT NULL DEFAULT 0.0,
+               finished_at REAL NOT NULL
+           )"""
+    )
+    return conn
 
 
 RunnerFn = Callable[[str, str, dict[str, Any]], str]
@@ -260,7 +183,7 @@ _CUSTOM_RUNNERS: dict[str, RunnerFn] = {}
 
 
 def register_runner_adapter(name: str, fn: RunnerFn) -> None:
-    """Registers a custom local LLM runner adapter `(system_prompt, user_prompt, runner_cfg) -> text`."""
+    """Registers a custom local LLM runner `(system_prompt, user_prompt, runner_cfg) -> text`."""
     _CUSTOM_RUNNERS[str(name).strip().lower()] = fn
 
 
@@ -276,36 +199,36 @@ def _record_runner_telemetry(
     episode_id: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> None:
-    """Persists local runner token usage into `agent_runs` whenever an existing Wiki DB is available."""
+    """Records local runner token usage into telemetry DB (ignoring `mock_*` when `db_path` is None)."""
     if os.environ.get("CORTICAL_DISABLE_RUNNER_TELEMETRY") == "1":
         return
     r_low = str(runner_name or "").strip().lower()
     m_low = str(model or "").strip().lower()
     if db_path is None and (r_low.startswith("mock") or m_low.startswith("mock")):
         return
-    target = Path(db_path) if db_path is not None else Path(os.environ.get("CORTICAL_WIKI_DB") or ".cortical_data/wiki.db")
-    if not target.is_file():
-        return
+    target = Path(db_path) if db_path is not None else Path(os.environ.get("CORTICAL_TELEMETRY_DB") or DEFAULT_TELEMETRY_DB)
     try:
-        from .wiki.db import AccessContext, CorticalWikiDB
-
-        db = CorticalWikiDB(target)
-        now = time.time()
-        db.upsert_agent_run(
-            AccessContext(),
-            run_id=f"loc-{int(now * 1000)}-{os.getpid()}",
-            episode_id=episode_id or f"local-{time.strftime('%Y%m%d')}",
-            role=role,
-            model=model,
-            provider=runner_name,
-            status="completed",
-            goal=prompt[:160],
-            input_tokens=max(1, int(in_tok)),
-            output_tokens=max(1, int(out_tok)),
-            total_tokens=max(1, int(in_tok) + int(out_tok)),
-            elapsed_sec=max(0.0, float(elapsed_sec)),
-            finished_at=now,
-        )
+        with ensure_telemetry_schema(target) as conn:
+            now = time.time()
+            conn.execute(
+                """INSERT OR REPLACE INTO agent_runs(
+                       run_id, episode_id, role, model, provider, status, goal,
+                       input_tokens, output_tokens, total_tokens, elapsed_sec, finished_at
+                   ) VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)""",
+                (
+                    f"loc-{int(now * 1000)}-{os.getpid()}",
+                    episode_id or f"local-{time.strftime('%Y%m%d')}",
+                    role,
+                    model,
+                    runner_name,
+                    prompt[:160],
+                    max(1, int(in_tok)),
+                    max(1, int(out_tok)),
+                    max(1, int(in_tok) + int(out_tok)),
+                    max(0.0, float(elapsed_sec)),
+                    now,
+                ),
+            )
     except Exception:  # noqa: BLE001
         pass
 
@@ -317,7 +240,7 @@ def invoke_configured_runner(
     config: Optional[dict[str, Any]] = None,
     runner_name: Optional[str] = None,
     model_override: Optional[str] = None,
-    max_tokens: int = 450,
+    max_tokens: int = 800,
     timeout: float = 45.0,
     num_ctx: Optional[int] = None,
     temperature: float = 0.15,
@@ -326,7 +249,7 @@ def invoke_configured_runner(
     record_telemetry: bool = True,
     db_path: Optional[Path] = None,
 ) -> str:
-    """Invokes the active pluggable runner (`ollama`, `llama_cpp`, `mlx_lm`, `openai_compatible`, or custom)."""
+    """Invokes the configured local runner (`ollama`, `unsloth`, `llama_cpp`, `mlx_lm`, `openai_compatible`, custom)."""
     cfg = config or load_cortical_config()
     r_name = str(runner_name or cfg.get("active_runner") or "ollama").strip()
     r_cfg = dict((cfg.get("runners") or {}).get(r_name) or {})
@@ -338,15 +261,13 @@ def invoke_configured_runner(
         reply = _CUSTOM_RUNNERS[r_name.lower()](system_prompt, user_prompt, {**r_cfg, "model": model})
         elapsed_sec = round(time.perf_counter() - t0, 2)
         if record_telemetry:
-            in_tok = max(1, (len(system_prompt) + len(user_prompt)) // 4)
-            out_tok = max(1, len(reply) // 4)
             _record_runner_telemetry(
                 model=model,
                 runner_name=r_name,
                 role=role,
                 prompt=user_prompt,
-                in_tok=in_tok,
-                out_tok=out_tok,
+                in_tok=max(1, (len(system_prompt) + len(user_prompt)) // 4),
+                out_tok=max(1, len(reply) // 4),
                 elapsed_sec=elapsed_sec,
                 episode_id=episode_id,
                 db_path=db_path,
@@ -362,11 +283,10 @@ def invoke_configured_runner(
         else:
             eff_num_ctx = 8192
             try:
-                from .context_window import compute_dynamic_num_ctx, get_model_context_window
+                from .hardware.context_window import compute_dynamic_num_ctx, get_model_context_window
 
-                nat_ctx = get_model_context_window(model, auto_discover=False)
-                dyn = compute_dynamic_num_ctx(base_ctx=nat_ctx, model_id=model)
-                eff_num_ctx = max(4096, min(16384, int(dyn)))
+                nat = get_model_context_window(model, auto_discover=False)
+                eff_num_ctx = max(4096, min(32768, compute_dynamic_num_ctx(base_ctx=nat, model_id=model)))
             except Exception:  # noqa: BLE001
                 eff_num_ctx = 8192
         payload = {
@@ -378,11 +298,7 @@ def invoke_configured_runner(
                 *([{"role": "system", "content": system_prompt}] if system_prompt else []),
                 {"role": "user", "content": user_prompt},
             ],
-            "options": {
-                "temperature": float(temperature),
-                "num_predict": max_tokens,
-                "num_ctx": eff_num_ctx,
-            },
+            "options": {"temperature": float(temperature), "num_predict": max_tokens, "num_ctx": eff_num_ctx},
         }
         req = urllib.request.Request(
             f"{base}/api/chat",
@@ -395,24 +311,21 @@ def invoke_configured_runner(
         reply = str((data.get("message") or {}).get("content") or "").strip()
         elapsed_sec = round(time.perf_counter() - t0, 2)
         if record_telemetry:
-            in_tok = int(data.get("prompt_eval_count") or max(1, (len(system_prompt) + len(user_prompt)) // 4))
-            out_tok = int(data.get("eval_count") or max(1, len(reply) // 4))
             _record_runner_telemetry(
                 model=model,
                 runner_name=r_name,
                 role=role,
                 prompt=user_prompt,
-                in_tok=in_tok,
-                out_tok=out_tok,
+                in_tok=int(data.get("prompt_eval_count") or max(1, (len(system_prompt) + len(user_prompt)) // 4)),
+                out_tok=int(data.get("eval_count") or max(1, len(reply) // 4)),
                 elapsed_sec=elapsed_sec,
                 episode_id=episode_id,
                 db_path=db_path,
             )
         return reply
 
-    # Standard OpenAI-compatible runner (llama.cpp server, mlx-lm server, vLLM, Unsloth Studio)
     if not base.endswith("/v1"):
-        base = base + "/v1"
+        base += "/v1"
     payload = {
         "model": model,
         "messages": [
@@ -420,7 +333,7 @@ def invoke_configured_runner(
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
-        "temperature": 0.15,
+        "temperature": float(temperature),
     }
     req = urllib.request.Request(
         f"{base}/chat/completions",
@@ -435,15 +348,13 @@ def invoke_configured_runner(
     elapsed_sec = round(time.perf_counter() - t0, 2)
     if record_telemetry and reply:
         usage = data.get("usage") or {}
-        in_tok = int(usage.get("prompt_tokens") or max(1, (len(system_prompt) + len(user_prompt)) // 4))
-        out_tok = int(usage.get("completion_tokens") or max(1, len(reply) // 4))
         _record_runner_telemetry(
             model=model,
             runner_name=r_name,
             role=role,
             prompt=user_prompt,
-            in_tok=in_tok,
-            out_tok=out_tok,
+            in_tok=int(usage.get("prompt_tokens") or max(1, (len(system_prompt) + len(user_prompt)) // 4)),
+            out_tok=int(usage.get("completion_tokens") or max(1, len(reply) // 4)),
             elapsed_sec=elapsed_sec,
             episode_id=episode_id,
             db_path=db_path,

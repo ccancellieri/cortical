@@ -1,517 +1,328 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cortical Settings · Per-Module Configurator</title>
+  <title>Cortical Settings · Models, 8 Harnesses &amp; Privacy Vault</title>
   <style>
-    :root { --bg:#0b1120; --card:#131c2e; --card2:#0c1424; --border:#24324a; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --emerald:#34d399; --amber:#fbbf24; --danger:#f87171; }
+    :root { --bg:#080d1a; --card:#131c2e; --card2:#0c1424; --border:#24324a; --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --emerald:#34d399; --amber:#fbbf24; --danger:#f87171; }
     * { box-sizing:border-box; }
     body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); line-height:1.5; }
-    .wrap { width:100%; max-width:1320px; margin:0 auto; padding:22px 20px 64px; }
-    .top { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:16px; }
+    .wrap { max-width:1280px; margin:0 auto; padding:22px 20px 64px; }
+    .top { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
     h1 { margin:0; font-size:1.5rem; }
-    .desc { font-size:0.83rem; color:var(--muted); margin:0 0 12px; }
-    .layout { display:grid; grid-template-columns:280px 1fr; gap:16px; align-items:start; }
+    .layout { display:grid; grid-template-columns:250px 1fr; gap:16px; align-items:start; }
     @media (max-width:860px) { .layout { grid-template-columns:1fr; } }
     .sidebar { position:sticky; top:16px; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px; display:flex; flex-direction:column; gap:6px; }
-    .mod-btn { width:100%; text-align:left; background:var(--card2); border:1px solid var(--border); color:var(--text); border-radius:9px; padding:10px 12px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:0.84rem; font-weight:600; }
-    .mod-btn:hover { border-color:var(--accent); }
-    .mod-btn.active { background:rgba(56,189,248,0.14); border-color:var(--accent); color:var(--accent); }
-    .badge-on { font-size:0.68rem; padding:2px 7px; border-radius:999px; background:rgba(52,211,153,0.15); color:var(--emerald); border:1px solid rgba(52,211,153,0.4); }
-    .badge-off { font-size:0.68rem; padding:2px 7px; border-radius:999px; background:rgba(248,113,113,0.12); color:var(--danger); border:1px solid rgba(248,113,113,0.35); }
+    .tab { text-align:left; background:var(--card2); border:1px solid var(--border); color:var(--text); border-radius:9px; padding:10px 12px; cursor:pointer; font-size:0.86rem; font-weight:600; }
+    .tab.active { background:rgba(56,189,248,0.14); border-color:var(--accent); color:var(--accent); }
     .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:16px; }
-    .card h2 { margin:0 0 6px; font-size:1.08rem; color:var(--accent); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-    .doc-box { background:var(--card2); border-left:3px solid var(--accent); border-radius:8px; padding:11px 14px; margin-bottom:14px; font-size:0.84rem; color:#cbd5e1; }
-    .doc-box code { color:var(--emerald); background:#060a14; padding:1px 5px; border-radius:4px; font-size:0.78rem; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
-    label { display:flex; flex-direction:column; gap:5px; font-size:0.82rem; color:var(--muted); }
-    .lbl-head { display:flex; align-items:center; gap:6px; color:var(--text); font-weight:600; }
-    input, select, textarea { background:#090e1a; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.85rem; width:100%; font-family:inherit; }
-    textarea { min-height:70px; resize:vertical; }
-    .row-chk { flex-direction:row; align-items:center; gap:8px; color:var(--text); cursor:pointer; font-weight:500; }
-    .row-chk input { width:auto; }
-    .btn { padding:8px 14px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer; font-weight:600; font-size:0.84rem; text-decoration:none; display:inline-flex; align-items:center; gap:5px; }
+    .card h2 { margin:0 0 8px; font-size:1.08rem; color:var(--accent); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+    label { display:flex; flex-direction:column; gap:4px; font-size:0.82rem; color:var(--muted); }
+    .chk { flex-direction:row; align-items:center; gap:8px; color:var(--text); cursor:pointer; font-weight:500; }
+    .chk input { width:auto; }
+    input, select, textarea { background:#060a14; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:0.85rem; width:100%; font-family:inherit; }
+    textarea { min-height:80px; resize:vertical; }
+    .btn { padding:8px 13px; border-radius:8px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer; font-weight:600; font-size:0.84rem; display:inline-flex; align-items:center; gap:5px; text-decoration:none; }
     .btn-primary { background:var(--accent); color:#082f49; border-color:var(--accent); }
-    .btn-emerald { background:var(--emerald); color:#052e16; border-color:var(--emerald); }
-    .prof-card { border:1px solid var(--border); border-radius:10px; padding:12px; margin-bottom:10px; background:var(--card2); }
-    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
-    .chip { display:inline-flex; align-items:center; gap:5px; padding:4px 9px; border-radius:999px; border:1px solid var(--border); background:#090e1a; font-size:0.76rem; cursor:pointer; color:var(--text); }
-    .chip input { width:auto; margin:0; }
+    .btn-em { background:var(--emerald); color:#052e16; border-color:var(--emerald); }
+    .btn-danger { background:rgba(248,113,113,0.15); color:var(--danger); border-color:rgba(248,113,113,0.4); }
+    table { width:100%; border-collapse:collapse; font-size:0.84rem; margin-top:8px; }
+    th, td { text-align:left; padding:8px; border-bottom:1px solid var(--border); vertical-align:top; }
+    th { color:var(--muted); }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:0.74rem; font-weight:700; border:1px solid var(--border); }
+    .pill-ok { color:var(--emerald); border-color:rgba(52,211,153,0.4); background:rgba(52,211,153,0.1); }
+    .pill-warn { color:var(--amber); border-color:rgba(251,191,36,0.4); background:rgba(251,191,36,0.1); }
+    pre { background:#060a14; border:1px solid var(--border); border-radius:8px; padding:10px; font-size:0.8rem; overflow-x:auto; color:#cbd5e1; }
     .status { font-size:0.84rem; color:var(--emerald); margin-bottom:10px; min-height:1.2em; }
-    .info-tip { position:relative; display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; border:1px solid var(--accent); color:var(--accent); font-size:0.72rem; cursor:pointer; user-select:none; flex-shrink:0; }
-    .info-pop { display:none; position:absolute; left:0; top:24px; z-index:50; width:290px; padding:9px 11px; border-radius:8px; background:#090e1a; border:1px solid var(--accent); color:var(--text); font-size:0.77rem; font-weight:400; line-height:1.45; box-shadow:0 8px 24px rgba(0,0,0,0.5); }
-    .info-tip:hover .info-pop, .info-tip:focus .info-pop, .info-tip.open .info-pop { display:block; }
   </style>
 </head>
 <body>
   <div class="wrap" id="app">Loading...</div>
   <script>
-    let CFG = {"active_runner": "ollama", "active_model": "", "max_context_window": 200000, "components": {"wiki_mcp": {"enabled": true, "module": "cortical.wiki.mcp_server", "title_it": "Second Brain Wiki 4-Tier (MCP)", "title_en": "4-Tier Second Brain Wiki (MCP)", "desc_it": "Indicizza cartelle/file allegati in un albero Merkle a 4 livelli (Light ~50 tok, Medium ~250, High ~1000, Max) con ricerca FTS5 e RBAC SQLite.", "desc_en": "Indexes attached folders/files into a 4-tier Merkle tree (Light ~50 tok, Medium ~250, High ~1000, Max) with FTS5 search and SQLite RBAC."}, "token_analytics": {"enabled": true, "module": "cortical.token_analytics", "title_it": "Analitica Token & ROI", "title_en": "Token Analytics & ROI", "desc_it": "Misura consumo locale/remoto dalle trascrizioni a 0 token cloud con cache su disco e calcolo costi su preset LiteLLM.", "desc_en": "Measures local/remote usage from local transcripts at 0 cloud tokens with disk caching and LiteLLM-aligned cost estimation."}, "privacy_sanitizer": {"enabled": true, "module": "cortical.privacy_sanitizer", "title_it": "Privacy Sanitizer & GDPR", "title_en": "Privacy Sanitizer & GDPR", "desc_it": "Rimuove metadati OOXML/PDF, pseudonimizza ID e termini personalizzati, e filtra quasi-identificatori tramite LLM locale offline.", "desc_en": "Strips OOXML/PDF metadata, pseudonymizes IDs & custom terms, and rewrites GDPR quasi-identifiers via offline local LLM."}, "skills_hub": {"enabled": true, "module": "cortical.skills_hub", "title_it": "Cortical Skill Engine", "title_en": "Cortical Skill Engine", "desc_it": "Motore interno di routing ed evoluzione delle skill procedurali (SKILL.md), consolidamento e collegamento ai task nel Macro-Graph.", "desc_en": "Internal procedural skill router & evolution engine (SKILL.md), consolidating overlapping lessons and linking tasks in the Macro-Graph."}, "permission_gate": {"enabled": true, "module": "cortical.permissions.gate", "title_it": "Adaptive Permission Gate", "title_en": "Adaptive Permission Gate", "desc_it": "Valutazione deterministica sub-millisecondo dei comandi bash/tool con guardrail hard e apprendimento progressivo del rischio.", "desc_en": "Sub-millisecond deterministic bash/tool risk evaluation with hard guardrails and progressive pattern learning."}, "context_window": {"enabled": true, "module": "cortical.context_window", "title_it": "Auto-Scaler Contesto 200k", "title_en": "200k Dynamic Context Auto-Scaler", "desc_it": "Scopre automaticamente modello attivo e contesto nativo (/api/ps, /api/show) scalando num_ctx sulla RAM libera fino al cap configurato.", "desc_en": "Auto-discovers active model & native context (/api/ps, /api/show) and scales num_ctx to live RAM headroom up to the configured cap."}}, "runners": {"ollama": {"type": "ollama", "base_url": "http://127.0.0.1:11434", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-iq2_xxs", "enabled": true}, "llama_cpp": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}, "mlx_lm": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "heavy_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "enabled": false}, "openai_compatible": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8888/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}}, "report": {"auto_report": true, "language": "auto", "default_range_days": 30, "retention_days": 90, "cloud_preset": "cloud_standard"}, "privacy_sanitizer": {"sanitizer_model": "qwen2.5:1.5b", "custom_terms": [], "enable_person_name_heuristic": true}, "skills": {"auto_compile": true, "min_terms": 4, "consolidation_overlap": 3, "consolidation_jaccard": 0.3, "require_verified_artifact": true}, "local_loop": {"enabled": true, "router_model": "qwen2.5:1.5b", "analyst_model": "qwen3.5:9b-q3_k_xl", "reviewer_model": "qwen3:8b", "reasoner_model": "qwen3:8b", "heavy_model": "qwen3.8:27b-iq2_xxs", "max_iterations": 3, "default_privacy_profile": "medium", "escalate_to_remote_only_when_needed": true}, "privacy_profiles": {"max_security": {"description": "Local-only reasoning: never sends raw files or excerpts to remote LLMs.", "local_only": true, "allow_local_conclusions": true, "summary_only": true, "strip_metadata": true, "use_local_llm": true, "redact": true, "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"], "preserve_categories": []}, "low": {"description": "Ultra-sanitized summary: sends only an anonymized high-level summary.", "local_only": false, "allow_local_conclusions": true, "summary_only": true, "strip_metadata": true, "use_local_llm": true, "redact": true, "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"], "preserve_categories": []}, "medium": {"description": "Selective domain-aware pseudonymization: hides personal IDs, keeps financial/domain metrics.", "local_only": false, "allow_local_conclusions": true, "summary_only": false, "strip_metadata": true, "use_local_llm": false, "redact": false, "strip_categories": ["SECRET", "EMAIL", "PHONE", "IBAN", "TAX_ID", "IP", "PERSON_NAME", "CUSTOM"], "preserve_categories": ["AMOUNTS", "METRICS"]}, "max_context": {"description": "Full raw file passthrough (only use for non-sensitive public/code files).", "local_only": false, "allow_local_conclusions": false, "summary_only": false, "strip_metadata": false, "use_local_llm": false, "redact": false, "strip_categories": [], "preserve_categories": ["ALL"]}}};
-    let LANG = localStorage.getItem('cortical_lang') || 'it';
-    let SELECTED_MOD = 'all';
+    let CFG = {"active_runner": "ollama", "active_model": "", "max_context_window": 200000, "custom_models": [], "models_by_role": {"router": "qwen2.5:1.5b", "ner": "qwen2.5:1.5b", "daily_coder": "qwen3.5:9b-q3_k_xl", "deep_reasoner": "qwen3.8:27b-q4_xxs", "orchestrator": "qwen3.8:27b-q4_xxs"}, "runners": {"ollama": {"type": "ollama", "base_url": "http://127.0.0.1:11434", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": true}, "unsloth": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8888/v1", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": false}, "llama_cpp": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}, "mlx_lm": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "heavy_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "enabled": false}, "openai_compatible": {"type": "openai_compatible", "base_url": "http://127.0.0.1:4000/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}}, "router": {"enabled": false, "provider": "litellm", "base_url": "http://127.0.0.1:4000/v1"}, "composers": {"serena": true, "rtk": true, "pinchtab": true, "playwright_mcp": true, "context_mode": true}, "harnesses": {"antigravity": true, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": true}, "privacy": {"default_policy": "auto", "default_profile": "medium", "ner_model": "qwen2.5:1.5b", "use_local_ner": false, "custom_terms": []}, "compression": {"enable_toon": true, "min_toon_saving_pct": 10.0, "max_context_share": 0.15}, "report": {"auto_report": true, "language": "auto", "cloud_preset": "cloud_standard"}};
+    const CATALOG = [{"model_id": "qwen2.5:1.5b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:1.5b", "memory_gb": 1.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner"], "notes": "Fits completely in 4 GB VRAM; ultra-fast intent routing & JSON NER."}, {"model_id": "qwen2.5:3b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:3b", "memory_gb": 2.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner", "fast_coder"], "notes": "Fits comfortably in 4 GB VRAM for hybrid laptops; strong JSON extraction."}, {"model_id": "qwen3:8b", "runner": "ollama", "pull_ref": "ollama pull qwen3:8b", "memory_gb": 5.2, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["daily_coder", "reviewer"], "notes": "Fast tool-calling reviewer & hybrid offload coder on 16 GB laptops."}, {"model_id": "qwen3.5:9b-q3_k_xl", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q3_K_XL", "memory_gb": 5.1, "native_ctx": 131072, "quantization": "Unsloth Dynamic UD-Q3_K_XL", "is_variable_quant": true, "roles": ["daily_coder", "long_context", "reviewer"], "notes": "Variable-precision Unsloth dynamic quant (5.1 GB, up to 131K ctx)."}, {"model_id": "qwen3.8:27b-iq2_xxs", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS", "memory_gb": 7.2, "native_ctx": 32768, "quantization": "Unsloth Dynamic UD-IQ2_XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB."}, {"model_id": "qwen3.8:27b-q4_xxs", "runner": "ollama", "pull_ref": "ollama pull qwen3.8:27b-q4_xxs", "memory_gb": 8.1, "native_ctx": 32768, "quantization": "Unsloth Variable 4-bit XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Variable 4-bit XXS (~8.1 GB): deep reasoning, architecture & orchestration on 16 GB unified RAM."}, {"model_id": "qwen2.5-coder:32b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5-coder:32b", "memory_gb": 19.5, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["deep_reasoner", "daily_coder"], "notes": "Workstation-class coder for 32+ GB RAM / 24+ GB VRAM machines."}];
+    const HW = {"os": "cross-platform", "total_ram_gb": 16.0, "vram_gb": 4.0, "unified_memory": false, "classification": {"tier": "tier_1a_hybrid_laptop", "label": "Tier 1A · Hybrid / Variable"}};
+    const PRESEND = {"antigravity": false, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": false};
+    let LANG = localStorage.getItem('cortical_lang') || 'en';
+    let TAB = 'models';
     let SAVE_MSG = '';
-    const ALL_CATS = ['SECRET', 'EMAIL', 'PHONE', 'IBAN', 'TAX_ID', 'IP', 'PERSON_NAME', 'CUSTOM', 'NAMES', 'ADDRESSES'];
-    const MOD_ORDER = ['all', 'context_window', 'wiki_mcp', 'privacy_sanitizer', 'skills_hub', 'token_analytics', 'permission_gate'];
+    let PICKED_PRIV_PREVIEW = '';
 
-    const esc = (s) => String(s || '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-    const I18N = {
-      it: {
-        title: '⚙️ Configurazione Moduli Cortical (Zero-Server)',
-        sub: 'Documentazione e parametri modulari salvati in cortical.config.json senza server attivi.',
-        import: 'Importa', download: 'Scarica JSON', save: 'Salva su Disco',
-        allLabel: '📦 Tutti i Moduli',
-        enabledLbl: 'Modulo attivo',
-        on: 'ON', off: 'OFF',
-        savedDisk: '✅ Configurazione salvata su disco (cortical.config.json).',
-        downloaded: '⬇️ File cortical.config.json scaricato.',
-        imported: '📂 Configurazione importata.',
-        // context_window
-        ctxTitle: '🧠 Runner Locale & Auto-Scaler Contesto (200k)',
-        ctxDoc: 'Seleziona il runner LLM pluggabile (Ollama, llama.cpp, MLX, OpenAI-compatible) e il tetto massimo di contesto. Cortical rileva la RAM libera reale (<code>vm_stat</code> / <code>/proc/meminfo</code>) e dimensiona <code>num_ctx</code> fino a 200k evitando troncamenti silenti a 4096 token.',
-        runnerLbl: 'Runner Attivo', runnerTip: 'Motore locale usato per analisi ROI, sintesi wiki e filtro privacy offline.',
-        modelLbl: 'Modello Attivo', modelTip: 'Auto-Discover sceglie il modello già caricato in VRAM; oppure fissane uno specifico.',
-        ctxCapLbl: 'Max Context Window (Cap)', ctxCapTip: 'Limite superiore configurabile (fino a 200.000 token); scala automaticamente su RAM libera.',
-        urlLbl: 'Base URL Runner', urlTip: 'Endpoint HTTP locale o LAN del runner selezionato.',
-        // token_analytics
-        tokTitle: '📊 Token Report, Lingua, Retention & ROI Cloud',
-        tokDoc: 'Calcola il risparmio reale leggendo i transcript locali (Antigravity, Claude Code, Codex) e le run locali Cortical a 0 token cloud. I report possono seguire automaticamente la lingua della chat corrente (<code>auto</code>).',
-        autoRep: 'Genera Token Report a fine turno',
-        repLangLbl: 'Lingua Report in Chat', repLangTip: 'Auto adatta la lingua del report in chat al contesto della conversazione (IT/EN/ES).',
-        rangeLbl: 'Finestra Temporale Predefinita', rangeTip: 'Intervallo iniziale mostrato nei grafici giornalieri e nella tabella cloud.',
-        retLbl: 'Retention Log Puntuali (giorni)', retTip: 'Conserva le metriche granulari per N giorni mantenendo i totali aggregati storici.',
-        presetLbl: 'Preset Tariffe Cloud (Stima ROI)', presetTip: 'Tariffa usata per stimare il risparmio economico per token cloud evitato.',
-        // skills_hub -> displayed ONLY as Cortical Skill Engine
-        skTitle: '⚡ Cortical Skill Engine (Auto-Compilazione & Consolidamento)',
-        skDoc: 'Compila ed evolve skill riusabili a partire da concetti ed episodi ricorrenti (<code>learned-*</code>), unificando task simili via Jaccard + LLM locale per evitare proliferazione di micro-skill duplicate.',
-        autoSk: 'Abilita auto-compilazione ed evoluzione skill',
-        skPresetLbl: 'Profilo Selettività Skill', skPresetTip: 'Bilancia creazione di nuove skill vs fusione con skill già esistenti.',
-        // privacy_sanitizer
-        prTitle: '🛡️ Local Privacy Sanitizer & GDPR Anonymizer',
-        prDoc: 'Pulisce metadati binari (DOCX/PDF/XLSX/OOXML), sostituisce segreti e identificatori con pseudonimi coerenti (<code>[EMAIL_1]</code>, <code>[PERSON_NAME_1]</code>, <code>[CUSTOM_1]</code>), applica termini personalizzati e opzionalmente riscrive quasi-identificatori tramite LLM locale completamente offline.',
-        sanModelLbl: 'Modello LLM Sanitizer Offline', sanModelTip: 'Modello locale leggero (es. qwen2.5:1.5b) o evoluto usato per riscrivere quasi-identificatori.',
-        personHeur: 'Rileva automaticamente Nomi/Cognomi (euristica [PERSON_NAME_N])',
-        customTermsLbl: 'Termini Personalizzati da Anonimizzare (nomi, cognomi, clienti, codename — separati da virgola)',
-        customTermsTip: 'Esempio: Mario Rossi, Acme Srl, Progetto Orione → sostituiti da [CUSTOM_N].',
-        addTier: '+ Aggiungi Livello Custom',
-        catsLbl: 'Categorie da rimuovere / pseudonimizzare:',
-        prLocalOnly: 'Solo Locale (0 byte al cloud)',
-        prSumOnly: 'Solo Sintesi',
-        prStripMeta: 'Rimuovi Metadati File',
-        prUseLlm: 'Filtro LLM Locale Offline',
-        prRedact: '[REDACTED] (vs pseudonimi)',
-        // wiki_mcp
-        wkTitle: '🌳 4-Tier Merkle Wiki MCP & Memoria 3+1',
-        wkDoc: 'Indicizza solo cartelle/file aggiunti al contesto come albero Merkle a 4 livelli (<code>light</code> ~50 tok, <code>medium</code> ~250 tok, <code>high</code> ~1000 tok, <code>max</code>) su SQLite FTS5 + Macro-Graph degli episodi e regole/insight 3+1. Comando manuale: <code>PYTHONPATH=src python3 -m cortical.cli crawl &lt;dir&gt;</code>.',
-        // permission_gate
-        pgTitle: '🔒 Adaptive Permission Gate',
-        pgDoc: 'Valuta deterministicamente il rischio di comandi bash (<code>safe</code> / <code>ask</code> / <code>deny</code>) in &lt;1 ms senza chiamare alcun LLM remoto, proteggendo da comandi distruttivi o accessi sensibili.',
-      },
+    const T = {
       en: {
-        title: '⚙️ Cortical Modular Settings (Zero-Server)',
-        sub: 'Per-module documentation and configuration stored in cortical.config.json with zero background servers.',
-        import: 'Import', download: 'Download JSON', save: 'Save to Disk',
-        allLabel: '📦 All Modules',
-        enabledLbl: 'Module Enabled',
-        on: 'ON', off: 'OFF',
-        savedDisk: '✅ Saved directly to disk (cortical.config.json).',
-        downloaded: '⬇️ Downloaded cortical.config.json.',
-        imported: '📂 Configuration imported.',
-        ctxTitle: '🧠 Local LLM Runner & 200k Context Auto-Scaler',
-        ctxDoc: 'Pick the pluggable local runner (Ollama, llama.cpp, MLX, OpenAI-compatible) and upper context ceiling. Cortical probes live free RAM (<code>vm_stat</code> / <code>/proc/meminfo</code>) and scales <code>num_ctx</code> up to 200k to prevent silent 4096 truncation.',
-        runnerLbl: 'Active Runner', runnerTip: 'Local engine used for ROI commentary, wiki synthesis, and offline privacy rewriting.',
-        modelLbl: 'Active Model', modelTip: 'Auto-Discover picks the resident model in VRAM; or lock a specific ID.',
-        ctxCapLbl: 'Max Context Window (Cap)', ctxCapTip: 'Configurable upper limit (up to 200,000 tokens); auto-scales to free RAM.',
-        urlLbl: 'Runner Base URL', urlTip: 'Localhost or LAN HTTP endpoint of the selected runner.',
-        tokTitle: '📊 Token Report, Language, Retention & Cloud ROI',
-        tokDoc: 'Computes real savings from local cloud transcripts (Antigravity, Claude Code, Codex) and Cortical local runs at $0.00 cloud cost. In-chat Markdown reports can auto-match conversation language (<code>auto</code>).',
-        autoRep: 'Generate Token Report at turn end',
-        repLangLbl: 'In-Chat Report Language', repLangTip: 'Auto matches the chat conversation language (IT/EN/ES).',
-        rangeLbl: 'Default Time Window', rangeTip: 'Initial time horizon shown in daily charts and cloud table.',
-        retLbl: 'Granular Log Retention (days)', retTip: 'Prunes granular task/chat logs older than N days while keeping cumulative lifetime aggregates.',
-        presetLbl: 'Cloud Pricing Preset (ROI Estimate)', presetTip: 'Reference rates used to estimate avoided cloud spend.',
-        skTitle: '⚡ Cortical Skill Engine (Auto-Compile & Evolution)',
-        skDoc: 'Compiles and evolves reusable <code>learned-*</code> skills from verified episodes and insights, consolidating overlapping skills via Jaccard + local LLM to prevent noisy micro-skill proliferation.',
-        autoSk: 'Enable skill auto-compilation & evolution',
-        skPresetLbl: 'Skill Selectivity Preset', skPresetTip: 'Balances creating new skills vs merging into existing skills.',
-        prTitle: '🛡️ Local Privacy Sanitizer & GDPR Anonymizer',
-        prDoc: 'Strips binary file metadata (DOCX/PDF/XLSX/OOXML), pseudonymizes identifiers consistently (<code>[EMAIL_1]</code>, <code>[PERSON_NAME_1]</code>, <code>[CUSTOM_1]</code>), enforces custom terms, and optionally rewrites quasi-identifiers with an offline local LLM.',
-        sanModelLbl: 'Offline Sanitizer LLM Model', sanModelTip: 'Lightweight (e.g. qwen2.5:1.5b) or stronger local model used for quasi-identifier rewriting.',
-        personHeur: 'Auto-detect Person Names/Surnames ([PERSON_NAME_N] heuristic)',
-        customTermsLbl: 'Custom Terms to Anonymize (names, surnames, clients, codenames — comma separated)',
-        customTermsTip: 'Example: Jane Doe, Acme Corp, Project Orion → replaced with [CUSTOM_N].',
-        addTier: '+ Add Custom Privacy Tier',
-        catsLbl: 'Categories to strip / pseudonymize:',
-        prLocalOnly: 'Local Only (0 bytes to cloud)',
-        prSumOnly: 'Summary Only',
-        prStripMeta: 'Strip File Metadata',
-        prUseLlm: 'Offline Local LLM Filter',
-        prRedact: '[REDACTED] (vs pseudonyms)',
-        wkTitle: '🌳 4-Tier Merkle Wiki MCP & 3+1 Memory',
-        wkDoc: 'Indexes only explicitly attached context folders/files into a 4-tier Merkle tree (<code>light</code> ~50 tok, <code>medium</code> ~250 tok, <code>high</code> ~1000 tok, <code>max</code>) in SQLite FTS5 + Episode Macro-Graph + 3+1 Insights. CLI: <code>PYTHONPATH=src python3 -m cortical.cli crawl &lt;dir&gt;</code>.',
-        pgTitle: '🔒 Adaptive Permission Gate',
-        pgDoc: 'Deterministically scores shell commands (<code>safe</code> / <code>ask</code> / <code>deny</code>) in &lt;1 ms with zero remote LLM calls, protecting workspaces from destructive commands or sensitive reads.',
+        title: '⚙️ Cortical Control Plane Settings',
+        sub: 'Zero-server declarative configuration (cortical.config.json)',
+        save: 'Save to Disk', download: 'Download JSON', import: 'Import JSON',
+        tabs: { models: '🧠 Hardware & Models', harnesses: '🔌 8 Harnesses & Composer', privacy: '🛡️ Privacy Vault', compression: '🗜️ TOON, Tuner & ROI' },
+        saved: '✅ Saved cortical.config.json directly to disk.', downloaded: '⬇️ Downloaded cortical.config.json.', imported: '📂 Imported configuration.',
+        addModelBtn: '+ Add Custom / Variable-Quant Model',
+      },
+      it: {
+        title: '⚙️ Configurazione Control Plane Cortical',
+        sub: 'Configurazione dichiarativa Zero-Server (cortical.config.json)',
+        save: 'Salva su Disco', download: 'Scarica JSON', import: 'Importa JSON',
+        tabs: { models: '🧠 Hardware & Modelli', harnesses: '🔌 8 Harness & Compositore', privacy: '🛡️ Privacy Vault', compression: '🗜️ TOON, Auto-Tuner & ROI' },
+        saved: '✅ File cortical.config.json salvato su disco.', downloaded: '⬇️ Scaricato cortical.config.json.', imported: '📂 Configurazione importata.',
+        addModelBtn: '+ Aggiungi Modello Custom / Quant Variabile',
       }
     };
 
-    const tip = (txt) => `<span class="info-tip" tabindex="0" onclick="this.classList.toggle('open')">i<span class="info-pop">${esc(txt)}</span></span>`;
-
-    function modMeta(key) {
-      const comps = CFG.components || {};
-      const c = comps[key] || {};
-      const L = I18N[LANG] || I18N.it;
-      const icons = { context_window: '🧠', wiki_mcp: '🌳', privacy_sanitizer: '🛡️', skills_hub: '⚡', token_analytics: '📊', permission_gate: '🔒' };
-      const rawTitle = LANG === 'en' ? (c.title_en || c.title_it || key) : (c.title_it || c.title_en || key);
-      const safeTitle = String(rawTitle).replace(/skill\s*hub/ig, 'Cortical Skill Engine');
-      const desc = LANG === 'en' ? (c.desc_en || c.desc_it || '') : (c.desc_it || c.desc_en || '');
-      return { icon: icons[key] || '🧩', title: safeTitle, desc: desc, enabled: c.enabled !== false, module: c.module || '' };
+    function allModels() {
+      const map = new Map();
+      CATALOG.forEach((m) => map.set(m.model_id, {...m, custom: false}));
+      (CFG.custom_models || []).forEach((m) => map.set(m.model_id, {...m, custom: true}));
+      return Array.from(map.values());
     }
 
-    function toggleComponent(key, val) {
-      CFG.components = CFG.components || {};
-      CFG.components[key] = CFG.components[key] || { enabled: true };
-      CFG.components[key].enabled = Boolean(val);
-      renderApp();
-    }
-
-    function setCfgPath(section, key, val) {
-      CFG[section] = CFG[section] || {};
-      CFG[section][key] = val;
-    }
-
-    function syncRunnerField(field, val) {
-      const name = CFG.active_runner || 'ollama';
-      CFG.runners = CFG.runners || {};
-      CFG.runners[name] = CFG.runners[name] || { type: name === 'ollama' ? 'ollama' : 'openai_compatible', enabled: true };
-      CFG.runners[name][field] = val;
-    }
-
-    function onModelSelect(val) {
-      const inp = document.getElementById('active_model');
-      if (val === '__custom__') {
-        if (inp) { inp.style.display = 'block'; inp.focus(); }
-      } else {
-        CFG.active_model = val;
-        if (inp) { inp.style.display = 'none'; inp.value = val; }
-      }
-    }
-
-    function onSanModelSelect(val) {
-      const inp = document.getElementById('sanitizer_model_custom');
-      CFG.privacy_sanitizer = CFG.privacy_sanitizer || {};
-      if (val === '__custom__') {
-        if (inp) { inp.style.display = 'block'; inp.focus(); }
-      } else {
-        CFG.privacy_sanitizer.sanitizer_model = val;
-        if (inp) { inp.style.display = 'none'; inp.value = val; }
-      }
-    }
-
-    function updateCustomTerms(raw) {
-      CFG.privacy_sanitizer = CFG.privacy_sanitizer || {};
-      CFG.privacy_sanitizer.custom_terms = String(raw || '').split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
-    }
-
-    function applySkillPreset(p) {
-      const map = {
-        balanced: { min_terms: 4, consolidation_overlap: 3, consolidation_jaccard: 0.30 },
-        strict: { min_terms: 6, consolidation_overlap: 2, consolidation_jaccard: 0.25 },
-        permissive: { min_terms: 3, consolidation_overlap: 4, consolidation_jaccard: 0.40 },
+    function addCustomModelFromForm() {
+      const id = document.getElementById('cm-id').value.trim();
+      if (!id) return;
+      const entry = {
+        model_id: id,
+        runner: document.getElementById('cm-runner').value,
+        memory_gb: Number(document.getElementById('cm-mem').value || 5.0),
+        native_ctx: Number(document.getElementById('cm-ctx').value || 32768),
+        quantization: document.getElementById('cm-quant').value.trim() || 'variable-quant',
+        is_variable_quant: Boolean(document.getElementById('cm-var').checked),
+        roles: document.getElementById('cm-roles').value.split(',').map((s) => s.trim()).filter(Boolean),
+        pull_ref: document.getElementById('cm-pull').value.trim() || ('ollama pull ' + id),
+        notes: document.getElementById('cm-notes').value.trim() || 'Custom user model',
       };
-      CFG.skills = { ...(CFG.skills || {}), ...(map[p] || map.balanced), require_verified_artifact: true };
-      renderApp();
+      CFG.custom_models = (CFG.custom_models || []).filter((x) => x.model_id !== id);
+      CFG.custom_models.push(entry);
+      SAVE_MSG = 'Added custom model: ' + id;
+      render();
     }
 
-    function toggleCat(profName, cat, checked) {
-      const arr = new Set(CFG.privacy_profiles[profName].strip_categories || []);
-      if (checked) arr.add(cat); else arr.delete(cat);
-      CFG.privacy_profiles[profName].strip_categories = Array.from(arr);
+    function removeCustomModel(id) {
+      CFG.custom_models = (CFG.custom_models || []).filter((x) => x.model_id !== id);
+      render();
     }
 
-    function addPrivacyProfile() {
-      const name = prompt(LANG === 'en' ? 'New custom privacy tier slug (e.g. finance_analysis):' : 'Nome nuovo livello privacy (es. finance_analysis):');
-      if (!name) return;
-      const slug = name.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_');
-      CFG.privacy_profiles = CFG.privacy_profiles || {};
-      CFG.privacy_profiles[slug] = {
-        description: 'Custom user privacy profile',
-        local_only: false, allow_local_conclusions: true, summary_only: false,
-        strip_metadata: true, use_local_llm: false, redact: false,
-        strip_categories: ['EMAIL', 'PHONE', 'TAX_ID', 'IBAN', 'SECRET', 'PERSON_NAME', 'CUSTOM'],
-        preserve_categories: ['AMOUNTS'],
-      };
-      renderApp();
+    function assignRoleModel(role, modelId) {
+      CFG.models_by_role = CFG.models_by_role || {};
+      CFG.models_by_role[role] = modelId;
+      if (role === 'daily_coder') CFG.active_model = modelId;
+      render();
     }
 
-    function renderModuleHeader(modKey, docHtml, titleText) {
-      const L = I18N[LANG] || I18N.it;
-      const m = modMeta(modKey);
+    function handleVaultPicker(ev) {
+      const f = ev.target.files?.[0];
+      if (!f) return;
+      f.text().then((txt) => {
+        const masked = txt
+          .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL_1]')
+          .replace(/\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g, '[IBAN_1]');
+        const alias = f.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
+        PICKED_PRIV_PREVIEW = `Alias: @private:${alias} (cortical://private/${alias})
+CLI: PYTHONPATH=src python3 -m cortical.cli ingest "${f.name}" --policy ${CFG.privacy?.default_policy || 'auto'} --profile ${CFG.privacy?.default_profile || 'medium'}
+
+Preview:
+` + masked.slice(0, 600);
+        render();
+      });
+    }
+
+    function renderModelsPanel(L) {
+      const models = allModels();
+      const cls = HW.classification || {};
+      const rows = models.map((m) => `
+        <tr>
+          <td><strong><code>${esc(m.model_id)}</code></strong><br/><span style="font-size:0.75rem;color:var(--muted);">${esc(m.quantization)} ${m.is_variable_quant ? '· VarQuant' : ''}</span></td>
+          <td>${Number(m.memory_gb || 0).toFixed(1)} GB</td>
+          <td>${Number(m.native_ctx || 32768).toLocaleString()}</td>
+          <td>${(m.roles || []).join(', ')}</td>
+          <td><code>${esc(m.pull_ref)}</code></td>
+          <td>
+            <button class="btn" onclick="assignRoleModel('daily_coder','${esc(m.model_id)}')">Set Daily</button>
+            <button class="btn" onclick="assignRoleModel('deep_reasoner','${esc(m.model_id)}')">Set Reasoner</button>
+            ${m.custom ? `<button class="btn btn-danger" onclick="removeCustomModel('${esc(m.model_id)}')">🗑️</button>` : ''}
+          </td>
+        </tr>`).join('');
+
       return `
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-          <h2 style="margin:0;">${titleText} <code style="font-size:0.74rem; color:var(--muted);">${esc(m.module)}</code></h2>
-          <label class="row-chk" style="margin:0;">
-            <input type="checkbox" ${m.enabled ? 'checked' : ''} onchange="toggleComponent('${modKey}', this.checked)" />
-            <span>${L.enabledLbl}</span>
-          </label>
-        </div>
-        <div class="doc-box">${m.desc ? esc(m.desc) + '<br/>' : ''}${docHtml}</div>`;
-    }
-
-    function renderContextModule() {
-      const L = I18N[LANG] || I18N.it;
-      const rKey = CFG.active_runner || 'ollama';
-      const rObj = (CFG.runners || {})[rKey] || {};
-      const curMod = CFG.active_model || '';
-      const knownMods = ['', 'qwen3.5:9b-q3_k_xl', 'qwen3.8:27b-iq2_xxs', 'qwen3:8b', 'qwen2.5:1.5b'];
-      const isCustom = !knownMods.includes(curMod);
-      return `<div class="card">
-        ${renderModuleHeader('context_window', L.ctxDoc, L.ctxTitle)}
-        <div class="grid">
-          <label><span class="lbl-head">${L.runnerLbl} ${tip(L.runnerTip)}</span>
-            <select onchange="CFG.active_runner=this.value; renderApp();">
-              <option value="ollama" ${rKey==='ollama'?'selected':''}>ollama (http://127.0.0.1:11434)</option>
-              <option value="llama_cpp" ${rKey==='llama_cpp'?'selected':''}>llama_cpp / llama-server (:8080)</option>
-              <option value="mlx_lm" ${rKey==='mlx_lm'?'selected':''}>mlx_lm (Apple Metal :8080)</option>
-              <option value="openai_compatible" ${rKey==='openai_compatible'?'selected':''}>openai_compatible / Custom (:8888)</option>
-            </select>
-          </label>
-          <label><span class="lbl-head">${L.modelLbl} ${tip(L.modelTip)}</span>
-            <select onchange="onModelSelect(this.value)">
-              <option value="" ${curMod===''?'selected':''}>✨ Auto-Discover (VRAM / default)</option>
-              <option value="qwen3.5:9b-q3_k_xl" ${curMod==='qwen3.5:9b-q3_k_xl'?'selected':''}>qwen3.5:9b-q3_k_xl (5.1 GB · 25 tok/s · 131K)</option>
-              <option value="qwen3.8:27b-iq2_xxs" ${curMod==='qwen3.8:27b-iq2_xxs'?'selected':''}>qwen3.8:27b-iq2_xxs (7.2 GB · 9.9 tok/s · 32K)</option>
-              <option value="qwen3:8b" ${curMod==='qwen3:8b'?'selected':''}>qwen3:8b (5.2 GB · 28.6 tok/s · 32K)</option>
-              <option value="qwen2.5:1.5b" ${curMod==='qwen2.5:1.5b'?'selected':''}>qwen2.5:1.5b (1.0 GB · fast)</option>
-              <option value="__custom__" ${isCustom?'selected':''}>✏️ Custom...</option>
-            </select>
-            <input id="active_model" value="${esc(curMod)}" placeholder="Custom model ID" oninput="CFG.active_model=this.value.trim()" style="margin-top:4px; display:${isCustom?'block':'none'};" />
-          </label>
-          <label><span class="lbl-head">${L.ctxCapLbl} ${tip(L.ctxCapTip)}</span>
-            <select onchange="CFG.max_context_window=Number(this.value)">
-              ${[32768, 65536, 131072, 200000].map((v) => `<option value="${v}" ${Number(CFG.max_context_window||200000)===v?'selected':''}>${v.toLocaleString('en-US')} tokens</option>`).join('')}
-            </select>
-          </label>
-          <label><span class="lbl-head">${L.urlLbl} ${tip(L.urlTip)}</span>
-            <input value="${esc(rObj.base_url || '')}" oninput="syncRunnerField('base_url', this.value)" />
-          </label>
-        </div>
-      </div>`;
-    }
-
-    function renderTokenModule() {
-      const L = I18N[LANG] || I18N.it;
-      const rep = CFG.report || {};
-      const rLang = rep.language || 'auto';
-      return `<div class="card">
-        ${renderModuleHeader('token_analytics', L.tokDoc, L.tokTitle)}
-        <div class="grid">
-          <label class="row-chk"><input type="checkbox" ${rep.auto_report!==false?'checked':''} onchange="setCfgPath('report','auto_report',this.checked)" /> <span>${L.autoRep}</span></label>
-          <label><span class="lbl-head">${L.repLangLbl} ${tip(L.repLangTip)}</span>
-            <select onchange="setCfgPath('report','language',this.value)">
-              <option value="auto" ${rLang==='auto'?'selected':''}>auto (context-aware / task lang)</option>
-              <option value="it" ${rLang==='it'?'selected':''}>it (Italiano)</option>
-              <option value="en" ${rLang==='en'?'selected':''}>en (English)</option>
-              <option value="es" ${rLang==='es'?'selected':''}>es (Español)</option>
-            </select>
-          </label>
-          <label><span class="lbl-head">${L.rangeLbl} ${tip(L.rangeTip)}</span>
-            <select onchange="setCfgPath('report','default_range_days',Number(this.value))">
-              <option value="7" ${Number(rep.default_range_days)==7?'selected':''}>7 days</option>
-              <option value="30" ${Number(rep.default_range_days??30)==30?'selected':''}>30 days</option>
-              <option value="90" ${Number(rep.default_range_days)==90?'selected':''}>90 days</option>
-              <option value="0" ${Number(rep.default_range_days)===0?'selected':''}>All history</option>
-            </select>
-          </label>
-          <label><span class="lbl-head">${L.retLbl} ${tip(L.retTip)}</span>
-            <input type="number" min="1" max="3650" value="${Number(rep.retention_days ?? 90)}" oninput="setCfgPath('report','retention_days',Number(this.value||90))" />
-          </label>
-          <label><span class="lbl-head">${L.presetLbl} ${tip(L.presetTip)}</span>
-            <select onchange="setCfgPath('report','cloud_preset',this.value)">
-              ${['cloud_standard', 'openai_gpt', 'claude_sonnet', 'gemini_pro', 'deepseek_v3'].map((p) => `<option value="${p}" ${(rep.cloud_preset||'cloud_standard')===p?'selected':''}>${p}</option>`).join('')}
-            </select>
-          </label>
-        </div>
-      </div>`;
-    }
-
-    function renderSkillEngineModule() {
-      const L = I18N[LANG] || I18N.it;
-      const sk = CFG.skills || {};
-      const preset = Number(sk.min_terms || 4) >= 6 ? 'strict' : (Number(sk.min_terms || 4) <= 3 ? 'permissive' : 'balanced');
-      return `<div class="card">
-        ${renderModuleHeader('skills_hub', L.skDoc, L.skTitle)}
-        <div class="grid">
-          <label class="row-chk"><input type="checkbox" ${sk.auto_compile!==false?'checked':''} onchange="setCfgPath('skills','auto_compile',this.checked)" /> <span>${L.autoSk}</span></label>
-          <label><span class="lbl-head">${L.skPresetLbl} ${tip(L.skPresetTip)}</span>
-            <select onchange="applySkillPreset(this.value)">
-              <option value="balanced" ${preset==='balanced'?'selected':''}>Balanced (min_terms=4 · overlap=3 · Jaccard=0.30)</option>
-              <option value="strict" ${preset==='strict'?'selected':''}>Strict (min_terms=6 · overlap=2 · Jaccard=0.25)</option>
-              <option value="permissive" ${preset==='permissive'?'selected':''}>Permissive (min_terms=3 · overlap=4 · Jaccard=0.40)</option>
-            </select>
-          </label>
-        </div>
-      </div>`;
-    }
-
-    function renderPrivacyModule() {
-      const L = I18N[LANG] || I18N.it;
-      const ps = CFG.privacy_sanitizer || {};
-      const sanMod = ps.sanitizer_model || 'qwen2.5:1.5b';
-      const sanKnown = ['qwen2.5:1.5b', 'qwen3.5:9b-q3_k_xl', 'qwen3:8b', 'qwen3.8:27b-iq2_xxs'];
-      const sanCustom = !sanKnown.includes(sanMod);
-      const customTerms = (ps.custom_terms || []).join(', ');
-      const profs = CFG.privacy_profiles || {};
-      const profCards = Object.entries(profs).map(([name, p]) => {
-        const activeCats = new Set(p.strip_categories || []);
-        const chips = ALL_CATS.map((cat) =>
-          `<label class="chip"><input type="checkbox" ${activeCats.has(cat) ? 'checked' : ''} onchange="toggleCat('${name}','${cat}',this.checked)" />${cat}</label>`
-        ).join('');
-        return `<div class="prof-card">
-          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-            <strong style="color:var(--accent);">${esc(name)}</strong>
-            <span style="font-size:0.78rem; color:var(--muted);">${esc(p.description || '')}</span>
+        <div class="card">
+          <h2>Hardware &amp; Model Selector</h2>
+          <p style="margin:0 0 10px;color:var(--muted);font-size:0.86rem;">
+            Detected/Profile: <span class="pill pill-ok">${esc(cls.label || cls.tier || 'Variable Hardware')}</span> ·
+            RAM: <b>${HW.total_ram_gb} GB</b> · VRAM: <b>${HW.vram_gb} GB</b> (${HW.unified_memory ? 'Unified' : 'Discrete'})
+          </p>
+          <div class="grid" style="margin-bottom:12px;">
+            <label>Active Runner
+              <select onchange="CFG.active_runner=this.value; render();">
+                ${Object.keys(CFG.runners || {ollama:{}}).map((r) => `<option value="${r}" ${CFG.active_runner===r?'selected':''}>${r}</option>`).join('')}
+              </select>
+            </label>
+            <label>Router/NER Model (1.5B-3B)
+              <input value="${esc((CFG.models_by_role||{}).router || 'qwen2.5:1.5b')}" oninput="CFG.models_by_role.router=this.value; CFG.models_by_role.ner=this.value;" />
+            </label>
+            <label>Daily Coder Model (8B-9B VarQuant)
+              <input value="${esc((CFG.models_by_role||{}).daily_coder || 'qwen3.5:9b-q3_k_xl')}" oninput="CFG.models_by_role.daily_coder=this.value;" />
+            </label>
+            <label>Deep Reasoner / Orchestrator (27B 4-bit XXS)
+              <input value="${esc((CFG.models_by_role||{}).deep_reasoner || 'qwen3.8:27b-q4_xxs')}" oninput="CFG.models_by_role.deep_reasoner=this.value; CFG.models_by_role.orchestrator=this.value;" />
+            </label>
           </div>
+          <table>
+            <thead><tr><th>Model &amp; Quantization</th><th>Footprint</th><th>Native Ctx</th><th>Roles</th><th>Download Cmd</th><th>Actions</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h2>${L.addModelBtn}</h2>
           <div class="grid">
-            <label class="row-chk"><input type="checkbox" ${p.local_only?'checked':''} onchange="CFG.privacy_profiles['${name}'].local_only=this.checked" /> ${L.prLocalOnly}</label>
-            <label class="row-chk"><input type="checkbox" ${p.summary_only?'checked':''} onchange="CFG.privacy_profiles['${name}'].summary_only=this.checked" /> ${L.prSumOnly}</label>
-            <label class="row-chk"><input type="checkbox" ${p.strip_metadata?'checked':''} onchange="CFG.privacy_profiles['${name}'].strip_metadata=this.checked" /> ${L.prStripMeta}</label>
-            <label class="row-chk"><input type="checkbox" ${p.use_local_llm?'checked':''} onchange="CFG.privacy_profiles['${name}'].use_local_llm=this.checked" /> ${L.prUseLlm}</label>
-            <label class="row-chk"><input type="checkbox" ${p.redact?'checked':''} onchange="CFG.privacy_profiles['${name}'].redact=this.checked" /> ${L.prRedact}</label>
+            <label>Model ID<input id="cm-id" placeholder="e.g. hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q4_XXS" /></label>
+            <label>Runner<select id="cm-runner"><option value="ollama">ollama</option><option value="unsloth">unsloth</option><option value="llama_cpp">llama_cpp</option><option value="mlx_lm">mlx_lm</option></select></label>
+            <label>Memory (GB)<input id="cm-mem" type="number" step="0.1" value="8.1" /></label>
+            <label>Native Context<input id="cm-ctx" type="number" step="1024" value="32768" /></label>
+            <label>Quantization<input id="cm-quant" value="Unsloth Variable 4-bit XXS" /></label>
+            <label>Roles (comma-sep)<input id="cm-roles" value="deep_reasoner, orchestrator" /></label>
+            <label>Pull Command<input id="cm-pull" placeholder="ollama pull ..." /></label>
+            <label>Notes<input id="cm-notes" placeholder="Runs cleanly on 16GB unified RAM" /></label>
           </div>
-          <div style="font-size:0.76rem; color:var(--muted); margin-top:8px;">${L.catsLbl}</div>
-          <div class="chips">${chips}</div>
+          <label class="chk" style="margin:10px 0;"><input id="cm-var" type="checkbox" checked /> Variable / Dynamic Unsloth Quantization</label>
+          <button class="btn btn-primary" onclick="addCustomModelFromForm()">${L.addModelBtn}</button>
         </div>`;
-      }).join('');
-      return `<div class="card">
-        ${renderModuleHeader('privacy_sanitizer', L.prDoc, L.prTitle)}
-        <div class="grid" style="margin-bottom:14px;">
-          <label><span class="lbl-head">${L.sanModelLbl} ${tip(L.sanModelTip)}</span>
-            <select onchange="onSanModelSelect(this.value)">
-              <option value="qwen2.5:1.5b" ${sanMod==='qwen2.5:1.5b'?'selected':''}>qwen2.5:1.5b (fast offline filter)</option>
-              <option value="qwen3.5:9b-q3_k_xl" ${sanMod==='qwen3.5:9b-q3_k_xl'?'selected':''}>qwen3.5:9b-q3_k_xl (high accuracy)</option>
-              <option value="qwen3:8b" ${sanMod==='qwen3:8b'?'selected':''}>qwen3:8b</option>
-              <option value="qwen3.8:27b-iq2_xxs" ${sanMod==='qwen3.8:27b-iq2_xxs'?'selected':''}>qwen3.8:27b-iq2_xxs</option>
-              <option value="__custom__" ${sanCustom?'selected':''}>✏️ Custom...</option>
-            </select>
-            <input id="sanitizer_model_custom" value="${esc(sanMod)}" placeholder="Custom sanitizer model ID" oninput="setCfgPath('privacy_sanitizer','sanitizer_model',this.value.trim())" style="margin-top:4px; display:${sanCustom?'block':'none'};" />
+    }
+
+    function renderHarnessesPanel() {
+      const hKeys = Object.keys(PRESEND);
+      const hCards = hKeys.map((h) => `
+        <label class="chk" style="justify-content:space-between; padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--card2);">
+          <span><input type="checkbox" ${(CFG.harnesses||{})[h]!==false?'checked':''} onchange="CFG.harnesses=CFG.harnesses||{}; CFG.harnesses['${h}']=this.checked;" /> <b>${h}</b></span>
+          <span class="pill ${PRESEND[h]?'pill-ok':'pill-warn'}">${PRESEND[h] ? 'Pre-Send Safe' : 'Dashboard Ingest Only'}</span>
+        </label>`).join('');
+
+      const cKeys = Object.keys(CFG.composers || {});
+      const cCards = cKeys.map((k) => `
+        <label class="chk"><input type="checkbox" ${CFG.composers[k]?'checked':''} onchange="CFG.composers['${k}']=this.checked;" /> <code>${k}</code></label>`).join('');
+
+      const r = CFG.router || {};
+      return `
+        <div class="card">
+          <h2>Composed External Tools &amp; Optional HTTP Router</h2>
+          <div class="grid" style="margin-bottom:12px;">${cCards}</div>
+          <div style="border-top:1px solid var(--border); padding-top:12px;" class="grid">
+            <label class="chk"><input type="checkbox" ${r.enabled?'checked':''} onchange="CFG.router.enabled=this.checked;" /> Enable Optional Local HTTP Router (70-90% API Offload)</label>
+            <label>Router Provider<select onchange="CFG.router.provider=this.value;"><option value="litellm" ${r.provider==='litellm'?'selected':''}>LiteLLM</option><option value="omniroute" ${r.provider==='omniroute'?'selected':''}>OmniRoute</option><option value="ccr" ${r.provider==='ccr'?'selected':''}>claude-code-router</option></select></label>
+            <label>Router Base URL<input value="${esc(r.base_url||'http://127.0.0.1:4000/v1')}" oninput="CFG.router.base_url=this.value;" /></label>
+          </div>
+        </div>
+        <div class="card">
+          <h2>8 Harness Sync Targets (macOS · Linux · Windows)</h2>
+          <div class="grid">${hCards}</div>
+          <pre style="margin-top:12px;">PYTHONPATH=src python3 -m cortical.cli sync --dry-run
+PYTHONPATH=src python3 -m cortical.cli sync</pre>
+        </div>`;
+    }
+
+    function renderPrivacyPanel() {
+      const p = CFG.privacy || {};
+      return `
+        <div class="card">
+          <h2>Dynamic Privacy Policy (<code>auto</code> | <code>fail_closed</code> | <code>fail_open</code>)</h2>
+          <div class="grid">
+            <label>Default Ingestion Policy
+              <select onchange="CFG.privacy.default_policy=this.value;">
+                <option value="auto" ${p.default_policy==='auto'?'selected':''}>auto (Smart content classifier)</option>
+                <option value="fail_closed" ${p.default_policy==='fail_closed'?'selected':''}>fail_closed (Strict block on failure)</option>
+                <option value="fail_open" ${p.default_policy==='fail_open'?'selected':''}>fail_open (Public/clean docs)</option>
+              </select>
+            </label>
+            <label>Default Privacy Profile
+              <select onchange="CFG.privacy.default_profile=this.value;">
+                <option value="max_security" ${p.default_profile==='max_security'?'selected':''}>max_security (Local-only)</option>
+                <option value="low" ${p.default_profile==='low'?'selected':''}>low (Redacted summary)</option>
+                <option value="medium" ${p.default_profile==='medium'?'selected':''}>medium (Structured pseudonyms)</option>
+                <option value="max_context" ${p.default_profile==='max_context'?'selected':''}>max_context (Raw public docs)</option>
+              </select>
+            </label>
+            <label>Local JSON NER Model<input value="${esc(p.ner_model||'qwen2.5:1.5b')}" oninput="CFG.privacy.ner_model=this.value;" /></label>
+            <label class="chk"><input type="checkbox" ${p.use_local_ner?'checked':''} onchange="CFG.privacy.use_local_ner=this.checked;" /> Enable Local JSON NER (Zero naive regex false positives)</label>
+          </div>
+          <label style="margin-top:12px;">Custom Terms (comma-separated)
+            <textarea oninput="CFG.privacy.custom_terms=this.value.split(',').map(x=>x.trim()).filter(Boolean);" placeholder="Jane Doe, Client Corp, Project Orion">${esc((p.custom_terms||[]).join(', '))}</textarea>
           </label>
-          <label class="row-chk"><input type="checkbox" ${ps.enable_person_name_heuristic!==false?'checked':''} onchange="setCfgPath('privacy_sanitizer','enable_person_name_heuristic',this.checked)" /> <span>${L.personHeur}</span></label>
         </div>
-        <label style="margin-bottom:14px;"><span class="lbl-head">${L.customTermsLbl} ${tip(L.customTermsTip)}</span>
-          <textarea oninput="updateCustomTerms(this.value)" placeholder="Jane Doe, Client Corp, Project Orion">${esc(customTerms)}</textarea>
-        </label>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
-          <strong style="font-size:0.9rem; color:var(--accent);">Privacy Profiles</strong>
-          <button class="btn btn-primary" onclick="addPrivacyProfile()">${L.addTier}</button>
-        </div>
-        ${profCards}
-      </div>`;
+        <div class="card">
+          <h2>Zero-Attachment Vault Preview (File Picker)</h2>
+          <label class="btn" style="flex-direction:row; cursor:pointer;">📄 Pick Local File to Preview Sanitization &amp; @private Alias<input type="file" onchange="handleVaultPicker(event)" style="display:none;" /></label>
+          ${PICKED_PRIV_PREVIEW ? `<pre style="margin-top:10px;">${esc(PICKED_PRIV_PREVIEW)}</pre>` : ''}
+        </div>`;
     }
 
-    function renderSimpleModule(modKey, docHtml, titleText) {
-      return `<div class="card">${renderModuleHeader(modKey, docHtml, titleText)}</div>`;
+    function renderCompressionPanel() {
+      const c = CFG.compression || {};
+      const rep = CFG.report || {};
+      return `
+        <div class="card">
+          <h2>Deterministic Compression (TOON) &amp; Auto-Sizing</h2>
+          <div class="grid">
+            <label class="chk"><input type="checkbox" ${c.enable_toon!==false?'checked':''} onchange="CFG.compression.enable_toon=this.checked;" /> Enable Lossless TOON Encoder (w/ compact JSON fallback)</label>
+            <label>Minimum TOON Saving Guard (%)<input type="number" step="1" value="${c.min_toon_saving_pct ?? 10}" oninput="CFG.compression.min_toon_saving_pct=Number(this.value||10);" /></label>
+            <label>Max Memory Context Share (0.05-0.35)<input type="number" step="0.01" value="${c.max_context_share ?? 0.15}" oninput="CFG.compression.max_context_share=Number(this.value||0.15);" /></label>
+            <label>Report Language<select onchange="CFG.report.language=this.value;"><option value="auto" ${rep.language==='auto'?'selected':''}>auto</option><option value="en" ${rep.language==='en'?'selected':''}>English</option><option value="it" ${rep.language==='it'?'selected':''}>Italiano</option></select></label>
+          </div>
+          <pre style="margin-top:12px;">PYTHONPATH=src python3 -m cortical.cli tune
+PYTHONPATH=src python3 -m cortical.cli bench --compare</pre>
+        </div>`;
     }
 
-    function renderApp() {
-      const L = I18N[LANG] || I18N.it;
-      const sidebar = MOD_ORDER.map((k) => {
-        const active = SELECTED_MOD === k ? 'active' : '';
-        if (k === 'all') {
-          return `<button class="mod-btn ${active}" onclick="SELECTED_MOD='all'; renderApp();"><span>${L.allLabel}</span></button>`;
-        }
-        const m = modMeta(k);
-        const pill = m.enabled ? `<span class="badge-on">${L.on}</span>` : `<span class="badge-off">${L.off}</span>`;
-        return `<button class="mod-btn ${active}" onclick="SELECTED_MOD='${k}'; renderApp();"><span>${m.icon} ${esc(m.title)}</span>${pill}</button>`;
-      }).join('');
-
-      const panels = [];
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'context_window') panels.push(renderContextModule());
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'wiki_mcp') panels.push(renderSimpleModule('wiki_mcp', L.wkDoc, L.wkTitle));
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'privacy_sanitizer') panels.push(renderPrivacyModule());
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'skills_hub') panels.push(renderSkillEngineModule());
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'token_analytics') panels.push(renderTokenModule());
-      if (SELECTED_MOD === 'all' || SELECTED_MOD === 'permission_gate') panels.push(renderSimpleModule('permission_gate', L.pgDoc, L.pgTitle));
-
+    function render() {
+      const L = T[LANG] || T.en;
+      const body = TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : (TAB === 'privacy' ? renderPrivacyPanel() : renderCompressionPanel()));
+      const sidebar = Object.entries(L.tabs).map(([k, lbl]) => `<button class="tab ${TAB===k?'active':''}" onclick="TAB='${k}'; render();">${lbl}</button>`).join('');
       document.getElementById('app').innerHTML = `
         <div class="top">
           <div>
             <h1>${L.title}</h1>
-            <div class="desc" style="margin:4px 0 0;">
-              <span>${L.sub}</span> ·
-              <a href="./help.html" style="color:var(--accent);">❓ Help</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a>
-            </div>
+            <div style="font-size:0.84rem;color:var(--muted);">${L.sub} · <a href="./help.html" style="color:var(--accent);">❓ Help</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a></div>
           </div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-            <button class="btn" onclick="toggleLang()">${LANG === 'it' ? '🇮🇹 IT' : '🇬🇧 EN'}</button>
-            <label class="btn" style="flex-direction:row; cursor:pointer;">📂 <span>${L.import}</span><input type="file" accept=".json" onchange="importJson(event)" style="display:none;" /></label>
-            <button class="btn" onclick="downloadJson()">⬇️ ${L.download}</button>
-            <button class="btn btn-emerald" onclick="saveDirectToDisk()">💾 ${L.save}</button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn" onclick="LANG=LANG==='en'?'it':'en'; localStorage.setItem('cortical_lang',LANG); render();">${LANG==='it'?'🇮🇹 IT':'🇬🇧 EN'}</button>
+            <label class="btn" style="flex-direction:row;cursor:pointer;">📂 <span>${L.import}</span><input type="file" accept=".json" onchange="importCfg(event)" style="display:none;" /></label>
+            <button class="btn" onclick="downloadCfg()">⬇️ ${L.download}</button>
+            <button class="btn btn-em" onclick="saveCfg()">💾 ${L.save}</button>
           </div>
         </div>
-        <div class="status" id="save-status">${esc(SAVE_MSG)}</div>
+        <div class="status">${esc(SAVE_MSG)}</div>
         <div class="layout">
           <aside class="sidebar">${sidebar}</aside>
-          <main>${panels.join('')}</main>
+          <main>${body}</main>
         </div>`;
     }
 
-    window.toggleLang = function() {
-      LANG = LANG === 'it' ? 'en' : 'it';
-      localStorage.setItem('cortical_lang', LANG);
-      renderApp();
-    };
-    window.applyLang = renderApp;
-    window.populateForm = renderApp;
-    window.syncFromForm = function() { /* Live-bound to CFG */ };
-
-    window.saveDirectToDisk = async function() {
-      const L = I18N[LANG] || I18N.it;
-      const text = JSON.stringify(CFG, null, 2) + '\n';
+    window.saveCfg = async function() {
+      const L = T[LANG] || T.en;
+      const txt = JSON.stringify(CFG, null, 2) + '\n';
       if (window.showSaveFilePicker) {
         try {
-          const handle = await window.showSaveFilePicker({
-            suggestedName: 'cortical.config.json',
-            types: [{ description: 'JSON Config', accept: { 'application/json': ['.json'] } }],
-          });
-          const w = await handle.createWritable();
-          await w.write(text);
-          await w.close();
-          SAVE_MSG = L.savedDisk;
-          const st = document.getElementById('save-status');
-          if (st) st.textContent = SAVE_MSG;
-          return;
-        } catch (e) {
-          if (e.name === 'AbortError') return;
-        }
+          const h = await window.showSaveFilePicker({suggestedName:'cortical.config.json', types:[{description:'JSON', accept:{'application/json':['.json']}}]});
+          const w = await h.createWritable();
+          await w.write(txt); await w.close();
+          SAVE_MSG = L.saved; render(); return;
+        } catch(e) { if (e.name==='AbortError') return; }
       }
-      downloadJson();
+      window.downloadCfg();
     };
-
-    window.downloadJson = function() {
-      const L = I18N[LANG] || I18N.it;
-      const blob = new Blob([JSON.stringify(CFG, null, 2) + '\n'], { type: 'application/json' });
+    window.downloadCfg = function() {
+      const L = T[LANG] || T.en;
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'cortical.config.json';
-      a.click();
-      SAVE_MSG = L.downloaded;
-      const st = document.getElementById('save-status');
-      if (st) st.textContent = SAVE_MSG;
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(CFG, null, 2) + '\n'], {type:'application/json'}));
+      a.download = 'cortical.config.json'; a.click();
+      SAVE_MSG = L.downloaded; render();
     };
-
-    window.importJson = function(ev) {
-      const L = I18N[LANG] || I18N.it;
-      const file = ev.target.files?.[0];
-      if (!file) return;
-      file.text().then((txt) => {
-        CFG = JSON.parse(txt);
-        SAVE_MSG = L.imported;
-        renderApp();
-      });
+    window.importCfg = function(ev) {
+      const L = T[LANG] || T.en;
+      const f = ev.target.files?.[0];
+      if (!f) return;
+      f.text().then((t) => { CFG = JSON.parse(t); SAVE_MSG = L.imported; render(); });
     };
-
-    renderApp();
+    render();
   </script>
 </body>
 </html>
