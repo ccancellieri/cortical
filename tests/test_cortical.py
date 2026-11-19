@@ -398,6 +398,12 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
                 pr_r = srv.handle_request({"jsonrpc": "2.0", "id": 5, "method": "prompts/get", "params": {"name": "cortical-private", "arguments": {"alias": "memo"}}})
                 self.assertIn("memo", pr_r["result"]["messages"][0]["content"]["text"])
                 self.assertIsNone(srv.handle_request({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
+                for pa in ({}, {"alias": ""}, {"alias": "nope"}, {"alias": "@private:mem"}):
+                    r_ = srv.handle_request({"jsonrpc": "2.0", "id": 9, "method": "prompts/get", "params": {"name": "cortical-private", "arguments": pa}})
+                    self.assertIn("result", r_)
+                    self.assertIn("memo", r_["result"]["messages"][0]["content"]["text"])
+                c_ = srv.handle_request({"jsonrpc": "2.0", "id": 10, "method": "completion/complete", "params": {"argument": {"name": "alias", "value": "me"}}})
+                self.assertEqual(c_["result"]["completion"]["values"], ["memo"])
 
     def test_analytics_and_cli_smoke(self) -> None:
         bench = run_comparative_benchmark()

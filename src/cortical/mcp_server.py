@@ -117,6 +117,28 @@ class CorticalMCPServer:
             return {"completed_locally": True, "response": out}
         raise ValueError(f"Unknown tool: {name}")
 
+    def _private_prompt_text(self, alias: str) -> str:
+        """Never raises: empty/unknown/local-only alias yields a helpful listing instead of an MCP error."""
+        alias = alias.replace("cortical://private/", "").lstrip("@").strip()
+        safe = self.vault.list_resources(include_local_only=False)
+        names = [r["name"] for r in safe]
+        listing = ", ".join(f"@private:{n}" for n in names) or "(none)"
+        if not alias:
+            if not names:
+                return "Cortical Vault has no chat-safe items. Add files via settings.html (profile 'medium') or `cortical ingest`."
+            return "Available sanitized Cortical items: " + listing + ". Re-run with alias=<name> to inject one."
+        try:
+            item = self.vault.read_resource(alias, allow_local_only=False)
+            return f"Sanitized reference `{item['uri']}` ({item['format_used']}):\n{item['text']}"
+        except KeyError:
+            m = [n for n in names if alias.lower() in n.lower()]
+            if len(m) == 1:
+                item = self.vault.read_resource(m[0], allow_local_only=False)
+                return f"Sanitized reference `{item['uri']}` ({item['format_used']}):\n{item['text']}"
+            return f"No chat-safe item '{alias}'. Available: {listing}"
+        except Exception as exc:  # noqa: BLE001
+            return f"Item '{alias}' is not available for cloud chat ({exc}). Available: {listing}"
+
     def handle_request(self, req: dict[str, Any]) -> Optional[dict[str, Any]]:
         rid = req.get("id")
         method = str(req.get("method") or "")
@@ -128,7 +150,7 @@ class CorticalMCPServer:
             if method == "initialize":
                 result: Any = {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "completions": {}},
                     "serverInfo": {"name": "cortical-mcp", "version": "0.3.0"},
                 }
             elif method == "tools/list":
@@ -144,10 +166,14 @@ class CorticalMCPServer:
                 uri = str(params.get("uri") or "")
                 item = self.vault.read_resource(uri, allow_local_only=False)
                 result = {"contents": [{"uri": item["uri"], "mimeType": "text/plain", "text": item["text"]}]}
+            elif method == "completion/complete":
+                prefix = str((params.get("argument") or {}).get("value") or "").lower()
+                vals = [r["name"] for r in self.vault.list_resources(include_local_only=False) if r["name"].lower().startswith(prefix)]
+                result = {"completion": {"values": vals[:100], "total": len(vals), "hasMore": False}}
             elif method == "prompts/list":
                 result = {
                     "prompts": [
-                        {"name": "cortical-private", "description": "Inject sanitized @private:<alias> context", "arguments": [{"name": "alias", "required": True}]},
+                        {"name": "cortical-private", "description": "Inject sanitized @private:<alias> context (omit alias to list available items)", "arguments": [{"name": "alias", "description": "Vault alias (autocompleted)", "required": False}]},
                         {"name": "cortical-local", "description": "Run task offline on local Ollama/Unsloth model", "arguments": [{"name": "prompt", "required": True}]},
                     ]
                 }
@@ -155,8 +181,7 @@ class CorticalMCPServer:
                 pname = str(params.get("name") or "")
                 pargs = params.get("arguments") or {}
                 if pname == "cortical-private":
-                    item = self.vault.read_resource(str(pargs.get("alias") or ""), allow_local_only=False)
-                    txt = f"Sanitized reference `{item['uri']}` ({item['format_used']}):\n{item['text']}"
+                    txt = self._private_prompt_text(str(pargs.get("alias") or ""))
                 elif pname == "cortical-local":
                     txt = f"Delegate to `cortical_local_offload` locally: {pargs.get('prompt', '')}"
                 else:
