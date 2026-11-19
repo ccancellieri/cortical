@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .analytics.benchmark import run_comparative_benchmark
 from .analytics.dashboard import export_static_dashboard
+from .analytics.local_ui import serve_local_ui
 from .analytics.roi import build_roi_report, format_roi_markdown
 from .analytics.tuner import analyze_and_tune
 from .compression.engine import compress_structured
@@ -254,9 +255,89 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         _print_json(res)
         return 0
     print(f"Ingested {res['uri']} (policy={res['resolved_policy']}, profile={res['profile']}, format={res['format_used']}, tokens={res['tokens_est']})")
+    if res["local_only"]:
+        print("  NOTE: max_security (LOCAL-ONLY) — stored in Privacy Vault & visible in 'cortical vault list' / 'cortical ui'; blocked from remote cloud MCP.")
     if res["requires_confirmation"]:
         print(f"  NOTE: confirmation requested ({', '.join(res.get('reasons') or [])})")
     return 0
+
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    return serve_local_ui(
+        vault_db=args.db,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_open,
+    )
+
+
+def _cmd_vault(args: argparse.Namespace) -> int:
+    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    action = args.vault_action
+
+    if action == "list":
+        items = vault.list_items(include_local_only=True)
+        if args.json:
+            _print_json({"items": items})
+            return 0
+        if not items:
+            print("Privacy Vault is empty. Upload files via 'cortical ui' or 'cortical ingest <path>'.")
+            return 0
+        for it in items:
+            tag = "[LOCAL-ONLY max_security]" if it["local_only"] else f"[CHAT-SAFE {it['profile']}]"
+            print(f"  * @private:{it['alias']:20s} {tag:26s} {it['source_name']} ({it['entity_count']} masked, {it['tokens_est']} tok, {it['format_used']})")
+        return 0
+
+    if action == "show":
+        try:
+            item = vault.read_resource(args.alias, allow_local_only=bool(args.local_ok))
+        except (KeyError, FailClosedError) as exc:
+            if args.json:
+                _print_json({"ok": False, "error": str(exc)})
+            else:
+                print(f"[BLOCKED/MISSING] {exc} (hint: pass --local-ok to inspect local-only items offline)", file=sys.stderr)
+            return 2 if isinstance(exc, FailClosedError) else 1
+        if args.json:
+            _print_json(item)
+            return 0
+        print(f"=== {item['uri']} ({item['resolved_policy']}/{item['profile']}, {item['tokens_est']} tok, {item['format_used']}) ===")
+        print(item["text"])
+        return 0
+
+    if action == "update":
+        terms: list[str] = []
+        for raw in args.custom_term or []:
+            terms.extend([t.strip() for t in raw.split(",") if t.strip()])
+        try:
+            res = vault.re_sanitize(
+                args.alias,
+                profile=args.profile,
+                policy=args.policy,
+                custom_terms=terms or None,
+                use_local_ner=bool(args.ner),
+                config=load_cortical_config(),
+            )
+        except KeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except FailClosedError as exc:
+            print(f"[FAIL-CLOSED] {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            _print_json(res)
+            return 0
+        print(f"Updated {res['uri']} (policy={res['resolved_policy']}, profile={res['profile']}, masked={res['entity_count']}, tokens={res['tokens_est']})")
+        return 0
+
+    if action == "delete":
+        removed = vault.delete_item(args.alias)
+        if args.json:
+            _print_json({"deleted": removed, "alias": args.alias})
+            return 0 if removed else 1
+        print(f"Deleted '{args.alias}': {removed}")
+        return 0 if removed else 1
+
+    return 1
 
 
 def _cmd_intercept(args: argparse.Namespace) -> int:
@@ -439,6 +520,37 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--db", default=None)
     ing.add_argument("--json", action="store_true")
     ing.set_defaults(func=_cmd_ingest)
+
+    ui_p = sub.add_parser("ui", help="Start clean foreground localhost UI for Privacy Vault uploads, preview & settings")
+    ui_p.add_argument("--host", default="127.0.0.1")
+    ui_p.add_argument("--port", type=int, default=8765)
+    ui_p.add_argument("--no-open", action="store_true")
+    ui_p.add_argument("--db", default=None)
+    ui_p.set_defaults(func=_cmd_ui)
+
+    vlt = sub.add_parser("vault", help="List, inspect, re-sanitize, or delete Privacy Vault entries (including max_security)")
+    vlt_sub = vlt.add_subparsers(dest="vault_action", required=True)
+    v_list = vlt_sub.add_parser("list", help="List all Vault entries including local-only max_security")
+    v_list.add_argument("--db", default=None)
+    v_list.add_argument("--json", action="store_true")
+    v_show = vlt_sub.add_parser("show", help="Show sanitized content for an alias")
+    v_show.add_argument("alias")
+    v_show.add_argument("--local-ok", action="store_true", help="Allow reading max_security local-only item")
+    v_show.add_argument("--db", default=None)
+    v_show.add_argument("--json", action="store_true")
+    v_upd = vlt_sub.add_parser("update", help="Change privacy profile or mask additional custom terms")
+    v_upd.add_argument("alias")
+    v_upd.add_argument("--profile", choices=["max_security", "low", "medium", "max_context"], default=None)
+    v_upd.add_argument("--policy", choices=["auto", "fail_closed", "fail_open"], default=None)
+    v_upd.add_argument("--custom-term", action="append", default=[])
+    v_upd.add_argument("--ner", action="store_true")
+    v_upd.add_argument("--db", default=None)
+    v_upd.add_argument("--json", action="store_true")
+    v_del = vlt_sub.add_parser("delete", help="Delete a Vault item")
+    v_del.add_argument("alias")
+    v_del.add_argument("--db", default=None)
+    v_del.add_argument("--json", action="store_true")
+    vlt.set_defaults(func=_cmd_vault)
 
     ic = sub.add_parser("intercept", help="Channel 3 pre-send attachment interceptor for verified harnesses")
     ic.add_argument("--harness", required=True)

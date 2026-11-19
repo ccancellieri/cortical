@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -118,6 +119,141 @@ class PrivacyVault:
             "local_only": res["local_only"],
             "requires_confirmation": res["requires_confirmation"],
             "entity_count": res["entity_count"],
+            "format_used": comp["format_used"],
+            "tokens_est": comp["compressed_tokens_est"],
+            "saving_pct": comp["saving_pct"],
+            "sanitized_preview": comp["compressed"][:320],
+        }
+
+    def ingest_bytes(
+        self,
+        filename: str,
+        raw_bytes: bytes,
+        *,
+        alias: Optional[str] = None,
+        policy: str = "auto",
+        profile: str = "medium",
+        custom_terms: Optional[list[str]] = None,
+        use_local_ner: bool = False,
+        llm_fn: Optional[Callable[[str], str]] = None,
+        model: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Sanitizes, compresses, and stores uploaded file bytes while stripping metadata via extension handlers."""
+        safe_name = Path(filename or "upload.txt").name or "upload.txt"
+        eff_alias = alias or Path(safe_name).stem
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp) / safe_name
+            tmp_path.write_bytes(raw_bytes)
+            return self.ingest(
+                tmp_path,
+                alias=eff_alias,
+                policy=policy,
+                profile=profile,
+                custom_terms=custom_terms,
+                use_local_ner=use_local_ner,
+                llm_fn=llm_fn,
+                model=model,
+                config=config,
+            )
+
+    def list_items(self, include_local_only: bool = True) -> list[dict[str, Any]]:
+        """Lists all local Vault entries with management metadata (including `max_security` items by default)."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM vault_items ORDER BY updated_at DESC").fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            if r["local_only"] and not include_local_only:
+                continue
+            out.append({
+                "alias": r["alias"],
+                "uri": f"cortical://private/{r['alias']}",
+                "source_name": r["source_name"],
+                "resolved_policy": r["resolved_policy"],
+                "profile": r["profile"],
+                "local_only": bool(r["local_only"]),
+                "format_used": r["format_used"],
+                "entity_count": int(r["entity_count"]),
+                "tokens_est": int(r["tokens_est"]),
+                "sha256_hash": r["sha256_hash"],
+                "updated_at": float(r["updated_at"]),
+                "preview": str(r["sanitized_content"] or "")[:280],
+            })
+        return out
+
+    def delete_item(self, alias_or_uri: str) -> bool:
+        """Removes an item from Privacy Vault by alias or `cortical://private/<alias>` URI."""
+        raw = str(alias_or_uri or "").replace("cortical://private/", "").lstrip("@").strip()
+        eff_alias = self._normalize_alias(raw)
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM vault_items WHERE alias = ?", (eff_alias,))
+            return cur.rowcount > 0
+
+    def re_sanitize(
+        self,
+        alias_or_uri: str,
+        *,
+        profile: Optional[str] = None,
+        policy: Optional[str] = None,
+        custom_terms: Optional[list[str]] = None,
+        use_local_ner: bool = False,
+        llm_fn: Optional[Callable[[str], str]] = None,
+        model: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Refines privacy policy/profile or masks additional custom terms on an existing Vault item."""
+        raw = str(alias_or_uri or "").replace("cortical://private/", "").lstrip("@").strip()
+        eff_alias = self._normalize_alias(raw)
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM vault_items WHERE alias = ?", (eff_alias,)).fetchone()
+        if not row:
+            raise KeyError(f"Vault item not found: {eff_alias}")
+
+        eff_profile = str(profile or row["profile"] or "medium")
+        eff_policy = str(policy or row["resolved_policy"] or "auto")
+        res = classify_and_sanitize(
+            str(row["sanitized_content"]),
+            policy=eff_policy,
+            profile=eff_profile,
+            custom_terms=custom_terms,
+            use_local_ner=use_local_ner,
+            llm_fn=llm_fn,
+            model=model,
+            config=config,
+        )
+        comp = compress_structured(res["sanitized_text"])
+        digest = hashlib.sha256(comp["compressed"].encode("utf-8")).hexdigest()[:16]
+        total_entities = int(row["entity_count"]) + int(res["entity_count"])
+        now = time.time()
+
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE vault_items
+                   SET resolved_policy = ?, profile = ?, local_only = ?, format_used = ?,
+                       sanitized_content = ?, entity_count = ?, tokens_est = ?, sha256_hash = ?, updated_at = ?
+                   WHERE alias = ?""",
+                (
+                    res["resolved_policy"],
+                    res["profile"],
+                    1 if res["local_only"] else 0,
+                    comp["format_used"],
+                    comp["compressed"],
+                    total_entities,
+                    int(comp["compressed_tokens_est"]),
+                    digest,
+                    now,
+                    eff_alias,
+                ),
+            )
+        return {
+            "alias": eff_alias,
+            "uri": f"cortical://private/{eff_alias}",
+            "source_name": row["source_name"],
+            "resolved_policy": res["resolved_policy"],
+            "profile": res["profile"],
+            "local_only": res["local_only"],
+            "requires_confirmation": res["requires_confirmation"],
+            "entity_count": total_entities,
             "format_used": comp["format_used"],
             "tokens_est": comp["compressed_tokens_est"],
             "saving_pct": comp["saving_pct"],

@@ -295,8 +295,12 @@ PYTHONPATH=src python3 -m cortical.cli sync</pre>
           </label>
         </div>
         <div class="card">
-          <h2>Zero-Attachment Vault Preview (File Picker)</h2>
-          <label class="btn" style="flex-direction:row; cursor:pointer;">📄 Pick Local File to Preview Sanitization &amp; @private Alias<input type="file" onchange="handleVaultPicker(event)" style="display:none;" /></label>
+          <h2>Zero-Attachment Vault Preview (Static Config Only)</h2>
+          <p style="font-size:0.84rem;color:var(--muted);margin:0 0 10px;">
+            Static preview only (plain text). To upload real PDF/DOCX files into SQLite Vault and view <code>max_security</code> items, launch the local Vault UI:
+            <code>PYTHONPATH=src .venv/bin/python -m cortical.cli ui</code>
+          </p>
+          <label class="btn" style="flex-direction:row; cursor:pointer;">📄 Pick Local Text File to Preview @private Alias<input type="file" onchange="handleVaultPicker(event)" style="display:none;" /></label>
           ${{PICKED_PRIV_PREVIEW ? `<pre style="margin-top:10px;">${{esc(PICKED_PRIV_PREVIEW)}}</pre>` : ''}}
         </div>`;
     }}

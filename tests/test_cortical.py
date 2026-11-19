@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
+import zlib
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from cortical.analytics.benchmark import run_comparative_benchmark
 from cortical.analytics.dashboard import export_static_dashboard
+from cortical.analytics.local_ui import create_local_ui_server, render_local_ui_html
 from cortical.analytics.roi import build_roi_report, format_roi_markdown
 from cortical.analytics.tuner import analyze_and_tune
 from cortical.cli import main as cli_main
@@ -53,6 +59,7 @@ from cortical.privacy.sanitizer import (
     FailClosedError,
     classify_and_sanitize,
     ensure_privacy_ignore_files,
+    extract_text_and_strip_metadata,
 )
 from cortical.privacy.vault import PrivacyVault
 
@@ -424,6 +431,143 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
                 self.assertEqual(cli_main(["serve-mcp", "cortical", "--dry-run", "--json"]), 0)
                 self.assertEqual(cli_main(["dashboard", "--out-dir", str(tpath / "html"), "--json"]), 0)
             self.assertIn("compression_before_vs_after", buf.getvalue())
+
+
+def _build_synthetic_pdf(text: str, *, compressed: bool = True, author: str = "Secret PDF Author") -> bytes:
+    """Builds a minimal syntactically valid single-page PDF with optional FlateDecode stream & metadata."""
+    stream_body = f"BT\n/F1 12 Tf\n72 720 Td\n({text}) Tj\nET\n".encode("latin-1")
+    if compressed:
+        stream_data = zlib.compress(stream_body)
+        stream_hdr = f"<< /Length {len(stream_data)} /Filter /FlateDecode >>".encode("ascii")
+    else:
+        stream_data = stream_body
+        stream_hdr = f"<< /Length {len(stream_data)} >>".encode("ascii")
+
+    objs = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
+        b"4 0 obj\n" + stream_hdr + b"\nstream\n" + stream_data + b"\nendstream\nendobj\n",
+        f"5 0 obj\n<< /Author ({author}) /Title (Private Report) >>\nendobj\n".encode("latin-1"),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objs:
+        offsets.append(len(out))
+        out.extend(obj)
+    xref_pos = len(out)
+    out.extend(f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode("ascii"))
+    for off in offsets[1:]:
+        out.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    out.extend(f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R /Info 5 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("ascii"))
+    return bytes(out)
+
+
+class TestPDFVaultManagementAndLocalUI(unittest.TestCase):
+    def test_compressed_pdf_extraction_empty_pdf_fail_closed_and_vault_crud(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            pdf_path = tpath / "alsa.pdf"
+            pdf_path.write_bytes(_build_synthetic_pdf("Cliente Mario Rossi Email mario@example.org IBAN IT60X0542811101000000123456", compressed=True))
+
+            # Force stdlib zlib + Tj extractor path even when host has pdftotext
+            with patch("shutil.which", return_value=None):
+                txt, meta = extract_text_and_strip_metadata(pdf_path)
+            self.assertIn("pdf:/Author", meta)
+            self.assertIn("Mario Rossi", txt)
+            self.assertNotIn("Secret PDF Author", txt)
+
+            empty_pdf = tpath / "scanned.pdf"
+            empty_pdf.write_bytes(b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
+            with patch("shutil.which", return_value=None):
+                with self.assertRaises(FailClosedError):
+                    extract_text_and_strip_metadata(empty_pdf)
+
+            vault = PrivacyVault(tpath / "vault.db")
+            ing = vault.ingest_bytes("alsa.pdf", pdf_path.read_bytes(), profile="max_security", custom_terms=["Mario Rossi"])
+            self.assertEqual(ing["alias"], "alsa")
+            self.assertTrue(ing["local_only"])
+
+            # Local management lists max_security; cloud MCP resources hide it
+            all_items = vault.list_items(include_local_only=True)
+            self.assertEqual(len(all_items), 1)
+            self.assertEqual(all_items[0]["alias"], "alsa")
+            self.assertEqual(vault.list_resources(include_local_only=False), [])
+
+            # Re-sanitize to medium with extra custom term makes it chat-safe
+            upd = vault.re_sanitize("alsa", profile="medium", custom_terms=["Cliente"])
+            self.assertFalse(upd["local_only"])
+            self.assertEqual(len(vault.list_resources(include_local_only=False)), 1)
+            read_ok = vault.read_resource("alsa", allow_local_only=False)
+            self.assertNotIn("mario@example.org", read_ok["text"])
+            self.assertNotIn("Mario Rossi", read_ok["text"])
+
+            self.assertTrue(vault.delete_item("alsa"))
+            self.assertEqual(vault.list_items(), [])
+
+    def test_local_ui_server_e2e_and_cli_vault_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            db_p = tpath / "vault.db"
+            cfg_p = tpath / "cfg.json"
+            srv = create_local_ui_server(vault_db=db_p, port=0, config_path=cfg_p)
+            port = srv.server_address[1]
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{port}"
+                with urllib.request.urlopen(f"{base}/") as r:
+                    html = r.read().decode("utf-8")
+                self.assertIn("Privacy Vault", html)
+
+                pdf_bytes = _build_synthetic_pdf("ALSA Private Test bob@alsa.example IBAN IT60X0542811101000000123456", compressed=True)
+                req = urllib.request.Request(
+                    f"{base}/api/vault/upload",
+                    data=json.dumps({
+                        "filename": "alsa.pdf",
+                        "content_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+                        "policy": "auto",
+                        "profile": "max_security",
+                        "custom_terms": ["ALSA Private Test"],
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req) as r:
+                    up_res = json.loads(r.read().decode("utf-8"))
+                self.assertEqual(up_res["alias"], "alsa")
+                self.assertTrue(up_res["local_only"])
+
+                # Vault listing MUST display the max_security file!
+                with urllib.request.urlopen(f"{base}/api/vault") as r:
+                    items = json.loads(r.read().decode("utf-8"))["items"]
+                self.assertEqual([i["alias"] for i in items], ["alsa"])
+                self.assertTrue(items[0]["local_only"])
+
+                # Preview endpoint returns extracted stripped & sanitized text
+                with urllib.request.urlopen(f"{base}/api/vault/alsa") as r:
+                    det = json.loads(r.read().decode("utf-8"))
+                self.assertNotIn("bob@alsa.example", det["text"])
+                self.assertNotIn("ALSA Private Test", det["text"])
+
+                # CLI vault list / show --local-ok / update / delete smoke tests
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    self.assertEqual(cli_main(["vault", "list", "--db", str(db_p), "--json"]), 0)
+                    self.assertEqual(cli_main(["vault", "show", "alsa", "--local-ok", "--db", str(db_p), "--json"]), 0)
+                    self.assertEqual(cli_main(["vault", "update", "alsa", "--profile", "medium", "--db", str(db_p), "--json"]), 0)
+                    self.assertEqual(cli_main(["vault", "delete", "alsa", "--db", str(db_p), "--json"]), 0)
+                self.assertIn("alsa", buf.getvalue())
+
+                with urllib.request.urlopen(f"{base}/api/vault") as r:
+                    self.assertEqual(json.loads(r.read().decode("utf-8"))["items"], [])
+                with urllib.request.urlopen(f"{base}/api/sync-preview") as r:
+                    sync_p = json.loads(r.read().decode("utf-8"))
+                self.assertTrue(sync_p["dry_run"])
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                thread.join(timeout=2.0)
 
 
 if __name__ == "__main__":

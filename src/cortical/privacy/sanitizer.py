@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -26,6 +30,52 @@ _SENSITIVE_FOLDER_HINTS = ("private", "secret", "vault", "hr", "contract", "fina
 
 class FailClosedError(RuntimeError):
     """Raised whenever a `fail_closed` sanitization or local NER check cannot guarantee safe output."""
+
+
+def _unescape_pdf_literal(raw: bytes) -> str:
+    txt = raw.decode("latin-1", errors="replace")
+    txt = txt.replace(r"\\", "\x00").replace(r"\(", "(").replace(r"\)", ")")
+    txt = txt.replace(r"\n", "\n").replace(r"\r", "\n").replace(r"\t", "\t")
+    return txt.replace("\x00", "\\")
+
+
+def _extract_pdf_text_stdlib(raw_bytes: bytes) -> str:
+    """Pure-stdlib fallback extracting text from FlateDecode streams & PDF Tj/TJ text operators."""
+    chunks: list[str] = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\n?endstream", raw_bytes, flags=re.S):
+        payload = m.group(1)
+        data = payload
+        try:
+            data = zlib.decompress(payload)
+        except Exception:  # noqa: BLE001
+            pass
+        # Extract text-showing operators: (...) Tj and [(...) ...] TJ
+        for op in re.finditer(rb"(\((?:\\.|[^\\()])*\))\s*Tj|\[((?:\\.|[^\[\]])*)\]\s*TJ", data, flags=re.S):
+            if op.group(1):
+                s = _unescape_pdf_literal(op.group(1)[1:-1])
+                if s.strip():
+                    chunks.append(s)
+            elif op.group(2):
+                parts = [
+                    _unescape_pdf_literal(p.group(1))
+                    for p in re.finditer(rb"\(((?:\\.|[^\\()])*)\)", op.group(2), flags=re.S)
+                ]
+                joined = "".join(parts).strip()
+                if joined:
+                    chunks.append(joined)
+    if not chunks:
+        cleaned = re.sub(rb"/(Author|Creator|Producer|Company|Title|Subject)\s*\([^)]*\)", b"", raw_bytes)
+        for lit in re.finditer(rb"\(((?:\\.|[^\\()]){3,300})\)", cleaned):
+            s = _unescape_pdf_literal(lit.group(1)).strip()
+            if s and not s.startswith("/"):
+                chunks.append(s)
+    return "\n".join(chunks)
+
+
+def _normalize_extracted_text(text: str) -> str:
+    cleaned = "".join(ch for ch in text if ch in "\n\t\r" or ord(ch) >= 32)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
@@ -53,7 +103,7 @@ def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
                             texts.append(" ".join(parts))
                     except ET.ParseError:
                         continue
-        return ("\n".join(texts), stripped)
+        return (_normalize_extracted_text("\n".join(texts)), stripped)
 
     raw_bytes = p.read_bytes()
     if suffix == ".pdf":
@@ -61,16 +111,55 @@ def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
         for tag in ("Author", "Creator", "Producer", "Company", "Title", "Subject"):
             if re.search(rf"/{tag}\s*\(", raw_str):
                 stripped.append(f"pdf:/{tag}")
-        cleaned = re.sub(r"/(Author|Creator|Producer|Company)\s*\([^)]*\)", "", raw_str)
-        chunks = re.findall(r"\(([^()]{3,200})\)", cleaned)
-        return ("\n".join(chunks) if chunks else "", stripped)
+
+        extracted = ""
+        pdftotext_bin = shutil.which("pdftotext")
+        mutool_bin = shutil.which("mutool")
+        if pdftotext_bin:
+            proc = subprocess.run(
+                [pdftotext_bin, "-layout", "-nopgbrk", str(p), "-"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                extracted = proc.stdout
+        if not extracted.strip() and mutool_bin:
+            proc = subprocess.run(
+                [mutool_bin, "draw", "-F", "txt", str(p)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                extracted = proc.stdout
+        if not extracted.strip():
+            extracted = _extract_pdf_text_stdlib(raw_bytes)
+
+        norm = _normalize_extracted_text(extracted)
+        if len(re.sub(r"\s+", "", norm)) < 5:
+            raise FailClosedError(
+                "PDF contains no extractable text layer (scanned/image-only PDF). Run local OCR first or convert to text."
+            )
+        return (norm, stripped)
 
     text = raw_bytes.decode("utf-8", errors="replace")
     for hdr in ("author:", "email:", "company:"):
         if hdr in text[:500].lower():
             stripped.append(f"header:{hdr.rstrip(':')}")
     text = re.sub(r"(?im)^(author|email|company)\s*:\s*.*$", "", text)
-    return (text.strip(), stripped)
+    return (_normalize_extracted_text(text), stripped)
+
+
+def extract_text_from_bytes(filename: str, raw_bytes: bytes) -> tuple[str, list[str]]:
+    """Extracts text and strips metadata from in-memory bytes while preserving extension handlers."""
+    safe_name = Path(filename or "upload.txt").name or "upload.txt"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp) / safe_name
+        tmp_path.write_bytes(raw_bytes)
+        return extract_text_and_strip_metadata(tmp_path)
 
 
 def pseudonymize_structured(
@@ -211,6 +300,8 @@ def classify_and_sanitize(
                 "requires_confirmation": False,
                 "error": str(exc),
             }
+        if isinstance(exc, FailClosedError):
+            raise
         raise FailClosedError(f"Failed to read/extract content cleanly: {exc}") from exc
 
     # Inspect sensitivity signals

@@ -99,8 +99,14 @@ See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for all 8 harnesses (`antigra
 ## Daily CLI Commands & Verification
 
 ```bash
-# Privacy Vault ingestion (dynamic auto | fail_closed | fail_open)
-PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.docx --alias client_brief --policy auto --profile medium
+# Launch clean localhost UI to upload/anonymize PDF/DOCX/TXT & inspect Vault (incl. max_security)
+PYTHONPATH=src .venv/bin/python -m cortical.cli ui
+
+# Or ingest & manage Privacy Vault directly from CLI (`auto` | `fail_closed` | `fail_open`)
+PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.pdf --alias client_brief --policy auto --profile medium
+PYTHONPATH=src .venv/bin/python -m cortical.cli vault list
+PYTHONPATH=src .venv/bin/python -m cortical.cli vault show client_brief --local-ok
+PYTHONPATH=src .venv/bin/python -m cortical.cli vault update client_brief --custom-term "Client Name" --profile medium
 
 # Lossless TOON / XML / YAML / log compression
 PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json

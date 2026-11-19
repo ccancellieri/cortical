@@ -6,6 +6,7 @@ from .sanitizer import (
     detect_entities_local_llm,
     ensure_privacy_ignore_files,
     extract_text_and_strip_metadata,
+    extract_text_from_bytes,
     pseudonymize_structured,
 )
 from .vault import VERIFIED_PRESEND_HARNESSES, PrivacyVault
@@ -18,5 +19,6 @@ __all__ = [
     "detect_entities_local_llm",
     "ensure_privacy_ignore_files",
     "extract_text_and_strip_metadata",
+    "extract_text_from_bytes",
     "pseudonymize_structured",
 ]
