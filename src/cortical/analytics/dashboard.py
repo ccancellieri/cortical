@@ -12,8 +12,52 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..config import DEFAULT_CONFIG, load_cortical_config
-from ..harnesses.adapters import get_harness_presend_matrix
+from ..harnesses.adapters import ALL_HARNESSES, get_harness_presend_matrix, resolve_user_paths
 from ..hardware.models import BUILTIN_MODEL_CATALOG
+
+
+def _tilde(p: Path) -> str:
+    raw, home = str(p), str(Path.home())
+    return "~" + raw[len(home):] if raw.startswith(home) else raw
+
+
+def build_dashboard_env(repo_root: Optional[Path] = None, os_name: Optional[str] = None, public: bool = False) -> dict[str, Any]:
+    """Describes local setup (folder to link, harness detection/link status) for the guided Setup tab."""
+    base_cmd = "PYTHONPATH=src .venv/bin/python -m cortical.cli sync"
+    if public:
+        return {
+            "public": True,
+            "repo_display": "<cartella-cortical>",
+            "data_display": "<cartella-cortical>/.cortical_data",
+            "harness_status": {},
+            "sync_cmd_base": f"cd /path/to/cortical && {base_cmd}",
+        }
+    root = Path(repo_root or Path.cwd()).resolve()
+    paths = resolve_user_paths(os_name=os_name)
+    primary = {"antigravity": "mcp", "pi": "mcp", "opencode": "opencode", "openclaw": "config",
+               "codex": "config", "claude-code": "mcp", "dsh": "settings", "unsloth-studio": "manifest"}
+    home = Path.home()
+    status: dict[str, Any] = {}
+    for h in ALL_HARNESSES:
+        cfg_p = paths[h][primary[h]]
+        exists = cfg_p.is_file()
+        linked = False
+        if exists:
+            try:
+                linked = "cortical" in cfg_p.read_text(encoding="utf-8", errors="ignore").lower()
+            except OSError:
+                linked = False
+        detected = exists or (cfg_p.parent != home and cfg_p.parent.is_dir())
+        status[h] = {"detected": detected, "linked": linked, "config": _tilde(cfg_p)}
+    rd = _tilde(root)
+    cd = rd if " " not in rd else f'"{rd}"'
+    return {
+        "public": False,
+        "repo_display": rd,
+        "data_display": rd + "/.cortical_data",
+        "harness_status": status,
+        "sync_cmd_base": f"cd {cd} && {base_cmd}",
+    }
 
 
 def _nav_links(is_help: bool, public_docs: bool) -> str:
@@ -91,6 +135,7 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     const HW = __HW_JSON__;
     const CATALOG = __CATALOG_JSON__;
     const PRESEND = __PRESEND_JSON__;
+    const ENV = __ENV_JSON__;
 
     const I18N = {
       en: {
@@ -98,6 +143,7 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
         sub: '100% client-side (zero ports, zero daemons) · __NAV__',
         save: 'Save Config', download: 'Export Config JSON', import: 'Import Config',
         tabs: {
+          setup: '🚀 Guided Setup',
           vault: '🛡️ Privacy Vault',
           models: '🧠 Hardware & Models',
           harnesses: '🔌 8 Harnesses & Composer',
@@ -136,6 +182,7 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
         sub: '100% client-side (zero porte, zero demoni) · __NAV__',
         save: 'Salva Config', download: 'Esporta Config', import: 'Importa Config',
         tabs: {
+          setup: '🚀 Setup guidato',
           vault: '🛡️ Privacy Vault',
           models: '🧠 Hardware & Modelli',
           harnesses: '🔌 8 Harness & Compositore',
@@ -172,7 +219,9 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     };
 
     let LANG = localStorage.getItem('cortical_lang') || ((navigator.language || '').toLowerCase().startsWith('it') ? 'it' : 'en');
-    let TAB = 'vault';
+    let TAB = localStorage.getItem('cortical_setup_done') ? 'vault' : 'setup';
+    let SETUP_SEL = null;
+    let FOLDER_WARN = '';
     let ITEMS = [];
     let SELECTED_FILE = null;
     let SEL_PROFILE = 'max_security';
@@ -323,6 +372,16 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       }
       try {
         const h = await window.showDirectoryPicker({ mode: 'readwrite' });
+        let valid = h.name === '.cortical_data';
+        if (!valid) { try { await h.getDirectoryHandle('.cortical_data'); valid = true; } catch {} }
+        if (!valid) { try { await h.getFileHandle('pyproject.toml'); valid = true; } catch {} }
+        if (!valid) {
+          FOLDER_WARN = (LANG === 'it' ? 'La cartella scelta ("' + h.name + '") non sembra quella di Cortical. Scegli: ' : 'Chosen folder ("' + h.name + '") does not look like Cortical. Choose: ') + ENV.repo_display;
+          setBanner('err', FOLDER_WARN);
+          return;
+        }
+        FOLDER_WARN = '';
+        localStorage.setItem('cortical_setup_done', '1');
         DIR_HANDLE = h;
         NEEDS_REAUTH = false;
         await idbSaveHandle(h);
@@ -728,6 +787,76 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       render();
     }
 
+
+    function copyText(t, msg) {
+      if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+      setBanner('ok', msg || (LANG === 'it' ? 'Copiato negli appunti.' : 'Copied to clipboard.'));
+    }
+    function toggleSetupHarness(h, v) { SETUP_SEL[h] = v; CFG.harnesses = CFG.harnesses || {}; CFG.harnesses[h] = v; render(); }
+
+    function renderSetupPanel(L) {
+      const it = LANG === 'it';
+      const linked = !!DIR_HANDLE && !NEEDS_REAUTH;
+      const hs = ENV.harness_status || {};
+      const names = Object.keys(PRESEND);
+      if (!SETUP_SEL) {
+        SETUP_SEL = {};
+        names.forEach((h) => { SETUP_SEL[h] = ENV.public ? false : Boolean((hs[h] || {}).detected); });
+      }
+      const chosen = names.filter((h) => SETUP_SEL[h]);
+      const cmd = ENV.sync_cmd_base + (chosen.length ? ' --harness ' + chosen.join(',') : '');
+      const rows = names.map((h) => {
+        const st = hs[h] || {};
+        const badge = ENV.public ? '<span class="pill pill-pub">?</span>'
+          : (st.linked ? '<span class="pill pill-ok">✅ ' + (it ? 'già collegato' : 'already linked') + '</span>'
+            : (st.detected ? '<span class="pill pill-warn">⚠️ ' + (it ? 'rilevato, da collegare' : 'detected, not linked') + '</span>'
+              : '<span class="pill pill-pub">➖ ' + (it ? 'non rilevato' : 'not detected') + '</span>'));
+        return `<label class="chk" style="justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card2);">
+          <span><input type="checkbox" ${SETUP_SEL[h] ? 'checked' : ''} onchange="toggleSetupHarness('${h}', this.checked)" /> <b>${h}</b>
+          <span style="font-size:0.74rem;color:var(--muted);">${esc(st.config || '')}</span></span>${badge}</label>`;
+      }).join('');
+      const stepN = (n, ok) => `<span class="pill ${ok ? 'pill-ok' : 'pill-warn'}" style="margin-right:6px;">${ok ? '✅' : n}</span>`;
+      return `
+        <div class="card">
+          <h2>${stepN(1, linked)}${it ? 'Collega la cartella di Cortical (1 volta)' : 'Link the Cortical folder (once)'}</h2>
+          <p style="font-size:0.88rem;color:var(--muted);margin:0 0 10px;">
+            ${it ? 'Serve per far leggere agli agenti i file che carichi qui. Si aprirà il selettore cartelle del sistema: scegli questa cartella (quella del progetto, <b>non</b> serve entrare in .cortical_data):' : 'This lets your agents read files you add here. Your system folder picker will open: choose this folder (the project folder; you do <b>not</b> need to enter .cortical_data):'}
+          </p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+            <code style="font-size:0.95rem;">${esc(ENV.repo_display)}</code>
+            <button class="btn" onclick="copyText('${esc(ENV.repo_display)}')">📋 ${it ? 'Copia percorso' : 'Copy path'}</button>
+          </div>
+          <ul style="margin:0 0 12px 18px;padding:0;font-size:0.84rem;color:var(--muted);">
+            <li>${it ? 'macOS: nel selettore premi <b>Cmd+Maiusc+G</b>, incolla il percorso e premi Invio, poi <b>Seleziona</b>.' : 'macOS: in the picker press <b>Cmd+Shift+G</b>, paste the path, Enter, then <b>Select</b>.'}</li>
+            <li>${it ? 'Windows/Linux: naviga fino alla cartella e premi <b>Seleziona cartella</b>.' : 'Windows/Linux: browse to the folder and press <b>Select folder</b>.'}</li>
+            <li>${it ? 'Conferma "Consenti modifiche" quando il browser lo chiede. Nessun dato lascia il computer.' : 'Confirm "Allow changes" when asked. No data leaves your computer.'}</li>
+          </ul>
+          ${FOLDER_WARN ? `<div class="alert err" style="display:block;">${esc(FOLDER_WARN)}</div>` : ''}
+          ${linked
+            ? `<div class="alert ok" style="display:block;">✅ ${it ? 'Collegata' : 'Linked'}: <b>${esc(DIR_HANDLE.name)}</b></div>`
+            : `<button class="btn btn-primary" onclick="linkCorticalFolder()">📂 ${it ? 'Scegli la cartella...' : 'Choose folder...'}</button>
+               ${typeof window.showDirectoryPicker !== 'function' ? `<p style="font-size:0.82rem;color:var(--amber);">${it ? 'Questo browser non supporta il collegamento diretto (usa Chrome, Edge o Arc). Puoi comunque usare il Vault e scaricare i file con ⬇️ JSON in ' + esc(ENV.data_display) + '/vault/.' : 'This browser cannot link folders directly (use Chrome, Edge or Arc). You can still use the Vault and download files with ⬇️ JSON into ' + esc(ENV.data_display) + '/vault/.'}</p>` : ''}`}
+        </div>
+        <div class="card">
+          <h2>${stepN(2, chosen.length > 0 && chosen.every((h) => (hs[h] || {}).linked))}${it ? 'Scegli gli harness che usi' : 'Pick the harnesses you use'}</h2>
+          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${ENV.public
+            ? (it ? 'Seleziona quelli che usi. Per rilevare automaticamente quelli installati e il loro stato, apri la tua copia locale html/settings.html.' : 'Select the ones you use. To auto-detect installed ones and their status, open your local html/settings.html.')
+            : (it ? 'Rilevati automaticamente dal tuo computer. Il browser non può modificare le configurazioni degli harness: copia il comando qui sotto e incollalo nel terminale (prima in anteprima, poi reale).' : 'Auto-detected on your computer. A browser cannot edit harness configs: copy the command below into a terminal (preview first, then real).')}</p>
+          <div class="grid" style="margin-bottom:12px;">${rows}</div>
+          <pre style="margin:0 0 8px;">${esc(cmd + ' --dry-run')}</pre>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn" onclick="copyText('${esc(cmd)} --dry-run'.replace(/&amp;/g,'&'))">📋 ${it ? '1) Copia anteprima (dry-run)' : '1) Copy preview (dry-run)'}</button>
+            <button class="btn btn-em" onclick="copyText('${esc(cmd)}'.replace(/&amp;/g,'&'))">📋 ${it ? '2) Copia comando reale' : '2) Copy real command'}</button>
+          </div>
+          <p style="font-size:0.78rem;color:var(--muted);margin:10px 0 0;">${it ? 'Ogni sync crea un backup ripristinabile con --rollback. Poi riavvia l\'harness per caricare il server MCP "cortical-mcp".' : 'Every sync creates a backup restorable with --rollback. Then restart the harness to load the "cortical-mcp" server.'}</p>
+        </div>
+        <div class="card">
+          <h2>${stepN(3, ITEMS.length > 0)}${it ? 'Carica il tuo primo file' : 'Add your first file'}</h2>
+          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${it ? 'Vai al Privacy Vault, trascina il documento e scegli il livello di privacy. In chat userai @private:<alias> (profilo "Anonimizzato per Chat").' : 'Go to Privacy Vault, drop the document and pick a privacy level. In chat use @private:<alias> ("Anonymized for Chat" profile).'}</p>
+          <button class="btn btn-primary" onclick="TAB='vault'; render();">🛡️ ${it ? 'Apri Privacy Vault' : 'Open Privacy Vault'}</button>
+        </div>`;
+    }
+
     function renderVaultPanel(L) {
       const total = ITEMS.length;
       const localCount = ITEMS.filter((i) => i.local_only).length;
@@ -943,13 +1072,13 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare</pre>
 
     function render() {
       const L = I18N[LANG] || I18N.en;
-      const body = TAB === 'vault' ? renderVaultPanel(L) : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
+      const body = TAB === 'setup' ? renderSetupPanel(L) : TAB === 'vault' ? renderVaultPanel(L) : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
       const sidebar = Object.entries(L.tabs).map(([k, lbl]) => `<button class="tab ${TAB===k?'active':''}" onclick="TAB='${k}'; render();">${lbl}</button>`).join('');
       const syncStatus = DIR_HANDLE
         ? (NEEDS_REAUTH
             ? `<span>${esc(L.syncLinked)}<b>${esc(DIR_HANDLE.name)}</b></span><button class="btn btn-primary" onclick="reauthorizeFolder()">${L.reconnectBtn}</button>`
             : `<span style="color:var(--emerald);">✅ ${esc(L.syncLinked)}<b>${esc(DIR_HANDLE.name)}</b></span><button class="btn" onclick="syncFolderAndDb()">↻ Sync Vault</button>`)
-        : `<span style="color:var(--muted);">${esc(L.syncUnset)}</span><button class="btn btn-primary" onclick="linkCorticalFolder()">${L.connectBtn}</button>`;
+        : `<span style="color:var(--muted);">${esc(L.syncUnset)}</span><button class="btn btn-primary" onclick="TAB='setup'; render();">🚀 ${LANG==='it'?'Guida al collegamento':'Linking guide'}</button>`;
 
       document.getElementById('app').innerHTML = `
         <div class="top">
@@ -1019,6 +1148,7 @@ def render_static_settings_html(
     cfg: Optional[dict[str, Any]] = None,
     hw: Optional[dict[str, Any]] = None,
     public_docs: bool = False,
+    env: Optional[dict[str, Any]] = None,
 ) -> str:
     """Renders Zero-Server Static Privacy Vault + Model/Harness Configurator HTML."""
     data = copy.deepcopy(cfg) if cfg is not None else (copy.deepcopy(DEFAULT_CONFIG) if public_docs else load_cortical_config())
@@ -1034,6 +1164,8 @@ def render_static_settings_html(
     html = html.replace("__CFG_JSON__", json.dumps(data, ensure_ascii=False).replace("</", "<\\/"))
     html = html.replace("__HW_JSON__", json.dumps(hw_snap, ensure_ascii=False).replace("</", "<\\/"))
     html = html.replace("__CATALOG_JSON__", json.dumps(BUILTIN_MODEL_CATALOG, ensure_ascii=False).replace("</", "<\\/"))
+    env_data = env if env is not None else build_dashboard_env(public=public_docs)
+    html = html.replace("__ENV_JSON__", json.dumps(env_data, ensure_ascii=False).replace("</", "<\\/"))
     html = html.replace("__PRESEND_JSON__", json.dumps(get_harness_presend_matrix(), ensure_ascii=False).replace("</", "<\\/"))
     return html
 
@@ -1106,6 +1238,6 @@ def export_static_dashboard(
     out.mkdir(parents=True, exist_ok=True)
     s_path = out / "settings.html"
     h_path = out / "help.html"
-    s_path.write_text(render_static_settings_html(cfg=config, hw=hw, public_docs=public_docs), encoding="utf-8")
+    s_path.write_text(render_static_settings_html(cfg=config, hw=hw, public_docs=public_docs, env=build_dashboard_env(public=public_docs)), encoding="utf-8")
     h_path.write_text(render_static_help_html(public_docs=public_docs), encoding="utf-8")
     return (s_path, h_path)

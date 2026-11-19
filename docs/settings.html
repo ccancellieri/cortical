@@ -64,6 +64,7 @@
     const HW = {"os": "cross-platform", "total_ram_gb": 16.0, "vram_gb": 4.0, "unified_memory": false, "classification": {"tier": "tier_1a_hybrid_laptop", "label": "Tier 1A · Hybrid / Variable"}};
     const CATALOG = [{"model_id": "qwen2.5:1.5b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:1.5b", "memory_gb": 1.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner"], "notes": "Fits completely in 4 GB VRAM; ultra-fast intent routing & JSON NER."}, {"model_id": "qwen2.5:3b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:3b", "memory_gb": 2.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner", "fast_coder"], "notes": "Fits comfortably in 4 GB VRAM for hybrid laptops; strong JSON extraction."}, {"model_id": "qwen3:8b", "runner": "ollama", "pull_ref": "ollama pull qwen3:8b", "memory_gb": 5.2, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["daily_coder", "reviewer"], "notes": "Fast tool-calling reviewer & hybrid offload coder on 16 GB laptops."}, {"model_id": "qwen3.5:9b-q3_k_xl", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q3_K_XL", "memory_gb": 5.1, "native_ctx": 131072, "quantization": "Unsloth Dynamic UD-Q3_K_XL", "is_variable_quant": true, "roles": ["daily_coder", "long_context", "reviewer"], "notes": "Variable-precision Unsloth dynamic quant (5.1 GB, up to 131K ctx)."}, {"model_id": "qwen3.8:27b-iq2_xxs", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS", "memory_gb": 7.2, "native_ctx": 32768, "quantization": "Unsloth Dynamic UD-IQ2_XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB."}, {"model_id": "qwen3.8:27b-q4_xxs", "runner": "ollama", "pull_ref": "ollama pull qwen3.8:27b-q4_xxs", "memory_gb": 8.1, "native_ctx": 32768, "quantization": "Unsloth Variable 4-bit XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Variable 4-bit XXS (~8.1 GB): deep reasoning, architecture & orchestration on 16 GB unified RAM."}, {"model_id": "qwen2.5-coder:32b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5-coder:32b", "memory_gb": 19.5, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["deep_reasoner", "daily_coder"], "notes": "Workstation-class coder for 32+ GB RAM / 24+ GB VRAM machines."}];
     const PRESEND = {"antigravity": false, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": false};
+    const ENV = {"public": true, "repo_display": "<cartella-cortical>", "data_display": "<cartella-cortical>/.cortical_data", "harness_status": {}, "sync_cmd_base": "cd /path/to/cortical && PYTHONPATH=src .venv/bin/python -m cortical.cli sync"};
 
     const I18N = {
       en: {
@@ -71,6 +72,7 @@
         sub: '100% client-side (zero ports, zero daemons) · <a href="./help.html" style="color:var(--accent);">❓ Help</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a>',
         save: 'Save Config', download: 'Export Config JSON', import: 'Import Config',
         tabs: {
+          setup: '🚀 Guided Setup',
           vault: '🛡️ Privacy Vault',
           models: '🧠 Hardware & Models',
           harnesses: '🔌 8 Harnesses & Composer',
@@ -109,6 +111,7 @@
         sub: '100% client-side (zero porte, zero demoni) · <a href="./help.html" style="color:var(--accent);">❓ Help</a> · <a href="./index.html" style="color:var(--accent);">🏠 Home</a> · <a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener" style="color:var(--accent);">GitHub</a>',
         save: 'Salva Config', download: 'Esporta Config', import: 'Importa Config',
         tabs: {
+          setup: '🚀 Setup guidato',
           vault: '🛡️ Privacy Vault',
           models: '🧠 Hardware & Modelli',
           harnesses: '🔌 8 Harness & Compositore',
@@ -145,7 +148,9 @@
     };
 
     let LANG = localStorage.getItem('cortical_lang') || ((navigator.language || '').toLowerCase().startsWith('it') ? 'it' : 'en');
-    let TAB = 'vault';
+    let TAB = localStorage.getItem('cortical_setup_done') ? 'vault' : 'setup';
+    let SETUP_SEL = null;
+    let FOLDER_WARN = '';
     let ITEMS = [];
     let SELECTED_FILE = null;
     let SEL_PROFILE = 'max_security';
@@ -296,6 +301,16 @@
       }
       try {
         const h = await window.showDirectoryPicker({ mode: 'readwrite' });
+        let valid = h.name === '.cortical_data';
+        if (!valid) { try { await h.getDirectoryHandle('.cortical_data'); valid = true; } catch {} }
+        if (!valid) { try { await h.getFileHandle('pyproject.toml'); valid = true; } catch {} }
+        if (!valid) {
+          FOLDER_WARN = (LANG === 'it' ? 'La cartella scelta ("' + h.name + '") non sembra quella di Cortical. Scegli: ' : 'Chosen folder ("' + h.name + '") does not look like Cortical. Choose: ') + ENV.repo_display;
+          setBanner('err', FOLDER_WARN);
+          return;
+        }
+        FOLDER_WARN = '';
+        localStorage.setItem('cortical_setup_done', '1');
         DIR_HANDLE = h;
         NEEDS_REAUTH = false;
         await idbSaveHandle(h);
@@ -701,6 +716,76 @@
       render();
     }
 
+
+    function copyText(t, msg) {
+      if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
+      setBanner('ok', msg || (LANG === 'it' ? 'Copiato negli appunti.' : 'Copied to clipboard.'));
+    }
+    function toggleSetupHarness(h, v) { SETUP_SEL[h] = v; CFG.harnesses = CFG.harnesses || {}; CFG.harnesses[h] = v; render(); }
+
+    function renderSetupPanel(L) {
+      const it = LANG === 'it';
+      const linked = !!DIR_HANDLE && !NEEDS_REAUTH;
+      const hs = ENV.harness_status || {};
+      const names = Object.keys(PRESEND);
+      if (!SETUP_SEL) {
+        SETUP_SEL = {};
+        names.forEach((h) => { SETUP_SEL[h] = ENV.public ? false : Boolean((hs[h] || {}).detected); });
+      }
+      const chosen = names.filter((h) => SETUP_SEL[h]);
+      const cmd = ENV.sync_cmd_base + (chosen.length ? ' --harness ' + chosen.join(',') : '');
+      const rows = names.map((h) => {
+        const st = hs[h] || {};
+        const badge = ENV.public ? '<span class="pill pill-pub">?</span>'
+          : (st.linked ? '<span class="pill pill-ok">✅ ' + (it ? 'già collegato' : 'already linked') + '</span>'
+            : (st.detected ? '<span class="pill pill-warn">⚠️ ' + (it ? 'rilevato, da collegare' : 'detected, not linked') + '</span>'
+              : '<span class="pill pill-pub">➖ ' + (it ? 'non rilevato' : 'not detected') + '</span>'));
+        return `<label class="chk" style="justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card2);">
+          <span><input type="checkbox" ${SETUP_SEL[h] ? 'checked' : ''} onchange="toggleSetupHarness('${h}', this.checked)" /> <b>${h}</b>
+          <span style="font-size:0.74rem;color:var(--muted);">${esc(st.config || '')}</span></span>${badge}</label>`;
+      }).join('');
+      const stepN = (n, ok) => `<span class="pill ${ok ? 'pill-ok' : 'pill-warn'}" style="margin-right:6px;">${ok ? '✅' : n}</span>`;
+      return `
+        <div class="card">
+          <h2>${stepN(1, linked)}${it ? 'Collega la cartella di Cortical (1 volta)' : 'Link the Cortical folder (once)'}</h2>
+          <p style="font-size:0.88rem;color:var(--muted);margin:0 0 10px;">
+            ${it ? 'Serve per far leggere agli agenti i file che carichi qui. Si aprirà il selettore cartelle del sistema: scegli questa cartella (quella del progetto, <b>non</b> serve entrare in .cortical_data):' : 'This lets your agents read files you add here. Your system folder picker will open: choose this folder (the project folder; you do <b>not</b> need to enter .cortical_data):'}
+          </p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+            <code style="font-size:0.95rem;">${esc(ENV.repo_display)}</code>
+            <button class="btn" onclick="copyText('${esc(ENV.repo_display)}')">📋 ${it ? 'Copia percorso' : 'Copy path'}</button>
+          </div>
+          <ul style="margin:0 0 12px 18px;padding:0;font-size:0.84rem;color:var(--muted);">
+            <li>${it ? 'macOS: nel selettore premi <b>Cmd+Maiusc+G</b>, incolla il percorso e premi Invio, poi <b>Seleziona</b>.' : 'macOS: in the picker press <b>Cmd+Shift+G</b>, paste the path, Enter, then <b>Select</b>.'}</li>
+            <li>${it ? 'Windows/Linux: naviga fino alla cartella e premi <b>Seleziona cartella</b>.' : 'Windows/Linux: browse to the folder and press <b>Select folder</b>.'}</li>
+            <li>${it ? 'Conferma "Consenti modifiche" quando il browser lo chiede. Nessun dato lascia il computer.' : 'Confirm "Allow changes" when asked. No data leaves your computer.'}</li>
+          </ul>
+          ${FOLDER_WARN ? `<div class="alert err" style="display:block;">${esc(FOLDER_WARN)}</div>` : ''}
+          ${linked
+            ? `<div class="alert ok" style="display:block;">✅ ${it ? 'Collegata' : 'Linked'}: <b>${esc(DIR_HANDLE.name)}</b></div>`
+            : `<button class="btn btn-primary" onclick="linkCorticalFolder()">📂 ${it ? 'Scegli la cartella...' : 'Choose folder...'}</button>
+               ${typeof window.showDirectoryPicker !== 'function' ? `<p style="font-size:0.82rem;color:var(--amber);">${it ? 'Questo browser non supporta il collegamento diretto (usa Chrome, Edge o Arc). Puoi comunque usare il Vault e scaricare i file con ⬇️ JSON in ' + esc(ENV.data_display) + '/vault/.' : 'This browser cannot link folders directly (use Chrome, Edge or Arc). You can still use the Vault and download files with ⬇️ JSON into ' + esc(ENV.data_display) + '/vault/.'}</p>` : ''}`}
+        </div>
+        <div class="card">
+          <h2>${stepN(2, chosen.length > 0 && chosen.every((h) => (hs[h] || {}).linked))}${it ? 'Scegli gli harness che usi' : 'Pick the harnesses you use'}</h2>
+          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${ENV.public
+            ? (it ? 'Seleziona quelli che usi. Per rilevare automaticamente quelli installati e il loro stato, apri la tua copia locale html/settings.html.' : 'Select the ones you use. To auto-detect installed ones and their status, open your local html/settings.html.')
+            : (it ? 'Rilevati automaticamente dal tuo computer. Il browser non può modificare le configurazioni degli harness: copia il comando qui sotto e incollalo nel terminale (prima in anteprima, poi reale).' : 'Auto-detected on your computer. A browser cannot edit harness configs: copy the command below into a terminal (preview first, then real).')}</p>
+          <div class="grid" style="margin-bottom:12px;">${rows}</div>
+          <pre style="margin:0 0 8px;">${esc(cmd + ' --dry-run')}</pre>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn" onclick="copyText('${esc(cmd)} --dry-run'.replace(/&amp;/g,'&'))">📋 ${it ? '1) Copia anteprima (dry-run)' : '1) Copy preview (dry-run)'}</button>
+            <button class="btn btn-em" onclick="copyText('${esc(cmd)}'.replace(/&amp;/g,'&'))">📋 ${it ? '2) Copia comando reale' : '2) Copy real command'}</button>
+          </div>
+          <p style="font-size:0.78rem;color:var(--muted);margin:10px 0 0;">${it ? 'Ogni sync crea un backup ripristinabile con --rollback. Poi riavvia l\'harness per caricare il server MCP "cortical-mcp".' : 'Every sync creates a backup restorable with --rollback. Then restart the harness to load the "cortical-mcp" server.'}</p>
+        </div>
+        <div class="card">
+          <h2>${stepN(3, ITEMS.length > 0)}${it ? 'Carica il tuo primo file' : 'Add your first file'}</h2>
+          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${it ? 'Vai al Privacy Vault, trascina il documento e scegli il livello di privacy. In chat userai @private:<alias> (profilo "Anonimizzato per Chat").' : 'Go to Privacy Vault, drop the document and pick a privacy level. In chat use @private:<alias> ("Anonymized for Chat" profile).'}</p>
+          <button class="btn btn-primary" onclick="TAB='vault'; render();">🛡️ ${it ? 'Apri Privacy Vault' : 'Open Privacy Vault'}</button>
+        </div>`;
+    }
+
     function renderVaultPanel(L) {
       const total = ITEMS.length;
       const localCount = ITEMS.filter((i) => i.local_only).length;
@@ -916,13 +1001,13 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare</pre>
 
     function render() {
       const L = I18N[LANG] || I18N.en;
-      const body = TAB === 'vault' ? renderVaultPanel(L) : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
+      const body = TAB === 'setup' ? renderSetupPanel(L) : TAB === 'vault' ? renderVaultPanel(L) : (TAB === 'models' ? renderModelsPanel(L) : (TAB === 'harnesses' ? renderHarnessesPanel() : renderCompressionPanel()));
       const sidebar = Object.entries(L.tabs).map(([k, lbl]) => `<button class="tab ${TAB===k?'active':''}" onclick="TAB='${k}'; render();">${lbl}</button>`).join('');
       const syncStatus = DIR_HANDLE
         ? (NEEDS_REAUTH
             ? `<span>${esc(L.syncLinked)}<b>${esc(DIR_HANDLE.name)}</b></span><button class="btn btn-primary" onclick="reauthorizeFolder()">${L.reconnectBtn}</button>`
             : `<span style="color:var(--emerald);">✅ ${esc(L.syncLinked)}<b>${esc(DIR_HANDLE.name)}</b></span><button class="btn" onclick="syncFolderAndDb()">↻ Sync Vault</button>`)
-        : `<span style="color:var(--muted);">${esc(L.syncUnset)}</span><button class="btn btn-primary" onclick="linkCorticalFolder()">${L.connectBtn}</button>`;
+        : `<span style="color:var(--muted);">${esc(L.syncUnset)}</span><button class="btn btn-primary" onclick="TAB='setup'; render();">🚀 ${LANG==='it'?'Guida al collegamento':'Linking guide'}</button>`;
 
       document.getElementById('app').innerHTML = `
         <div class="top">
