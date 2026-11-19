@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cortical.analytics.benchmark import run_comparative_benchmark
-from cortical.analytics.dashboard import export_static_dashboard, render_static_settings_html
+from cortical.analytics.dashboard import build_dashboard_env, export_static_dashboard, render_static_settings_html
 from cortical.analytics.roi import build_roi_report, format_roi_markdown
 from cortical.analytics.tuner import analyze_and_tune
 from cortical.cli import main as cli_main
@@ -23,6 +23,7 @@ from cortical.compression.toon import decode_toon, encode_toon
 from cortical.composers.tools import build_serve_mcp_command, inspect_composed_tools, serve_mcp_http
 from cortical.config import (
     DEFAULT_CONFIG,
+    default_data_dir,
     ensure_telemetry_schema,
     invoke_configured_runner,
     load_cortical_config,
@@ -55,6 +56,7 @@ from cortical.privacy.sanitizer import (
     classify_and_sanitize,
     ensure_privacy_ignore_files,
     extract_text_and_strip_metadata,
+    register_vision_adapter,
 )
 from cortical.privacy.vault import PrivacyVault
 
@@ -572,8 +574,57 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
             static_html = render_static_settings_html(cfg=DEFAULT_CONFIG, public_docs=True)
             self.assertIn("DecompressionStream", static_html)
             self.assertIn("showDirectoryPicker", static_html)
+            self.assertIn("img-canvas", static_html)
             self.assertNotIn("localhost:8765", static_html)
             self.assertNotIn("cortical.cli ui", static_html)
+
+    def test_data_dir_vision_ocr_keep_terms_and_watch_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            with patch.dict(os.environ, {"CORTICAL_DATA_DIR": str(tpath / "DocsCortical")}):
+                self.assertEqual(default_data_dir(), tpath / "DocsCortical")
+
+            # Image OCR requires vision_model under fail_closed
+            png_path = tpath / "receipt.png"
+            png_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            with self.assertRaises(FailClosedError):
+                extract_text_and_strip_metadata(png_path, vision_model="")
+
+            # Registered local vision adapter extracts text + drops EXIF metadata
+            try:
+                register_vision_adapter(lambda _b, m: f"OCR[{m}]: Mario Rossi mario@example.org KeepBrand")
+                txt, meta = extract_text_and_strip_metadata(png_path, vision_model="qwen2.5vl:3b")
+                self.assertIn("image:exif-dropped", meta)
+                self.assertIn("Mario Rossi", txt)
+
+                # keep_terms preserves explicitly whitelisted tokens while masking PII
+                db_p = tpath / "vault.db"
+                vault = PrivacyVault(db_p)
+                vault.inbox_dir.mkdir(parents=True, exist_ok=True)
+                (vault.inbox_dir / "receipt.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                (vault.inbox_dir / "receipt.png.meta.json").write_text(json.dumps({
+                    "alias": "receipt",
+                    "profile": "medium",
+                    "custom_terms": ["Mario Rossi", "KeepBrand"],
+                    "keep_terms": ["KeepBrand"],
+                    "vision_model": "qwen2.5vl:3b",
+                    "source_name": "receipt.png",
+                }), encoding="utf-8")
+
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    self.assertEqual(cli_main(["watch", "--once", "--db", str(db_p)]), 0)
+                item = vault.read_resource("receipt", allow_local_only=True)
+                self.assertIn("KeepBrand", item["text"])
+                self.assertNotIn("Mario Rossi", item["text"])
+                self.assertNotIn("mario@example.org", item["text"])
+            finally:
+                register_vision_adapter(None)
+
+            env = build_dashboard_env(public=True)
+            self.assertIn("setup_cmd", env)
+            self.assertIn("watch_cmd", env)
+            self.assertIn("qwen2.5vl:3b", env["vision_suggestions"])
 
 
 if __name__ == "__main__":

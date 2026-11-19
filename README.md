@@ -99,10 +99,14 @@ See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for all 8 harnesses (`antigra
 ## Daily CLI Commands & Verification
 
 ```bash
-# Export & open 100% Zero-Server static UI (`html/settings.html` — PDF/DOCX/TXT upload, Vault, Models & Harnesses)
-PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
+# One-shot cross-platform setup: creates ~/Documents/Cortical, links detected harnesses & opens static UI
+PYTHONPATH=src .venv/bin/python -m cortical.cli setup
 
-# Or ingest & inspect Privacy Vault directly from CLI (`auto` | `fail_closed` | `fail_open`)
+# Process queued local NER / vision (e.g. qwen2.5vl:3b) anonymization jobs (zero open ports)
+PYTHONPATH=src .venv/bin/python -m cortical.cli watch
+
+# Or export static UI manually (`html/settings.html`) & manage Privacy Vault via CLI
+PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
 PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.pdf --alias client_brief --policy auto --profile medium
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault list
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault show client_brief --local-ok

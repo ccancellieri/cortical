@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .analytics.benchmark import run_comparative_benchmark
-from .analytics.dashboard import export_static_dashboard
+from .analytics.dashboard import build_dashboard_env, export_static_dashboard
 from .analytics.roi import build_roi_report, format_roi_markdown
 from .analytics.tuner import analyze_and_tune
 from .compression.engine import compress_structured
 from .composers.tools import inspect_composed_tools, serve_mcp_http
 from .config import (
     DEFAULT_VAULT_DB,
+    default_data_dir,
     load_cortical_config,
     save_cortical_config,
 )
@@ -393,6 +394,61 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup(args: argparse.Namespace) -> int:
+    """One-shot, OS-neutral setup: data folder, config, harness links, static page."""
+    import shutil as _sh
+    data = default_data_dir()
+    for sub_d in ("", "vault", "vault_inbox"):
+        (data / sub_d).mkdir(parents=True, exist_ok=True)
+    legacy = Path(".cortical_data") / "vault.db"
+    if legacy.is_file() and not (data / "vault.db").exists():
+        _sh.copyfile(legacy, data / "vault.db")
+    cfg = load_cortical_config()
+    cfg_path = data / "cortical.config.json"
+    if not cfg_path.exists():
+        save_cortical_config(cfg, config_path=cfg_path)
+
+    env = build_dashboard_env(repo_root=Path.cwd())
+    chosen = [h for h, v in env["harness_status"].items() if v["detected"]]
+    hw = probe_hardware(runners_probe=True)
+    rec = recommend_models_for_hardware(hw, custom_models=cfg.get("custom_models"), installed_models=hw.get("installed_ollama_models"))
+    changes = plan_sync(cfg, hw, rec, harnesses=chosen, repo_root=Path.cwd().resolve(), vault_db_path=data / "vault.db")
+    preview = apply_sync(changes, dry_run=True)
+    print(f"Cortical data folder: {data}")
+    print(f"Detected harnesses: {', '.join(chosen) or '(none)'} -> {preview['changed_count']} file(s) to update")
+    do_apply = bool(args.yes)
+    if not do_apply and not args.dry_run and sys.stdin.isatty():
+        do_apply = input("Link these harnesses now (backup created)? [Y/n] ").strip().lower() in {"", "y", "yes", "s", "si"}
+    if do_apply and not args.dry_run:
+        res = apply_sync(changes)
+        print(f"Linked. Backup id: {res['backup_id']} (undo: cortical sync --rollback {res['backup_id']})")
+    else:
+        print("Skipped linking (use --yes to apply). Re-run anytime.")
+    s_path, _h = export_static_dashboard(data, config=cfg, hw=hw, public_docs=False)
+    print(f"Open this page in Chrome/Edge/Arc and click 'Choose folder' -> Documents > Cortical:\n  {s_path}")
+    if not args.no_open:
+        webbrowser.open(s_path.resolve().as_uri())
+    return 0
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """Processes queued uploads (local NER / vision models) from the data folder; no ports opened."""
+    import time as _t
+    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    print(f"Watching {vault.inbox_dir} (Ctrl+C to stop)" if not args.once else f"Processing {vault.inbox_dir}")
+    try:
+        while True:
+            res = vault.sync_from_disk(process_inbox=True)
+            if res["inbox_processed"] or res["imported"] or res["deleted"]:
+                print(f"  processed={res['inbox_processed']} imported={res['imported']} deleted={res['deleted']}")
+            if args.once:
+                return 0
+            _t.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return 0
+
+
 def _cmd_tune(args: argparse.Namespace) -> int:
     cfg = load_cortical_config()
     hw = probe_hardware(os_name=args.os, runners_probe=False)
@@ -567,6 +623,18 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--open", action="store_true")
     dash.add_argument("--json", action="store_true")
     dash.set_defaults(func=_cmd_dashboard)
+
+    stp = sub.add_parser("setup", help="One-shot setup: data folder (~/Documents/Cortical), harness links & static page")
+    stp.add_argument("--yes", action="store_true")
+    stp.add_argument("--dry-run", action="store_true")
+    stp.add_argument("--no-open", action="store_true")
+    stp.set_defaults(func=_cmd_setup)
+
+    wch = sub.add_parser("watch", help="Process queued uploads with local models (no ports)")
+    wch.add_argument("--once", action="store_true")
+    wch.add_argument("--interval", type=float, default=2.0)
+    wch.add_argument("--db", default=None)
+    wch.set_defaults(func=_cmd_watch)
 
     tun = sub.add_parser("tune", help="Local zero-cloud-token Auto-Tuner for models, num_ctx & context budget")
     tun.add_argument("--apply", action="store_true")

@@ -176,7 +176,8 @@ def plan_sync(
 ) -> list[FileChange]:
     """Plans idempotent updates across selected harnesses without overwriting existing user credentials."""
     root = Path(repo_root or Path.cwd())
-    v_db = Path(vault_db_path or (root / ".cortical_data" / "vault.db"))
+    from ..config import DEFAULT_VAULT_DB
+    v_db = Path(vault_db_path or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB).expanduser()
     paths_map = user_paths or resolve_user_paths(os_name=hw.get("os"))
     targets = list(harnesses or ALL_HARNESSES)
 

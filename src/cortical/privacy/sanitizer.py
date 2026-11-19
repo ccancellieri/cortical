@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+import urllib.request
 import zlib
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -78,8 +80,48 @@ def _normalize_extracted_text(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
-def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
-    """Extracts text from files/OOXML/PDF while removing author/company metadata tags."""
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+_VISION_ADAPTER: Optional[Callable[[bytes, str], str]] = None
+
+
+def register_vision_adapter(fn: Optional[Callable[[bytes, str], str]]) -> None:
+    """Registers a custom `(image_bytes, model) -> text` local OCR/vision adapter (used by tests & non-Ollama runners)."""
+    global _VISION_ADAPTER
+    _VISION_ADAPTER = fn
+
+
+def ocr_image_local(image_bytes: bytes, *, model: Optional[str], config: Optional[dict[str, Any]] = None, timeout: float = 180.0) -> str:
+    """Transcribes text from an image with a LOCAL vision model (Ollama). Never contacts remote services."""
+    if not model:
+        raise FailClosedError("No local vision model selected (Privacy > vision_model). Choose one in settings.html, e.g. qwen2.5vl:3b.")
+    if _VISION_ADAPTER is not None:
+        return str(_VISION_ADAPTER(image_bytes, model))
+    base = (((config or {}).get("runners") or {}).get("ollama") or {}).get("base_url") or "http://127.0.0.1:11434"
+    body = json.dumps({
+        "model": model,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": "Transcribe ALL text visible in this image verbatim, line by line. Output only the text.",
+            "images": [base64.b64encode(image_bytes).decode("ascii")],
+        }],
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{str(base).rstrip('/')}/api/chat", data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise FailClosedError(f"Local vision model '{model}' unavailable ({exc}). Run: ollama pull {model}") from exc
+    return str(((data.get("message") or {}).get("content")) or "")
+
+
+def extract_text_and_strip_metadata(
+    file_path: Path,
+    *,
+    vision_model: Optional[str] = None,
+    config: Optional[dict[str, Any]] = None,
+) -> tuple[str, list[str]]:
+    """Extracts text from files/OOXML/PDF/images while removing author/company metadata tags."""
     p = Path(file_path)
     suffix = p.suffix.lower()
     stripped: list[str] = []
@@ -106,6 +148,11 @@ def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
         return (_normalize_extracted_text("\n".join(texts)), stripped)
 
     raw_bytes = p.read_bytes()
+    if suffix in _IMAGE_SUFFIXES:
+        norm_img = _normalize_extracted_text(ocr_image_local(raw_bytes, model=vision_model, config=config))
+        if len(re.sub(r"\s+", "", norm_img)) < 2:
+            raise FailClosedError("Vision model found no readable text in the image.")
+        return (norm_img, ["image:exif-dropped"])
     if suffix == ".pdf":
         raw_str = raw_bytes.decode("latin-1", errors="replace")
         for tag in ("Author", "Creator", "Producer", "Company", "Title", "Subject"):
@@ -139,6 +186,15 @@ def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
             extracted = _extract_pdf_text_stdlib(raw_bytes)
 
         norm = _normalize_extracted_text(extracted)
+        if len(re.sub(r"\s+", "", norm)) < 5 and vision_model and shutil.which("pdftoppm"):
+            with tempfile.TemporaryDirectory() as tdir:
+                subprocess.run(
+                    [shutil.which("pdftoppm"), "-r", "110", "-png", "-l", "8", str(p), str(Path(tdir) / "pg")],
+                    capture_output=True, timeout=60, check=False,
+                )
+                pages = [ocr_image_local(f.read_bytes(), model=vision_model, config=config) for f in sorted(Path(tdir).glob("pg*.png"))]
+            norm = _normalize_extracted_text("\n\n".join(pages))
+            stripped.append("pdf:scanned-ocr")
         if len(re.sub(r"\s+", "", norm)) < 5:
             raise FailClosedError(
                 "PDF contains no extractable text layer (scanned/image-only PDF). Run local OCR first or convert to text."
@@ -153,13 +209,13 @@ def extract_text_and_strip_metadata(file_path: Path) -> tuple[str, list[str]]:
     return (_normalize_extracted_text(text), stripped)
 
 
-def extract_text_from_bytes(filename: str, raw_bytes: bytes) -> tuple[str, list[str]]:
+def extract_text_from_bytes(filename: str, raw_bytes: bytes, **kw: Any) -> tuple[str, list[str]]:
     """Extracts text and strips metadata from in-memory bytes while preserving extension handlers."""
     safe_name = Path(filename or "upload.txt").name or "upload.txt"
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp) / safe_name
         tmp_path.write_bytes(raw_bytes)
-        return extract_text_and_strip_metadata(tmp_path)
+        return extract_text_and_strip_metadata(tmp_path, **kw)
 
 
 def pseudonymize_structured(
@@ -169,6 +225,7 @@ def pseudonymize_structured(
     strip_categories: Optional[list[str]] = None,
     custom_terms: Optional[list[str]] = None,
     extra_entities: Optional[list[dict[str, str]]] = None,
+    keep_terms: Optional[list[str]] = None,
 ) -> tuple[str, dict[str, str]]:
     """Replaces structural PII, `custom_terms`, and verified NER entities without false-positive bigram regexes."""
     allowed = {c.upper() for c in strip_categories} if strip_categories else None
@@ -176,7 +233,11 @@ def pseudonymize_structured(
     rev: dict[str, str] = {}
     counters: dict[str, int] = {}
 
+    keep = {str(k).strip().lower() for k in (keep_terms or []) if str(k).strip()}
+
     def _token_for(cat: str, raw_val: str) -> str:
+        if raw_val.strip().lower() in keep:
+            return raw_val
         if raw_val in rev:
             return rev[raw_val]
         if redact:
@@ -273,6 +334,8 @@ def classify_and_sanitize(
     llm_fn: Optional[Callable[[str], str]] = None,
     model: Optional[str] = None,
     config: Optional[dict[str, Any]] = None,
+    vision_model: Optional[str] = None,
+    keep_terms: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Classifies content sensitivity dynamically (`auto` | `fail_closed` | `fail_open`) and sanitizes fail-safely."""
     eff_policy = policy.strip().lower()
@@ -285,7 +348,7 @@ def classify_and_sanitize(
         p = Path(text_or_path) if not isinstance(text_or_path, str) or ("\n" not in text_or_path and len(text_or_path) < 260 and Path(text_or_path).is_file()) else None
         if p is not None and p.is_file():
             path_hint = str(p).lower()
-            raw_text, stripped_meta = extract_text_and_strip_metadata(p)
+            raw_text, stripped_meta = extract_text_and_strip_metadata(p, vision_model=vision_model, config=config)
         else:
             raw_text = str(text_or_path)
     except Exception as exc:
@@ -305,7 +368,7 @@ def classify_and_sanitize(
         raise FailClosedError(f"Failed to read/extract content cleanly: {exc}") from exc
 
     # Inspect sensitivity signals
-    pre_text, pre_map = pseudonymize_structured(raw_text, redact=False, custom_terms=custom_terms)
+    pre_text, pre_map = pseudonymize_structured(raw_text, redact=False, custom_terms=custom_terms, keep_terms=keep_terms)
     path_sensitive = any(h in path_hint for h in _SENSITIVE_FOLDER_HINTS)
     sensitive_detected = bool(pre_map or stripped_meta or path_sensitive)
 
@@ -333,6 +396,7 @@ def classify_and_sanitize(
             redact=redact,
             custom_terms=custom_terms,
             extra_entities=ner_entities,
+            keep_terms=keep_terms,
         )
 
     return {

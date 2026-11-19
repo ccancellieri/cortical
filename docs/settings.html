@@ -53,6 +53,9 @@
     th { color:var(--muted); font-weight:600; }
     code { color:var(--emerald); background:#060a14; padding:2px 6px; border-radius:5px; }
     pre { background:#060a14; border:1px solid var(--border); border-radius:8px; padding:12px; overflow:auto; max-height:360px; font-size:0.82rem; color:#cbd5e1; white-space:pre-wrap; word-break:break-word; }
+    .rv { white-space:pre-wrap; word-break:break-word; background:#060a14; border:1px solid var(--border); border-radius:8px; padding:12px; max-height:340px; overflow:auto; font-size:0.84rem; user-select:text; }
+    mark.hit { background:rgba(248,113,113,0.35); color:var(--text); border-radius:3px; cursor:pointer; }
+    mark.kept { background:transparent; color:var(--text); border-bottom:2px dotted var(--emerald); cursor:pointer; }
     .chk { flex-direction:row; align-items:center; gap:8px; cursor:pointer; color:var(--text); }
     .chk input { width:auto; }
   </style>
@@ -60,11 +63,11 @@
 <body>
   <div class="wrap" id="app"></div>
   <script>
-    let CFG = {"active_runner": "ollama", "active_model": "", "max_context_window": 200000, "custom_models": [], "models_by_role": {"router": "qwen2.5:1.5b", "ner": "qwen2.5:1.5b", "daily_coder": "qwen3.5:9b-q3_k_xl", "deep_reasoner": "qwen3.8:27b-q4_xxs", "orchestrator": "qwen3.8:27b-q4_xxs"}, "runners": {"ollama": {"type": "ollama", "base_url": "http://127.0.0.1:11434", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": true}, "unsloth": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8888/v1", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": false}, "llama_cpp": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}, "mlx_lm": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "heavy_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "enabled": false}, "openai_compatible": {"type": "openai_compatible", "base_url": "http://127.0.0.1:4000/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}}, "router": {"enabled": false, "provider": "litellm", "base_url": "http://127.0.0.1:4000/v1"}, "composers": {"serena": true, "rtk": true, "pinchtab": true, "playwright_mcp": true, "context_mode": true}, "harnesses": {"antigravity": true, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": true}, "privacy": {"default_policy": "auto", "default_profile": "medium", "ner_model": "qwen2.5:1.5b", "use_local_ner": false, "custom_terms": []}, "compression": {"enable_toon": true, "min_toon_saving_pct": 10.0, "max_context_share": 0.15}, "report": {"auto_report": true, "language": "auto", "cloud_preset": "cloud_standard"}};
+    let CFG = {"active_runner": "ollama", "active_model": "", "max_context_window": 200000, "custom_models": [], "models_by_role": {"router": "qwen2.5:1.5b", "ner": "qwen2.5:1.5b", "daily_coder": "qwen3.5:9b-q3_k_xl", "deep_reasoner": "qwen3.8:27b-q4_xxs", "orchestrator": "qwen3.8:27b-q4_xxs"}, "runners": {"ollama": {"type": "ollama", "base_url": "http://127.0.0.1:11434", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": true}, "unsloth": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8888/v1", "default_model": "qwen3.5:9b-q3_k_xl", "heavy_model": "qwen3.8:27b-q4_xxs", "enabled": false}, "llama_cpp": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}, "mlx_lm": {"type": "openai_compatible", "base_url": "http://127.0.0.1:8080/v1", "default_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "heavy_model": "mlx-community/Qwen3.5-9B-Instruct-4bit", "enabled": false}, "openai_compatible": {"type": "openai_compatible", "base_url": "http://127.0.0.1:4000/v1", "default_model": "local-model", "heavy_model": "local-model", "enabled": false}}, "router": {"enabled": false, "provider": "litellm", "base_url": "http://127.0.0.1:4000/v1"}, "composers": {"serena": true, "rtk": true, "pinchtab": true, "playwright_mcp": true, "context_mode": true}, "harnesses": {"antigravity": true, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": true}, "privacy": {"default_policy": "auto", "default_profile": "medium", "ner_model": "qwen2.5:1.5b", "vision_model": "", "use_local_ner": true, "custom_terms": []}, "compression": {"enable_toon": true, "min_toon_saving_pct": 10.0, "max_context_share": 0.15}, "report": {"auto_report": true, "language": "auto", "cloud_preset": "cloud_standard"}};
     const HW = {"os": "cross-platform", "total_ram_gb": 16.0, "vram_gb": 4.0, "unified_memory": false, "classification": {"tier": "tier_1a_hybrid_laptop", "label": "Tier 1A · Hybrid / Variable"}};
-    const CATALOG = [{"model_id": "qwen2.5:1.5b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:1.5b", "memory_gb": 1.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner"], "notes": "Fits completely in 4 GB VRAM; ultra-fast intent routing & JSON NER."}, {"model_id": "qwen2.5:3b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:3b", "memory_gb": 2.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner", "fast_coder"], "notes": "Fits comfortably in 4 GB VRAM for hybrid laptops; strong JSON extraction."}, {"model_id": "qwen3:8b", "runner": "ollama", "pull_ref": "ollama pull qwen3:8b", "memory_gb": 5.2, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["daily_coder", "reviewer"], "notes": "Fast tool-calling reviewer & hybrid offload coder on 16 GB laptops."}, {"model_id": "qwen3.5:9b-q3_k_xl", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q3_K_XL", "memory_gb": 5.1, "native_ctx": 131072, "quantization": "Unsloth Dynamic UD-Q3_K_XL", "is_variable_quant": true, "roles": ["daily_coder", "long_context", "reviewer"], "notes": "Variable-precision Unsloth dynamic quant (5.1 GB, up to 131K ctx)."}, {"model_id": "qwen3.8:27b-iq2_xxs", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS", "memory_gb": 7.2, "native_ctx": 32768, "quantization": "Unsloth Dynamic UD-IQ2_XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB."}, {"model_id": "qwen3.8:27b-q4_xxs", "runner": "ollama", "pull_ref": "ollama pull qwen3.8:27b-q4_xxs", "memory_gb": 8.1, "native_ctx": 32768, "quantization": "Unsloth Variable 4-bit XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Variable 4-bit XXS (~8.1 GB): deep reasoning, architecture & orchestration on 16 GB unified RAM."}, {"model_id": "qwen2.5-coder:32b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5-coder:32b", "memory_gb": 19.5, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["deep_reasoner", "daily_coder"], "notes": "Workstation-class coder for 32+ GB RAM / 24+ GB VRAM machines."}];
+    const CATALOG = [{"model_id": "qwen2.5:1.5b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:1.5b", "memory_gb": 1.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner"], "notes": "Fits completely in 4 GB VRAM; ultra-fast intent routing & JSON NER."}, {"model_id": "qwen2.5:3b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5:3b", "memory_gb": 2.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["router", "ner", "fast_coder"], "notes": "Fits comfortably in 4 GB VRAM for hybrid laptops; strong JSON extraction."}, {"model_id": "qwen2.5vl:3b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5vl:3b", "memory_gb": 3.2, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["vision", "ocr"], "notes": "Local vision/OCR for images and scanned PDFs; fits 4 GB VRAM."}, {"model_id": "qwen2.5vl:7b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5vl:7b", "memory_gb": 6.0, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["vision", "ocr"], "notes": "More accurate local vision/OCR for 16 GB machines."}, {"model_id": "qwen3:8b", "runner": "ollama", "pull_ref": "ollama pull qwen3:8b", "memory_gb": 5.2, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["daily_coder", "reviewer"], "notes": "Fast tool-calling reviewer & hybrid offload coder on 16 GB laptops."}, {"model_id": "qwen3.5:9b-q3_k_xl", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.5-9B-GGUF:UD-Q3_K_XL", "memory_gb": 5.1, "native_ctx": 131072, "quantization": "Unsloth Dynamic UD-Q3_K_XL", "is_variable_quant": true, "roles": ["daily_coder", "long_context", "reviewer"], "notes": "Variable-precision Unsloth dynamic quant (5.1 GB, up to 131K ctx)."}, {"model_id": "qwen3.8:27b-iq2_xxs", "runner": "ollama", "pull_ref": "ollama pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS", "memory_gb": 7.2, "native_ctx": 32768, "quantization": "Unsloth Dynamic UD-IQ2_XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB."}, {"model_id": "qwen3.8:27b-q4_xxs", "runner": "ollama", "pull_ref": "ollama pull qwen3.8:27b-q4_xxs", "memory_gb": 8.1, "native_ctx": 32768, "quantization": "Unsloth Variable 4-bit XXS", "is_variable_quant": true, "roles": ["deep_reasoner", "orchestrator"], "notes": "Variable 4-bit XXS (~8.1 GB): deep reasoning, architecture & orchestration on 16 GB unified RAM."}, {"model_id": "qwen2.5-coder:32b", "runner": "ollama", "pull_ref": "ollama pull qwen2.5-coder:32b", "memory_gb": 19.5, "native_ctx": 32768, "quantization": "Q4_K_M", "is_variable_quant": false, "roles": ["deep_reasoner", "daily_coder"], "notes": "Workstation-class coder for 32+ GB RAM / 24+ GB VRAM machines."}];
     const PRESEND = {"antigravity": false, "pi": true, "opencode": true, "openclaw": true, "codex": true, "claude-code": true, "dsh": true, "unsloth-studio": false};
-    const ENV = {"public": true, "repo_display": "<cartella-cortical>", "data_display": "<cartella-cortical>/.cortical_data", "harness_status": {}, "sync_cmd_base": "cd /path/to/cortical && PYTHONPATH=src .venv/bin/python -m cortical.cli sync"};
+    const ENV = {"public": true, "repo_display": "<cartella-cortical>", "data_display": "<cartella-cortical>/.cortical_data", "harness_status": {}, "sync_cmd_base": "cd /path/to/cortical && PYTHONPATH=src .venv/bin/python -m cortical.cli sync", "setup_cmd": {"posix": "cd /path/to/cortical && PYTHONPATH=src .venv/bin/python -m cortical.cli setup", "win": "cd C:\\path\\to\\cortical && set PYTHONPATH=src && .venv\\Scripts\\python -m cortical.cli setup"}, "watch_cmd": {"posix": "PYTHONPATH=src .venv/bin/python -m cortical.cli watch", "win": "set PYTHONPATH=src && .venv\\Scripts\\python -m cortical.cli watch"}, "installed_models": [], "vision_suggestions": ["qwen2.5vl:3b", "qwen2.5vl:7b"]};
 
     const I18N = {
       en: {
@@ -151,6 +154,12 @@
     let TAB = localStorage.getItem('cortical_setup_done') ? 'vault' : 'setup';
     let SETUP_SEL = null;
     let FOLDER_WARN = '';
+    let QUEUE = [];
+    let IMGST = null;
+    let ORIG = null;
+    const T = (it, en) => (LANG === 'it' ? it : en);
+    const IS_WIN = /win/i.test(navigator.platform || '') && !/darwin|mac/i.test(navigator.platform || '');
+    const IMG_RX = /\.(png|jpe?g|webp|gif|bmp)$/i;
     let ITEMS = [];
     let SELECTED_FILE = null;
     let SEL_PROFILE = 'max_security';
@@ -170,11 +179,12 @@
     // --- Pure-JS IndexedDB store (works offline with zero servers) ---
     function openDb() {
       return new Promise((resolve, reject) => {
-        const req = indexedDB.open('cortical_vault_db', 2);
+        const req = indexedDB.open('cortical_vault_db', 3);
         req.onupgradeneeded = () => {
           const db = req.result;
           if (!db.objectStoreNames.contains('items')) db.createObjectStore('items', { keyPath: 'alias' });
           if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+          if (!db.objectStoreNames.contains('originals')) db.createObjectStore('originals', { keyPath: 'alias' });
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -207,6 +217,16 @@
         tx.onerror = () => reject(tx.error);
       });
     }
+    async function idbOrig(mode, alias, rec) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction('originals', mode === 'get' ? 'readonly' : 'readwrite');
+        const st = tx.objectStore('originals');
+        const req = mode === 'get' ? st.get(alias) : (mode === 'put' ? st.put(rec) : st.delete(alias));
+        tx.oncomplete = () => resolve(mode === 'get' ? (req.result || null) : undefined);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
     async function idbSaveHandle(h) {
       const db = await openDb();
       return new Promise((resolve, reject) => {
@@ -228,19 +248,15 @@
 
     // --- File System Access API folder sync (.cortical_data/vault/*.json) ---
     async function resolveVaultParent(handle) {
-      try {
-        // Allow user to pick either `.cortical_data` directly OR repo root containing `.cortical_data`
-        if (handle.name === '.cortical_data') return handle;
-        return await handle.getDirectoryHandle('.cortical_data', { create: true });
-      } catch {
-        return handle;
-      }
+      if (handle.name === 'Cortical' || handle.name === '.cortical_data') return handle;
+      for (const n of ['vault', 'vault_inbox']) { try { await handle.getDirectoryHandle(n); return handle; } catch {} }
+      try { return await handle.getDirectoryHandle('.cortical_data', { create: true }); } catch { return handle; }
     }
 
     async function writeJsonToFolder(subdirName, filename, dataObj) {
       if (!DIR_HANDLE) return false;
       const root = await resolveVaultParent(DIR_HANDLE);
-      const sub = await root.getDirectoryHandle(subdirName, { create: true });
+      const sub = subdirName ? await root.getDirectoryHandle(subdirName, { create: true }) : root;
       const fh = await sub.getFileHandle(filename, { create: true });
       const w = await fh.createWritable();
       await w.write(JSON.stringify(dataObj, null, 2) + '\n');
@@ -286,6 +302,20 @@
               }
             } catch {}
           }
+          QUEUE = [];
+          try {
+            const ib = await root.getDirectoryHandle('vault_inbox');
+            const errs = new Map();
+            const raws = [];
+            for await (const [name, entry] of ib.entries()) {
+              if (entry.kind !== 'file' || name.startsWith('.') || name.endsWith('.meta.json')) continue;
+              if (name.endsWith('.error.json')) {
+                let m = ''; try { m = JSON.parse(await (await entry.getFile()).text()).error; } catch {}
+                errs.set(name.replace(/\.error\.json$/, ''), m);
+              } else raws.push(name);
+            }
+            raws.forEach((n) => QUEUE.push({ name: n, error: errs.get(n) || '' }));
+          } catch {}
         } catch (err) {
           NEEDS_REAUTH = true;
         }
@@ -300,12 +330,15 @@
         return;
       }
       try {
-        const h = await window.showDirectoryPicker({ mode: 'readwrite' });
-        let valid = h.name === '.cortical_data';
+        const h = await window.showDirectoryPicker({ mode: 'readwrite', id: 'cortical', startIn: 'documents' });
+        let valid = h.name === '.cortical_data' || h.name === 'Cortical';
+        if (!valid) { try { await h.getFileHandle('vault.db'); valid = true; } catch {} }
+        if (!valid) { try { await h.getDirectoryHandle('vault'); valid = true; } catch {} }
+        if (!valid) { try { await h.getDirectoryHandle('vault_inbox'); valid = true; } catch {} }
         if (!valid) { try { await h.getDirectoryHandle('.cortical_data'); valid = true; } catch {} }
         if (!valid) { try { await h.getFileHandle('pyproject.toml'); valid = true; } catch {} }
         if (!valid) {
-          FOLDER_WARN = (LANG === 'it' ? 'La cartella scelta ("' + h.name + '") non sembra quella di Cortical. Scegli: ' : 'Chosen folder ("' + h.name + '") does not look like Cortical. Choose: ') + ENV.repo_display;
+          FOLDER_WARN = (LANG === 'it' ? 'La cartella scelta ("' + h.name + '") non sembra quella di Cortical. Scegli: ' : 'Chosen folder ("' + h.name + '") does not look like Cortical. Choose: ') + ENV.data_display;
           setBanner('err', FOLDER_WARN);
           return;
         }
@@ -505,12 +538,14 @@
     }
 
     // --- Client-Side Sanitizer (mirrors Python sanitizer.py without Title-Case false positives) ---
-    function sanitizeTextClient(text, profile, customTerms) {
+    function sanitizeTextClient(text, profile, customTerms, keepTerms) {
+      const keep = new Set((keepTerms || []).map((k) => String(k).trim().toLowerCase()).filter(Boolean));
       const mapping = {};
       const rev = new Map();
       const counts = {};
       const redact = profile === 'max_security' || profile === 'low';
       const tokFor = (cat, val) => {
+        if (keep.has(val.trim().toLowerCase())) return val;
         if (rev.has(val)) return rev.get(val);
         if (redact) {
           rev.set(val, '[REDACTED]');
@@ -525,7 +560,7 @@
       };
 
       if (profile === 'max_context') {
-        return { text, entityCount: 0, sensitiveDetected: false };
+        return { text, entityCount: 0, sensitiveDetected: false, mapping: {} };
       }
 
       let out = String(text || '');
@@ -547,111 +582,197 @@
         out = out.replace(rx, (m) => tokFor(cat, m));
       }
       const entityCount = Object.keys(mapping).length;
-      return { text: out, entityCount, sensitiveDetected: entityCount > 0 };
+      return { text: out, entityCount, sensitiveDetected: entityCount > 0, mapping };
+    }
+
+    function setPriv(k, v) {
+      CFG.privacy = CFG.privacy || {};
+      CFG.privacy[k] = v;
+      persistConfigToFolder();
+      render();
+    }
+    async function persistConfigToFolder() {
+      if (!DIR_HANDLE || NEEDS_REAUTH) return;
+      try { await writeJsonToFolder('', 'cortical.config.json', CFG); } catch {}
+    }
+    function aliasFrom(name) {
+      const raw = (document.getElementById('v-alias')?.value || name.replace(/\.[^.]+$/, '')).trim();
+      return raw.toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || ('item_' + Math.floor(Date.now() / 1000));
+    }
+    function useModel() { return (CFG.privacy || {}).use_local_ner !== false; }
+    function linkedOk() { return !!DIR_HANDLE && !NEEDS_REAUTH; }
+
+    async function submitJob(filename, bytesOrBlob, meta) {
+      await writeBytesToFolder('vault_inbox', filename, bytesOrBlob);
+      await writeJsonToFolder('vault_inbox', filename + '.meta.json', meta);
+      await syncFolderAndDb();
+    }
+    function jobMeta(alias, extra) {
+      const pv = CFG.privacy || {};
+      return Object.assign({
+        alias, policy: document.getElementById('v-policy')?.value || 'auto', profile: SEL_PROFILE,
+        custom_terms: [], keep_terms: [], use_local_ner: useModel(),
+        ner_model: pv.ner_model || '', vision_model: pv.vision_model || '',
+      }, extra || {});
+    }
+
+    // ---- image editor (manual black boxes, 100% in browser) ----
+    async function loadImageEditor(file) {
+      IMGST = { file, bmp: await createImageBitmap(file), rects: [], drag: null };
+      render();
+    }
+    function drawImg() {
+      const c = document.getElementById('img-canvas');
+      if (!c || !IMGST) return;
+      const sc = Math.min(1, 720 / IMGST.bmp.width);
+      c.width = Math.round(IMGST.bmp.width * sc); c.height = Math.round(IMGST.bmp.height * sc);
+      const g = c.getContext('2d');
+      g.drawImage(IMGST.bmp, 0, 0, c.width, c.height);
+      g.fillStyle = '#000';
+      const all = IMGST.drag ? IMGST.rects.concat([IMGST.drag]) : IMGST.rects;
+      all.forEach((r) => g.fillRect(r.x * c.width, r.y * c.height, r.w * c.width, r.h * c.height));
+    }
+    function imgPos(ev) {
+      const c = document.getElementById('img-canvas'); const b = c.getBoundingClientRect();
+      return { x: Math.min(1, Math.max(0, (ev.clientX - b.left) / b.width)), y: Math.min(1, Math.max(0, (ev.clientY - b.top) / b.height)) };
+    }
+    function imgDown(ev) { const p = imgPos(ev); IMGST.start = p; IMGST.drag = { x: p.x, y: p.y, w: 0, h: 0 }; }
+    function imgMove(ev) {
+      if (!IMGST || !IMGST.drag) return;
+      const p = imgPos(ev), s0 = IMGST.start;
+      IMGST.drag = { x: Math.min(s0.x, p.x), y: Math.min(s0.y, p.y), w: Math.abs(p.x - s0.x), h: Math.abs(p.y - s0.y) };
+      drawImg();
+    }
+    function imgUp() {
+      if (!IMGST || !IMGST.drag) return;
+      if (IMGST.drag.w > 0.004 && IMGST.drag.h > 0.004) IMGST.rects.push(IMGST.drag);
+      IMGST.drag = null; render();
+    }
+    function imgUndo() { if (IMGST) { IMGST.rects.pop(); render(); } }
+    async function redactedPngBlob() {
+      const c = document.createElement('canvas'); c.width = IMGST.bmp.width; c.height = IMGST.bmp.height;
+      const g = c.getContext('2d'); g.drawImage(IMGST.bmp, 0, 0); g.fillStyle = '#000';
+      IMGST.rects.forEach((r) => g.fillRect(r.x * c.width, r.y * c.height, r.w * c.width, r.h * c.height));
+      return await new Promise((res) => c.toBlob(res, 'image/png'));
     }
 
     async function processSelectedFile() {
-      if (!SELECTED_FILE) {
-        setBanner('err', 'Seleziona prima un file / Pick a file first.');
+      if (!SELECTED_FILE) { setBanner('err', T('Seleziona prima un file.', 'Pick a file first.')); return; }
+      const file = SELECTED_FILE;
+      const alias = aliasFrom(file.name);
+      const customTerms = (document.getElementById('v-terms')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const pv = CFG.privacy || {};
+
+      if (IMG_RX.test(file.name)) {
+        if (!linkedOk()) { setBanner('err', T('Per le immagini serve il modello locale: collega prima la cartella Cortical (scheda Setup guidato).', 'Images need the local model: link the Cortical folder first (Guided Setup tab).')); return; }
+        if (!pv.vision_model) { setBanner('err', T('Scegli un modello con visione (es. qwen2.5vl:3b) nella sezione Modelli locali.', 'Pick a vision model (e.g. qwen2.5vl:3b) in Local models.')); return; }
+        const blob = await redactedPngBlob();
+        await submitJob(alias + '.png', blob, jobMeta(alias, { custom_terms: customTerms, source_name: file.name, use_local_ner: true }));
+        await idbOrig('put', alias, { alias, kind: 'image', text: '', marks: customTerms, keep: [], rects: IMGST ? IMGST.rects.length : 0 });
+        SELECTED_FILE = null; IMGST = null;
+        setBanner('info', T('Immagine in coda: i riquadri neri sono già applicati; il modello locale legge il testo residuo. Esegui "watch" (vedi sotto) o apri un agente.', 'Image queued: black boxes are applied; the local model reads the remaining text. Run "watch" (below) or open an agent.'));
         return;
       }
-      const file = SELECTED_FILE;
+
       const buf = await file.arrayBuffer();
       const u8 = new Uint8Array(buf);
       const nameLower = file.name.toLowerCase();
-      const rawAlias = (document.getElementById('v-alias')?.value || file.name.replace(/\.[^.]+$/, '')).trim();
-      const alias = rawAlias.toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || ('item_' + Math.floor(Date.now() / 1000));
       const reqPolicy = document.getElementById('v-policy')?.value || 'auto';
-      const customTerms = (document.getElementById('v-terms')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+      let extracted = ''; let strippedMeta = []; let needsPy = false;
+      if (/\.(docx|xlsx|pptx)$/.test(nameLower)) { const r = await extractOoxmlText(u8); extracted = r.text; strippedMeta = r.stripped; }
+      else if (nameLower.endsWith('.pdf')) { const r = await extractPdfTextJS(u8); extracted = r.text; strippedMeta = r.stripped; needsPy = !r.readable; }
+      else extracted = new TextDecoder('utf-8', { fatal: false }).decode(u8);
 
-      let extracted = '';
-      let strippedMeta = [];
-      let needsLocalInbox = false;
+      await idbOrig('put', alias, { alias, kind: 'text', text: extracted, marks: customTerms, keep: [] });
 
-      if (nameLower.endsWith('.docx') || nameLower.endsWith('.xlsx') || nameLower.endsWith('.pptx')) {
-        const res = await extractOoxmlText(u8);
-        extracted = res.text;
-        strippedMeta = res.stripped;
-      } else if (nameLower.endsWith('.pdf')) {
-        const res = await extractPdfTextJS(u8);
-        extracted = res.text;
-        strippedMeta = res.stripped;
-        if (!res.readable) needsLocalInbox = true;
-      } else {
-        extracted = new TextDecoder('utf-8', { fatal: false }).decode(u8);
-      }
-
-      if (needsLocalInbox) {
-        if (DIR_HANDLE && !NEEDS_REAUTH) {
-          await writeBytesToFolder('vault_inbox', file.name, u8);
-          await writeJsonToFolder('vault_inbox', file.name + '.meta.json', {
-            alias,
-            policy: reqPolicy,
-            profile: SEL_PROFILE,
-            custom_terms: customTerms,
-            use_local_ner: false,
-          });
-          SELECTED_FILE = null;
-          setBanner('info', `Il PDF "${file.name}" usa font/compressione avanzata o è scansionato: salvato in .cortical_data/vault_inbox/ — appena un agente MCP o CLI leggerà il Vault eseguirà pdftotext locale ed eliminerà il file grezzo.`);
-          render();
-          return;
-        }
-        setBanner('err', `Il PDF "${file.name}" usa font/compressione complessa non leggibile in JS puro senza collegare .cortical_data. Collega la cartella ".cortical_data" qui sopra (o usa https://ccancellieri.github.io/cortical/settings.html) oppure importa una tantum con: cortical ingest "${file.name}" --profile ${SEL_PROFILE}`);
+      if (linkedOk() && (useModel() || needsPy)) {
+        await submitJob(file.name, u8, jobMeta(alias, { custom_terms: customTerms, source_name: file.name }));
+        SELECTED_FILE = null;
+        setBanner('info', T('In coda per l\'anonimizzazione con il modello locale (' + (pv.ner_model || 'default') + '). Esegui "watch" (vedi sotto) oppure aprirà da solo quando un agente usa cortical-mcp.', 'Queued for anonymization with the local model (' + (pv.ner_model || 'default') + '). Run "watch" (below) or it runs when an agent uses cortical-mcp.'));
         return;
       }
+      if (needsPy) { setBanner('err', T('Questo PDF richiede il modello/estrattore locale: collega la cartella Cortical.', 'This PDF needs the local model/extractor: link the Cortical folder.')); return; }
 
-      const san = sanitizeTextClient(extracted, SEL_PROFILE, customTerms);
-      const resolvedPolicy = reqPolicy === 'auto'
-        ? ((san.sensitiveDetected || strippedMeta.length > 0 || SEL_PROFILE === 'max_security') ? 'fail_closed' : 'fail_open')
-        : reqPolicy;
-
+      const san = sanitizeTextClient(extracted, SEL_PROFILE, customTerms, []);
+      const resolvedPolicy = reqPolicy === 'auto' ? ((san.sensitiveDetected || strippedMeta.length > 0 || SEL_PROFILE === 'max_security') ? 'fail_closed' : 'fail_open') : reqPolicy;
       const record = {
-        alias,
-        uri: 'cortical://private/' + alias,
-        source_name: file.name,
-        resolved_policy: resolvedPolicy,
-        profile: SEL_PROFILE,
-        local_only: SEL_PROFILE === 'max_security',
-        format_used: 'text',
-        sanitized_content: san.text,
-        entity_count: san.entityCount + strippedMeta.length,
-        tokens_est: Math.max(1, Math.round(san.text.length / 4)),
-        sha256_hash: 'ui_' + Math.random().toString(16).slice(2, 14),
-        updated_at: Date.now() / 1000,
+        alias, uri: 'cortical://private/' + alias, source_name: file.name, resolved_policy: resolvedPolicy, profile: SEL_PROFILE,
+        local_only: SEL_PROFILE === 'max_security', format_used: 'text', sanitized_content: san.text,
+        entity_count: san.entityCount + strippedMeta.length, tokens_est: Math.max(1, Math.round(san.text.length / 4)),
+        sha256_hash: 'ui_' + Math.random().toString(16).slice(2, 14), updated_at: Date.now() / 1000, ner_used: false,
       };
-
       await idbPutItem(record);
-      const synced = DIR_HANDLE && !NEEDS_REAUTH ? await writeJsonToFolder('vault', alias + '.json', record) : false;
-      SELECTED_FILE = null;
-      INSPECT = record;
+      const synced = linkedOk() ? await writeJsonToFolder('vault', alias + '.json', record) : false;
+      SELECTED_FILE = null; INSPECT = record; ORIG = await idbOrig('get', alias);
       await syncFolderAndDb();
-      setBanner('ok', `${synced ? 'Sincronizzato in .cortical_data/vault/' + alias + '.json' : 'Salvato nel Vault locale del browser (usa ⬇️ JSON se non hai collegato la cartella)'}: @private:${alias} (${record.local_only ? '🔒 SOLO LOCALE' : '🛡️ PRONTO PER CHAT'})`);
+      setBanner('ok', T('Anteprima rapida (solo regole, nessun modello): @private:', 'Quick preview (rules only, no model): @private:') + alias + (synced ? '' : T(' — salvata solo nel browser', ' — browser only')));
     }
 
-    async function resanitizeInspect() {
+    async function openInspect(alias) {
+      INSPECT = ITEMS.find((x) => x.alias === alias) || null;
+      ORIG = INSPECT ? await idbOrig('get', alias) : null;
+      render();
+    }
+    function selectedTextIn(id) {
+      const sel = window.getSelection(); if (!sel || sel.isCollapsed) return '';
+      const node = document.getElementById(id);
+      return node && node.contains(sel.anchorNode) ? sel.toString().trim() : '';
+    }
+    async function addMarkFromSelection() {
+      const t = selectedTextIn('rv-orig') || selectedTextIn('rv-san');
+      if (!t) { setBanner('info', T('Seleziona con il mouse una parte di testo da oscurare.', 'Select a piece of text with the mouse first.')); return; }
+      if (ORIG) { ORIG.marks = Array.from(new Set((ORIG.marks || []).concat([t]))); ORIG.keep = (ORIG.keep || []).filter((k) => k.toLowerCase() !== t.toLowerCase()); }
+      else { INSPECT.__extra = Array.from(new Set((INSPECT.__extra || []).concat([t]))); }
+      await applyCorrections();
+    }
+    async function toggleKeep(raw) {
+      if (!ORIG) return;
+      const lo = raw.toLowerCase(); const has = (ORIG.keep || []).some((k) => k.toLowerCase() === lo);
+      ORIG.keep = has ? ORIG.keep.filter((k) => k.toLowerCase() !== lo) : (ORIG.keep || []).concat([raw]);
+      if (!has) ORIG.marks = (ORIG.marks || []).filter((m) => m.toLowerCase() !== lo);
+      await applyCorrections();
+    }
+    async function applyCorrections() {
       if (!INSPECT) return;
-      const newProf = document.getElementById('re-profile')?.value || INSPECT.profile;
-      const extraTerms = (document.getElementById('re-terms')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
-      const san = sanitizeTextClient(INSPECT.sanitized_content || '', newProf, extraTerms);
-      const updated = {
-        ...INSPECT,
-        profile: newProf,
-        local_only: newProf === 'max_security',
-        resolved_policy: newProf === 'max_security' ? 'fail_closed' : (newProf === 'max_context' ? 'fail_open' : 'auto'),
-        sanitized_content: san.text,
-        entity_count: Number(INSPECT.entity_count || 0) + san.entityCount,
-        tokens_est: Math.max(1, Math.round(san.text.length / 4)),
-        updated_at: Date.now() / 1000,
-      };
+      const prof = document.getElementById('re-profile')?.value || INSPECT.profile;
+      const typed = (document.getElementById('re-terms')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (ORIG && typed.length) ORIG.marks = Array.from(new Set((ORIG.marks || []).concat(typed)));
+      const extra = (INSPECT.__extra || []).concat(ORIG ? [] : typed);
+      if (ORIG) await idbOrig('put', ORIG.alias, ORIG);
+      if (ORIG && ORIG.text && linkedOk() && useModel()) {
+        await submitJob(INSPECT.alias + '.txt', new TextEncoder().encode(ORIG.text), jobMeta(INSPECT.alias, {
+          profile: prof, custom_terms: ORIG.marks || [], keep_terms: ORIG.keep || [], source_name: INSPECT.source_name,
+        }));
+        setBanner('info', T('Correzioni inviate in coda: il modello locale rielabora il documento dall\'originale. Esegui "watch" o attendi.', 'Corrections queued: the local model re-processes from the original. Run "watch" or wait.'));
+        return;
+      }
+      const base = ORIG && ORIG.text ? ORIG.text : (INSPECT.sanitized_content || '');
+      const san = sanitizeTextClient(base, prof, ORIG ? (ORIG.marks || []) : extra, ORIG ? (ORIG.keep || []) : []);
+      const updated = Object.assign({}, INSPECT, {
+        profile: prof, local_only: prof === 'max_security',
+        resolved_policy: prof === 'max_security' ? 'fail_closed' : (prof === 'max_context' ? 'fail_open' : 'auto'),
+        sanitized_content: san.text, entity_count: ORIG ? san.entityCount : Number(INSPECT.entity_count || 0) + san.entityCount,
+        tokens_est: Math.max(1, Math.round(san.text.length / 4)), updated_at: Date.now() / 1000, __extra: undefined,
+      });
+      delete updated.__extra;
       await idbPutItem(updated);
-      if (DIR_HANDLE && !NEEDS_REAUTH) await writeJsonToFolder('vault', updated.alias + '.json', updated);
+      if (linkedOk()) await writeJsonToFolder('vault', updated.alias + '.json', updated);
       INSPECT = updated;
       await syncFolderAndDb();
-      setBanner('ok', `Aggiornato @private:${updated.alias} (${updated.profile})`);
+      INSPECT = ITEMS.find((x) => x.alias === updated.alias) || updated;
+      setBanner('ok', T('Aggiornato @private:', 'Updated @private:') + updated.alias);
+    }
+    async function dismissQueue(name) {
+      try {
+        const root = await resolveVaultParent(DIR_HANDLE); const ib = await root.getDirectoryHandle('vault_inbox');
+        for (const n of [name, name + '.meta.json', name + '.error.json']) { try { await ib.removeEntry(n); } catch {} }
+      } catch {}
+      await syncFolderAndDb();
     }
 
     async function removeVaultItem(alias) {
       await idbDeleteItem(alias);
+      await idbOrig('del', alias);
       if (DIR_HANDLE && !NEEDS_REAUTH) {
         await writeJsonToFolder('vault', alias + '.json', { alias, deleted: true, updated_at: Date.now() / 1000 });
       }
@@ -674,9 +795,10 @@
       setBanner('ok', 'Copiato: @private:' + alias);
     }
 
-    function pickFileObj(f) {
+    async function pickFileObj(f) {
       if (!f) return;
-      SELECTED_FILE = f;
+      SELECTED_FILE = f; IMGST = null;
+      if (IMG_RX.test(f.name)) { try { await loadImageEditor(f); return; } catch {} }
       render();
     }
 
@@ -719,70 +841,129 @@
 
     function copyText(t, msg) {
       if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {});
-      setBanner('ok', msg || (LANG === 'it' ? 'Copiato negli appunti.' : 'Copied to clipboard.'));
+      setBanner('ok', msg || T('Copiato negli appunti.', 'Copied to clipboard.'));
     }
-    function toggleSetupHarness(h, v) { SETUP_SEL[h] = v; CFG.harnesses = CFG.harnesses || {}; CFG.harnesses[h] = v; render(); }
+    function cliCmd(kind) { const c = (ENV[kind] || {}); return IS_WIN ? c.win : c.posix; }
 
-    function renderSetupPanel(L) {
-      const it = LANG === 'it';
-      const linked = !!DIR_HANDLE && !NEEDS_REAUTH;
-      const hs = ENV.harness_status || {};
-      const names = Object.keys(PRESEND);
-      if (!SETUP_SEL) {
-        SETUP_SEL = {};
-        names.forEach((h) => { SETUP_SEL[h] = ENV.public ? false : Boolean((hs[h] || {}).detected); });
-      }
-      const chosen = names.filter((h) => SETUP_SEL[h]);
-      const cmd = ENV.sync_cmd_base + (chosen.length ? ' --harness ' + chosen.join(',') : '');
-      const rows = names.map((h) => {
-        const st = hs[h] || {};
-        const badge = ENV.public ? '<span class="pill pill-pub">?</span>'
-          : (st.linked ? '<span class="pill pill-ok">✅ ' + (it ? 'già collegato' : 'already linked') + '</span>'
-            : (st.detected ? '<span class="pill pill-warn">⚠️ ' + (it ? 'rilevato, da collegare' : 'detected, not linked') + '</span>'
-              : '<span class="pill pill-pub">➖ ' + (it ? 'non rilevato' : 'not detected') + '</span>'));
-        return `<label class="chk" style="justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card2);">
-          <span><input type="checkbox" ${SETUP_SEL[h] ? 'checked' : ''} onchange="toggleSetupHarness('${h}', this.checked)" /> <b>${h}</b>
-          <span style="font-size:0.74rem;color:var(--muted);">${esc(st.config || '')}</span></span>${badge}</label>`;
-      }).join('');
-      const stepN = (n, ok) => `<span class="pill ${ok ? 'pill-ok' : 'pill-warn'}" style="margin-right:6px;">${ok ? '✅' : n}</span>`;
+    function modelCard() {
+      const pv = CFG.privacy || {};
+      const inst = ENV.installed_models || [];
+      const textOpts = Array.from(new Set(inst.concat(['qwen2.5:1.5b', 'qwen2.5:3b', 'qwen3:8b']))).map((m) => `<option value="${esc(m)}">`).join('');
+      const visOpts = Array.from(new Set(inst.filter((m) => /vl|vision|llava|minicpm-v|gemma3/i.test(m)).concat(ENV.vision_suggestions || []))).map((m) => `<option value="${esc(m)}">`).join('');
+      const vm = pv.vision_model || '';
+      const vmMissing = vm && inst.length && !inst.includes(vm);
+      const pullName = vm || (ENV.vision_suggestions || ['qwen2.5vl:3b'])[0];
       return `
         <div class="card">
-          <h2>${stepN(1, linked)}${it ? 'Collega la cartella di Cortical (1 volta)' : 'Link the Cortical folder (once)'}</h2>
-          <p style="font-size:0.88rem;color:var(--muted);margin:0 0 10px;">
-            ${it ? 'Serve per far leggere agli agenti i file che carichi qui. Si aprirà il selettore cartelle del sistema: scegli questa cartella (quella del progetto, <b>non</b> serve entrare in .cortical_data):' : 'This lets your agents read files you add here. Your system folder picker will open: choose this folder (the project folder; you do <b>not</b> need to enter .cortical_data):'}
-          </p>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
-            <code style="font-size:0.95rem;">${esc(ENV.repo_display)}</code>
-            <button class="btn" onclick="copyText('${esc(ENV.repo_display)}')">📋 ${it ? 'Copia percorso' : 'Copy path'}</button>
+          <h2>🧠 ${T('Modelli locali per l\'anonimizzazione (tutto resta sul tuo computer)', 'Local anonymization models (everything stays on your computer)')}</h2>
+          <div class="grid">
+            <label>${T('Testo: riconosce nomi e aziende', 'Text: finds names & organizations')}
+              <input list="dl-text" value="${esc(pv.ner_model || '')}" placeholder="qwen2.5:1.5b" onchange="setPriv('ner_model', this.value.trim())" /></label>
+            <label>${T('Immagini e PDF scansionati (visione)', 'Images & scanned PDFs (vision)')}
+              <input list="dl-vis" value="${esc(vm)}" placeholder="qwen2.5vl:3b" onchange="setPriv('vision_model', this.value.trim())" /></label>
           </div>
-          <ul style="margin:0 0 12px 18px;padding:0;font-size:0.84rem;color:var(--muted);">
-            <li>${it ? 'macOS: nel selettore premi <b>Cmd+Maiusc+G</b>, incolla il percorso e premi Invio, poi <b>Seleziona</b>.' : 'macOS: in the picker press <b>Cmd+Shift+G</b>, paste the path, Enter, then <b>Select</b>.'}</li>
-            <li>${it ? 'Windows/Linux: naviga fino alla cartella e premi <b>Seleziona cartella</b>.' : 'Windows/Linux: browse to the folder and press <b>Select folder</b>.'}</li>
-            <li>${it ? 'Conferma "Consenti modifiche" quando il browser lo chiede. Nessun dato lascia il computer.' : 'Confirm "Allow changes" when asked. No data leaves your computer.'}</li>
-          </ul>
+          <datalist id="dl-text">${textOpts}</datalist><datalist id="dl-vis">${visOpts}</datalist>
+          <label class="chk" style="margin:10px 0;"><input type="checkbox" ${useModel() ? 'checked' : ''} onchange="setPriv('use_local_ner', this.checked)" />
+            ${T('Usa il modello locale per anonimizzare (consigliato). Se disattivo, solo regole veloci nel browser.', 'Use the local model to anonymize (recommended). If off, quick browser rules only.')}</label>
+          ${(!vm || vmMissing) ? `<div class="alert info" style="display:block;">${vm ? T('Il modello visione non risulta installato.', 'The vision model does not appear installed.') : T('Per le immagini serve un modello con visione.', 'Images need a vision model.')}
+            <button class="btn" onclick="copyText('ollama pull ${esc(pullName)}')">📋 ollama pull ${esc(pullName)}</button></div>` : ''}
+          <p style="font-size:0.78rem;color:var(--muted);margin:0;">${T('Il modello gira in Ollama sul tuo computer. La pagina prepara la richiesta; la esegue il comando "watch" o un agente collegato.', 'The model runs in Ollama on your computer. The page prepares the request; the "watch" command or a linked agent runs it.')}</p>
+        </div>`;
+    }
+
+    function queueCard() {
+      if (!QUEUE.length) return '';
+      const rows = QUEUE.map((q) => `<tr><td>${q.error ? '❌' : '⏳'} <b>${esc(q.name)}</b></td><td style="color:${q.error ? 'var(--danger)' : 'var(--muted)'};">${esc(q.error || T('in attesa di elaborazione locale', 'waiting for local processing'))}</td>
+        <td><button class="btn btn-danger" onclick="dismissQueue('${esc(q.name)}')">${T('Rimuovi', 'Remove')}</button></td></tr>`).join('');
+      return `<div class="card"><h2>⏳ ${T('In coda (elaborazione con modello locale)', 'Queued (local model processing)')}</h2>
+        <table><tbody>${rows}</tbody></table>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center;">
+          <button class="btn btn-em" onclick="copyText(cliCmd('watch_cmd'))">📋 ${T('Copia comando "watch" (elabora la coda)', 'Copy "watch" command (processes the queue)')}</button>
+          <button class="btn" onclick="syncFolderAndDb()">↻ ${T('Aggiorna', 'Refresh')}</button>
+          <span style="font-size:0.78rem;color:var(--muted);">${T('Si elabora anche da solo quando un agente usa cortical-mcp.', 'Also runs by itself when an agent uses cortical-mcp.')}</span>
+        </div></div>`;
+    }
+
+    function renderSetupPanel(L) {
+      const linked = linkedOk();
+      const hs = ENV.harness_status || {};
+      const names = Object.keys(PRESEND);
+      const rows = names.map((h) => {
+        const st = hs[h] || {};
+        const badge = ENV.public ? '' : (st.linked ? '<span class="pill pill-ok">✅ ' + T('collegato', 'linked') + '</span>'
+          : (st.detected ? '<span class="pill pill-warn">⚠️ ' + T('rilevato, esegui il comando', 'detected, run the command') + '</span>' : '<span class="pill pill-pub">➖ ' + T('non rilevato', 'not detected') + '</span>'));
+        return `<div class="chk" style="justify-content:space-between;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--card2);"><b>${h}</b>${badge}</div>`;
+      }).join('');
+      const stepN = (n, ok) => `<span class="pill ${ok ? 'pill-ok' : 'pill-warn'}" style="margin-right:6px;">${ok ? '✅' : n}</span>`;
+      const allLinked = !ENV.public && names.filter((h) => (hs[h] || {}).detected).every((h) => (hs[h] || {}).linked);
+      return `
+        <div class="card">
+          <h2>${stepN(1, allLinked)}${T('Un solo comando prepara tutto', 'One command sets everything up')}</h2>
+          <p style="font-size:0.88rem;color:var(--muted);margin:0 0 10px;">${T('Incollalo nel terminale (Terminale su Mac/Linux, PowerShell o Prompt dei comandi su Windows). Crea la cartella <b>Documenti/Cortical</b>, collega gli harness che usi (con backup) e apre questa pagina.', 'Paste it in a terminal (Terminal on Mac/Linux, PowerShell or Command Prompt on Windows). It creates the <b>Documents/Cortical</b> folder, links the harnesses you use (with backup) and opens this page.')}</p>
+          <pre style="margin:0 0 8px;">${esc(cliCmd('setup_cmd'))}</pre>
+          <button class="btn btn-em" onclick="copyText(cliCmd('setup_cmd'))">📋 ${T('Copia comando', 'Copy command')}</button>
+          <div class="grid" style="margin-top:12px;">${rows}</div>
+        </div>
+        <div class="card">
+          <h2>${stepN(2, linked)}${T('Collega la cartella (1 clic)', 'Link the folder (1 click)')}</h2>
+          <p style="font-size:0.88rem;color:var(--muted);margin:0 0 10px;">${T('Premi il pulsante: il selettore si apre già su <b>Documenti</b>. Scegli la cartella <b>Cortical</b> e conferma. Funziona uguale su Mac, Windows e Linux.', 'Press the button: the picker opens already on <b>Documents</b>. Choose the <b>Cortical</b> folder and confirm. Same on Mac, Windows and Linux.')}</p>
           ${FOLDER_WARN ? `<div class="alert err" style="display:block;">${esc(FOLDER_WARN)}</div>` : ''}
-          ${linked
-            ? `<div class="alert ok" style="display:block;">✅ ${it ? 'Collegata' : 'Linked'}: <b>${esc(DIR_HANDLE.name)}</b></div>`
-            : `<button class="btn btn-primary" onclick="linkCorticalFolder()">📂 ${it ? 'Scegli la cartella...' : 'Choose folder...'}</button>
-               ${typeof window.showDirectoryPicker !== 'function' ? `<p style="font-size:0.82rem;color:var(--amber);">${it ? 'Questo browser non supporta il collegamento diretto (usa Chrome, Edge o Arc). Puoi comunque usare il Vault e scaricare i file con ⬇️ JSON in ' + esc(ENV.data_display) + '/vault/.' : 'This browser cannot link folders directly (use Chrome, Edge or Arc). You can still use the Vault and download files with ⬇️ JSON into ' + esc(ENV.data_display) + '/vault/.'}</p>` : ''}`}
+          ${linked ? `<div class="alert ok" style="display:block;">✅ ${T('Collegata', 'Linked')}: <b>${esc(DIR_HANDLE.name)}</b></div>`
+            : `<button class="btn btn-primary" onclick="linkCorticalFolder()">📂 ${T('Scegli la cartella Cortical', 'Choose the Cortical folder')}</button>
+               ${typeof window.showDirectoryPicker !== 'function' ? `<p style="font-size:0.82rem;color:var(--amber);">${T('Questo browser non può collegare cartelle (usa Chrome, Edge o Arc).', 'This browser cannot link folders (use Chrome, Edge or Arc).')}</p>` : ''}`}
         </div>
+        ${modelCard()}
         <div class="card">
-          <h2>${stepN(2, chosen.length > 0 && chosen.every((h) => (hs[h] || {}).linked))}${it ? 'Scegli gli harness che usi' : 'Pick the harnesses you use'}</h2>
-          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${ENV.public
-            ? (it ? 'Seleziona quelli che usi. Per rilevare automaticamente quelli installati e il loro stato, apri la tua copia locale html/settings.html.' : 'Select the ones you use. To auto-detect installed ones and their status, open your local html/settings.html.')
-            : (it ? 'Rilevati automaticamente dal tuo computer. Il browser non può modificare le configurazioni degli harness: copia il comando qui sotto e incollalo nel terminale (prima in anteprima, poi reale).' : 'Auto-detected on your computer. A browser cannot edit harness configs: copy the command below into a terminal (preview first, then real).')}</p>
-          <div class="grid" style="margin-bottom:12px;">${rows}</div>
-          <pre style="margin:0 0 8px;">${esc(cmd + ' --dry-run')}</pre>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button class="btn" onclick="copyText('${esc(cmd)} --dry-run'.replace(/&amp;/g,'&'))">📋 ${it ? '1) Copia anteprima (dry-run)' : '1) Copy preview (dry-run)'}</button>
-            <button class="btn btn-em" onclick="copyText('${esc(cmd)}'.replace(/&amp;/g,'&'))">📋 ${it ? '2) Copia comando reale' : '2) Copy real command'}</button>
+          <h2>${stepN(4, ITEMS.length > 0)}${T('Carica il primo file', 'Add your first file')}</h2>
+          <button class="btn btn-primary" onclick="TAB='vault'; render();">🛡️ ${T('Apri Privacy Vault', 'Open Privacy Vault')}</button>
+        </div>`;
+    }
+
+    function highlightOriginal(text, raws, kept) {
+      const keepLo = new Set((kept || []).map((k) => k.toLowerCase()));
+      const list = Array.from(new Set(raws)).filter((r) => r && r.length > 1).sort((a, b) => b.length - a.length);
+      let html = esc(text);
+      if (!list.length) return html;
+      const rx = new RegExp(list.map((r) => esc(r).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+      return html.replace(rx, (m) => {
+        const raw = m.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+        const k = keepLo.has(raw.toLowerCase());
+        return `<mark class="${k ? 'kept' : 'hit'}" data-raw="${esc(raw)}" onclick="toggleKeep(this.dataset.raw)" title="${T('Clic: ' + (k ? 'oscura di nuovo' : 'non oscurare'), 'Click: ' + (k ? 'mask again' : 'do not mask'))}">${m}</mark>`;
+      });
+    }
+
+    function renderReview(L) {
+      if (!INSPECT) return '';
+      let origBlock = '';
+      if (ORIG && ORIG.text) {
+        const all = sanitizeTextClient(ORIG.text, INSPECT.profile, ORIG.marks || [], []);
+        const raws = Object.values(all.mapping || {}).concat(ORIG.marks || []);
+        origBlock = `<div style="font-size:0.8rem;color:var(--muted);margin:10px 0 4px;">${T('Originale (resta solo in questo browser). Evidenziato = verrà oscurato; clic su un evidenziato per NON oscurarlo; seleziona del testo per oscurarlo.', 'Original (stays in this browser only). Highlighted = will be masked; click a highlight to NOT mask it; select text to mask it.')}</div>
+          <div id="rv-orig" class="rv">${highlightOriginal(ORIG.text, raws, ORIG.keep || [])}</div>`;
+      } else if (ORIG && ORIG.kind === 'image') {
+        origBlock = `<div style="font-size:0.8rem;color:var(--muted);margin:10px 0 4px;">${T('Immagine: per correggere i riquadri ricaricala dall\'inizio; qui puoi oscurare altre parole del testo estratto selezionandole.', 'Image: to fix boxes, upload it again; here you can mask more words of the extracted text by selecting them.')}</div>`;
+      }
+      return `
+        <div class="card" style="border-color:var(--accent);">
+          <h2>${L.drawerTitle}: <code>${esc(INSPECT.uri)}</code></h2>
+          <p style="font-size:0.82rem;color:var(--muted);margin:0 0 10px;">File: <b>${esc(INSPECT.source_name)}</b> · ${esc(INSPECT.resolved_policy)} · ${INSPECT.local_only ? '🔒 SOLO LOCALE' : '🛡️ PRONTO PER CHAT'} · ${INSPECT.tokens_est || 0} tok</p>
+          <div class="grid" style="margin-bottom:10px;">
+            <label>${T('Livello privacy', 'Privacy level')}
+              <select id="re-profile">
+                <option value="max_security" ${INSPECT.profile === 'max_security' ? 'selected' : ''}>max_security (🔒)</option>
+                <option value="medium" ${INSPECT.profile === 'medium' ? 'selected' : ''}>medium (🛡️)</option>
+                <option value="low" ${INSPECT.profile === 'low' ? 'selected' : ''}>low ([REDACTED])</option>
+                <option value="max_context" ${INSPECT.profile === 'max_context' ? 'selected' : ''}>max_context (🌐)</option>
+              </select></label>
+            <label>${L.addTermsLbl}<input id="re-terms" placeholder="Nome Cognome, CF, Azienda..." /></label>
           </div>
-          <p style="font-size:0.78rem;color:var(--muted);margin:10px 0 0;">${it ? 'Ogni sync crea un backup ripristinabile con --rollback. Poi riavvia l\'harness per caricare il server MCP "cortical-mcp".' : 'Every sync creates a backup restorable with --rollback. Then restart the harness to load the "cortical-mcp" server.'}</p>
-        </div>
-        <div class="card">
-          <h2>${stepN(3, ITEMS.length > 0)}${it ? 'Carica il tuo primo file' : 'Add your first file'}</h2>
-          <p style="font-size:0.86rem;color:var(--muted);margin:0 0 10px;">${it ? 'Vai al Privacy Vault, trascina il documento e scegli il livello di privacy. In chat userai @private:<alias> (profilo "Anonimizzato per Chat").' : 'Go to Privacy Vault, drop the document and pick a privacy level. In chat use @private:<alias> ("Anonymized for Chat" profile).'}</p>
-          <button class="btn btn-primary" onclick="TAB='vault'; render();">🛡️ ${it ? 'Apri Privacy Vault' : 'Open Privacy Vault'}</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn" onmousedown="event.preventDefault()" onclick="addMarkFromSelection()">➕ ${T('Oscura la selezione', 'Mask selection')}</button>
+            <button class="btn btn-em" onclick="applyCorrections()">✏️ ${L.applyUpdate}</button>
+          </div>
+          ${origBlock}
+          <div style="font-size:0.8rem;color:var(--muted);margin:10px 0 4px;">${T('Risultato anonimizzato (seleziona per oscurare altro):', 'Anonymized result (select to mask more):')}</div>
+          <div id="rv-san" class="rv">${esc(INSPECT.sanitized_content || '')}</div>
         </div>`;
     }
 
@@ -791,105 +972,58 @@
       const localCount = ITEMS.filter((i) => i.local_only).length;
       const chatCount = total - localCount;
       const profiles = [
-        ['max_security', L.profMaxSec, L.profMaxSecDesc],
-        ['medium', L.profMed, L.profMedDesc],
-        ['low', L.profLow, L.profLowDesc],
-        ['max_context', L.profPub, L.profPubDesc],
+        ['max_security', L.profMaxSec, L.profMaxSecDesc], ['medium', L.profMed, L.profMedDesc],
+        ['low', L.profLow, L.profLowDesc], ['max_context', L.profPub, L.profPubDesc],
       ];
       const profCards = profiles.map(([k, tit, desc]) => `
         <label class="prof-opt ${SEL_PROFILE === k ? 'sel' : ''}" onclick="SEL_PROFILE='${k}'; render();">
           <input type="radio" name="prof" value="${k}" ${SEL_PROFILE === k ? 'checked' : ''} />
-          <span><strong>${esc(tit)}</strong><br/><span style="font-size:0.75rem;color:var(--muted);">${esc(desc)}</span></span>
-        </label>`).join('');
-
+          <span><strong>${esc(tit)}</strong><br/><span style="font-size:0.75rem;color:var(--muted);">${esc(desc)}</span></span></label>`).join('');
       const rows = ITEMS.map((it) => {
-        const badge = it.local_only
-          ? '<span class="pill pill-warn">🔒 SOLO LOCALE</span>'
+        const badge = it.local_only ? '<span class="pill pill-warn">🔒 SOLO LOCALE</span>'
           : (it.profile === 'max_context' ? '<span class="pill pill-pub">🌐 PUBBLICO</span>' : '<span class="pill pill-ok">🛡️ SICURO PER CHAT</span>');
-        const copyBtn = it.local_only
-          ? `<button class="btn" disabled title="${esc(L.localTip)}">${L.copyBtn}</button>`
-          : `<button class="btn" onclick="copyAliasRef('${esc(it.alias)}')">${L.copyBtn}</button>`;
-        return `
-          <tr>
-            <td>${badge}</td>
-            <td><code>@private:${esc(it.alias)}</code></td>
-            <td>${esc(it.source_name)}</td>
-            <td>${esc(it.resolved_policy)} / ${esc(it.profile)}</td>
-            <td>${it.entity_count || 0}</td>
-            <td>${it.tokens_est || 0}</td>
-            <td style="display:flex;gap:6px;flex-wrap:wrap;">
-              <button class="btn" onclick="INSPECT = ITEMS.find(x=>x.alias==='${esc(it.alias)}'); render();">${L.inspectBtn}</button>
-              ${copyBtn}
-              <button class="btn" onclick="downloadOneVaultJson('${esc(it.alias)}')">${L.exportOneBtn}</button>
-              <button class="btn btn-danger" onclick="removeVaultItem('${esc(it.alias)}')">${L.delBtn}</button>
-            </td>
-          </tr>`;
+        const copyBtn = it.local_only ? `<button class="btn" disabled title="${esc(L.localTip)}">${L.copyBtn}</button>` : `<button class="btn" onclick="copyAliasRef('${esc(it.alias)}')">${L.copyBtn}</button>`;
+        return `<tr><td>${badge}</td><td><code>@private:${esc(it.alias)}</code></td><td>${esc(it.source_name)}</td><td>${esc(it.resolved_policy)} / ${esc(it.profile)}</td><td>${it.entity_count || 0}</td><td>${it.tokens_est || 0}</td>
+          <td style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn" onclick="openInspect('${esc(it.alias)}')">${L.inspectBtn}</button>${copyBtn}
+          <button class="btn" onclick="downloadOneVaultJson('${esc(it.alias)}')">${L.exportOneBtn}</button><button class="btn btn-danger" onclick="removeVaultItem('${esc(it.alias)}')">${L.delBtn}</button></td></tr>`;
       }).join('');
-
-      const drawer = INSPECT ? `
-        <div class="card" style="border-color:var(--accent);">
-          <h2>${L.drawerTitle}: <code>${esc(INSPECT.uri)}</code></h2>
-          <p style="font-size:0.82rem;color:var(--muted);margin:0 0 10px;">
-            File: <b>${esc(INSPECT.source_name)}</b> · Policy: <b>${esc(INSPECT.resolved_policy)}</b> ·
-            ${INSPECT.local_only ? '🔒 SOLO LOCALE' : '🛡️ PRONTO PER CHAT'} · ${INSPECT.tokens_est || 0} tok
-          </p>
-          <div class="grid" style="margin-bottom:10px;">
-            <label>Profilo Privacy
-              <select id="re-profile">
-                <option value="max_security" ${INSPECT.profile === 'max_security' ? 'selected' : ''}>max_security (Solo Locale 🔒)</option>
-                <option value="medium" ${INSPECT.profile === 'medium' ? 'selected' : ''}>medium (Anonimizzato per Chat 🛡️)</option>
-                <option value="low" ${INSPECT.profile === 'low' ? 'selected' : ''}>low (Solo Riassunto [REDACTED])</option>
-                <option value="max_context" ${INSPECT.profile === 'max_context' ? 'selected' : ''}>max_context (Pubblico)</option>
-              </select>
-            </label>
-            <label>${L.addTermsLbl}<input id="re-terms" placeholder="Nome Cognome, CF, Azienda..." /></label>
-          </div>
-          <button class="btn btn-em" onclick="resanitizeInspect()">${L.applyUpdate}</button>
-          <pre style="margin-top:12px;">${esc(INSPECT.sanitized_content || '')}</pre>
+      const imgEd = IMGST ? `
+        <div style="margin:12px 0;">
+          <div style="font-size:0.84rem;color:var(--muted);margin-bottom:6px;">${T('Trascina sull\'immagine per coprire con un riquadro nero ciò che va nascosto (nomi, volti, targhe...). Il testo residuo lo anonimizza il modello locale.', 'Drag on the image to cover what must be hidden (names, faces, plates...). Remaining text is anonymized by the local model.')}</div>
+          <canvas id="img-canvas" style="max-width:100%;border:1px solid var(--border);border-radius:8px;cursor:crosshair;"
+            onmousedown="imgDown(event)" onmousemove="imgMove(event)" onmouseup="imgUp()" onmouseleave="imgUp()"></canvas>
+          <div style="margin-top:6px;display:flex;gap:8px;align-items:center;"><button class="btn" onclick="imgUndo()">↩️ ${T('Annulla ultimo riquadro', 'Undo last box')}</button><span style="font-size:0.8rem;color:var(--muted);">${IMGST.rects.length} ${T('riquadri', 'boxes')}</span></div>
         </div>` : '';
-
       return `
+        ${queueCard()}
         <div class="card">
           <h2>${L.uploadTitle}</h2>
           <div class="dropzone" onclick="document.getElementById('v-file').click()"
-               ondragover="event.preventDefault(); this.classList.add('drag');"
-               ondragleave="this.classList.remove('drag');"
+               ondragover="event.preventDefault(); this.classList.add('drag');" ondragleave="this.classList.remove('drag');"
                ondrop="event.preventDefault(); this.classList.remove('drag'); pickFileObj(event.dataTransfer.files[0]);">
             <div>${SELECTED_FILE ? ('📄 ' + esc(SELECTED_FILE.name) + ' (' + Math.max(1, Math.round(SELECTED_FILE.size / 1024)) + ' KB)') : esc(L.dropHint)}</div>
-            <input type="file" id="v-file" style="display:none;" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.json,.csv,.log" onchange="pickFileObj(this.files[0])" />
+            <input type="file" id="v-file" style="display:none;" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.json,.csv,.log,.png,.jpg,.jpeg,.webp" onchange="pickFileObj(this.files[0])" />
           </div>
+          ${imgEd}
           <div class="prof-grid">${profCards}</div>
           <div class="grid">
             <label>${L.aliasLbl}<input id="v-alias" placeholder="alsa" value="${SELECTED_FILE ? esc(SELECTED_FILE.name.replace(/\.[^.]+$/, '')) : ''}" /></label>
-            <label>${L.policyLbl}
-              <select id="v-policy">
-                <option value="auto">auto (Consigliata)</option>
-                <option value="fail_closed">fail_closed (Blocca su errore)</option>
-                <option value="fail_open">fail_open (Pubblico)</option>
-              </select>
-            </label>
+            <label>${L.policyLbl}<select id="v-policy"><option value="auto">auto</option><option value="fail_closed">fail_closed</option><option value="fail_open">fail_open</option></select></label>
             <label>${L.termsLbl}<input id="v-terms" placeholder="Mario Rossi, Azienda Srl..." /></label>
           </div>
-          <div style="margin-top:12px;display:flex;justify-content:flex-end;">
+          <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+            <span style="font-size:0.8rem;color:var(--muted);">${useModel() ? '🧠 ' + T('Modello locale attivo: ', 'Local model on: ') + esc((CFG.privacy || {}).ner_model || 'default') : '⚡ ' + T('Solo regole veloci nel browser', 'Quick browser rules only')}</span>
             <button class="btn btn-primary" onclick="processSelectedFile()">${L.uploadBtn}</button>
           </div>
         </div>
+        ${modelCard()}
         <div class="card">
           <h2>${L.vaultListTitle}</h2>
-          <div class="stats">
-            <div class="stat-box">${L.tot}: <b>${total}</b></div>
-            <div class="stat-box">${L.lockOnly}: <b>${localCount}</b></div>
-            <div class="stat-box">${L.chatReady}: <b>${chatCount}</b></div>
-          </div>
-          ${ITEMS.length === 0 ? `<p style="color:var(--muted);">${L.emptyVault}</p>` : `
-          <div style="overflow-x:auto;">
-            <table>
-              <thead><tr><th>Privacy</th><th>Alias</th><th>File</th><th>Policy / Profilo</th><th>Entità</th><th>Tok</th><th>Azioni</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>`}
+          <div class="stats"><div class="stat-box">${L.tot}: <b>${total}</b></div><div class="stat-box">${L.lockOnly}: <b>${localCount}</b></div><div class="stat-box">${L.chatReady}: <b>${chatCount}</b></div></div>
+          ${ITEMS.length === 0 ? `<p style="color:var(--muted);">${L.emptyVault}</p>` : `<div style="overflow-x:auto;"><table>
+            <thead><tr><th>Privacy</th><th>Alias</th><th>File</th><th>Policy / Profilo</th><th>Entità</th><th>Tok</th><th>Azioni</th></tr></thead><tbody>${rows}</tbody></table></div>`}
         </div>
-        ${drawer}`;
+        ${renderReview(L)}`;
     }
 
     function renderModelsPanel(L) {
@@ -1028,7 +1162,9 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare</pre>
           <aside class="sidebar">${sidebar}</aside>
           <main>${body}</main>
         </div>`;
+      if (IMGST) drawImg();
     }
+    setInterval(() => { if (QUEUE.some((q) => !q.error) && linkedOk() && !document.hidden) { const prev = ITEMS.length; syncFolderAndDb().then(() => { if (ITEMS.length !== prev) setBanner('ok', T('Elaborazione locale completata.', 'Local processing completed.')); }); } }, 4000);
 
     window.saveCfg = async function() {
       const txt = JSON.stringify(CFG, null, 2) + '\n';

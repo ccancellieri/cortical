@@ -11,10 +11,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-DEFAULT_CONFIG_PATH = Path("cortical.config.json")
-DEFAULT_CONFIG_DIR = Path("cortical.config.d")
-DEFAULT_TELEMETRY_DB = Path(".cortical_data/telemetry.db")
-DEFAULT_VAULT_DB = Path(".cortical_data/vault.db")
+def default_data_dir() -> Path:
+    """Visible, OS-neutral data folder (`~/Documents/Cortical`), overridable via `CORTICAL_DATA_DIR`."""
+    env = os.environ.get("CORTICAL_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    docs = Path.home() / "Documents"
+    return (docs if docs.is_dir() else Path.home()) / "Cortical"
+
+
+DATA_DIR = default_data_dir()
+DEFAULT_CONFIG_PATH = DATA_DIR / "cortical.config.json"
+DEFAULT_CONFIG_DIR = DATA_DIR / "cortical.config.d"
+DEFAULT_TELEMETRY_DB = DATA_DIR / "telemetry.db"
+DEFAULT_VAULT_DB = DATA_DIR / "vault.db"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "active_runner": "ollama",
@@ -91,7 +101,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "default_policy": "auto",
         "default_profile": "medium",
         "ner_model": "qwen2.5:1.5b",
-        "use_local_ner": False,
+        "vision_model": "",
+        "use_local_ner": True,
         "custom_terms": [],
     },
     "compression": {

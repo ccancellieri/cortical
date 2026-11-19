@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,6 +80,16 @@ class CorticalMCPServer:
 
     def __init__(self, vault_db: Path | str | None = None) -> None:
         self.vault = PrivacyVault(vault_db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+        self.vault.process_inbox_inline = False  # slow local-model jobs never block an MCP call
+        self._inbox_thread: Optional[threading.Thread] = None
+
+    def _kick_inbox(self) -> None:
+        """Processes queued uploads (local NER/vision) in a background thread."""
+        if self._inbox_thread is not None and self._inbox_thread.is_alive():
+            return
+        if self.vault.pending_inbox():
+            self._inbox_thread = threading.Thread(target=lambda: self.vault.sync_from_disk(process_inbox=True), daemon=True)
+            self._inbox_thread.start()
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "cortical_vault_read":
@@ -146,6 +157,8 @@ class CorticalMCPServer:
 
         if method.startswith("notifications/"):
             return None
+        if method in {"initialize", "resources/list", "prompts/get", "tools/call"}:
+            self._kick_inbox()
         try:
             if method == "initialize":
                 result: Any = {

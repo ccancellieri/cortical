@@ -33,6 +33,28 @@ BUILTIN_MODEL_CATALOG: list[dict[str, Any]] = [
         "notes": "Fits comfortably in 4 GB VRAM for hybrid laptops; strong JSON extraction.",
     },
     {
+        "model_id": "qwen2.5vl:3b",
+        "runner": "ollama",
+        "pull_ref": "ollama pull qwen2.5vl:3b",
+        "memory_gb": 3.2,
+        "native_ctx": 32768,
+        "quantization": "Q4_K_M",
+        "is_variable_quant": False,
+        "roles": ["vision", "ocr"],
+        "notes": "Local vision/OCR for images and scanned PDFs; fits 4 GB VRAM.",
+    },
+    {
+        "model_id": "qwen2.5vl:7b",
+        "runner": "ollama",
+        "pull_ref": "ollama pull qwen2.5vl:7b",
+        "memory_gb": 6.0,
+        "native_ctx": 32768,
+        "quantization": "Q4_K_M",
+        "is_variable_quant": False,
+        "roles": ["vision", "ocr"],
+        "notes": "More accurate local vision/OCR for 16 GB machines.",
+    },
+    {
         "model_id": "qwen3:8b",
         "runner": "ollama",
         "pull_ref": "ollama pull qwen3:8b",
@@ -209,7 +231,7 @@ def recommend_models_for_hardware(
         return viable[0]
 
     rec_roles: dict[str, dict[str, Any]] = {}
-    for role, pref_var in (("router", False), ("ner", False), ("daily_coder", True), ("deep_reasoner", True), ("orchestrator", True)):
+    for role, pref_var in (("router", False), ("ner", False), ("daily_coder", True), ("deep_reasoner", True), ("orchestrator", True), ("vision", False)):
         chosen = _pick(role, prefer_variable=pref_var)
         if chosen:
             rec_roles[role] = {

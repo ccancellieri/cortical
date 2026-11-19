@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -25,6 +26,9 @@ VERIFIED_PRESEND_HARNESSES: frozenset[str] = frozenset({
 })
 
 
+_PROC_LOCK = threading.Lock()
+
+
 class PrivacyVault:
     """Stores locally ingested, sanitized, compressed items and exposes them across Channels 1-3."""
 
@@ -33,7 +37,7 @@ class PrivacyVault:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.vault_dir = self.db_path.parent / "vault"
         self.inbox_dir = self.db_path.parent / "vault_inbox"
-        self._syncing = False
+        self.process_inbox_inline = True
         with self._connect() as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS vault_items (
@@ -72,16 +76,26 @@ class PrivacyVault:
         out_p.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         return out_p
 
-    def sync_from_disk(self) -> dict[str, int]:
+    def pending_inbox(self) -> list[Path]:
+        """Raw files waiting in `vault_inbox/` (not yet processed, no error marker)."""
+        if not self.inbox_dir.is_dir():
+            return []
+        return [
+            f for f in sorted(self.inbox_dir.iterdir())
+            if f.is_file() and not f.name.startswith(".") and not f.name.endswith((".meta.json", ".error.json"))
+            and not f.with_name(f.name + ".error.json").is_file()
+        ]
+
+    def sync_from_disk(self, process_inbox: Optional[bool] = None) -> dict[str, int]:
         """Auto-ingests files dropped in `vault_inbox/` and reconciles static-UI `vault/*.json` edits/tombstones."""
-        if self._syncing:
+        do_inbox = self.process_inbox_inline if process_inbox is None else process_inbox
+        if not _PROC_LOCK.acquire(blocking=False):
             return {"inbox_processed": 0, "imported": 0, "deleted": 0}
-        self._syncing = True
         inbox_processed = 0
         imported = 0
         deleted = 0
         try:
-            if self.inbox_dir.is_dir():
+            if do_inbox and self.inbox_dir.is_dir():
                 for f in sorted(self.inbox_dir.iterdir()):
                     if not f.is_file() or f.name.startswith(".") or f.name.endswith(".meta.json") or f.name.endswith(".error.json"):
                         continue
@@ -99,8 +113,19 @@ class PrivacyVault:
                             meta = {}
                     try:
                         terms = meta.get("custom_terms")
-                        self.ingest(
+                        keep = meta.get("keep_terms")
+                        cfg_m = {"privacy": {}}
+                        try:
+                            from ..config import load_cortical_config
+                            cfg_m = load_cortical_config()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        ing_res = self.ingest(
                             f,
+                            model=meta.get("ner_model") or None,
+                            vision_model=meta.get("vision_model") or None,
+                            keep_terms=list(keep) if isinstance(keep, list) else None,
+                            config=cfg_m,
                             alias=meta.get("alias") or None,
                             policy=str(meta.get("policy") or "auto"),
                             profile=str(meta.get("profile") or "medium"),
@@ -109,6 +134,12 @@ class PrivacyVault:
                         )
                         f.unlink(missing_ok=True)
                         meta_p.unlink(missing_ok=True)
+                        if meta.get("source_name"):
+                            with self._connect() as c2:
+                                c2.execute("UPDATE vault_items SET source_name = ? WHERE alias = ?", (str(meta["source_name"])[:200], ing_res["alias"]))
+                                row2 = c2.execute("SELECT * FROM vault_items WHERE alias = ?", (ing_res["alias"],)).fetchone()
+                            if row2:
+                                self._write_item_json({k: row2[k] for k in row2.keys()} | {"sanitized_content": row2["sanitized_content"]})
                         inbox_processed += 1
                     except Exception as exc:  # noqa: BLE001
                         err_p.write_text(
@@ -167,7 +198,7 @@ class PrivacyVault:
                         imported += 1
             return {"inbox_processed": inbox_processed, "imported": imported, "deleted": deleted}
         finally:
-            self._syncing = False
+            _PROC_LOCK.release()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
@@ -191,6 +222,8 @@ class PrivacyVault:
         llm_fn: Optional[Callable[[str], str]] = None,
         model: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
+        vision_model: Optional[str] = None,
+        keep_terms: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Sanitizes, compresses, and stores content locally under `cortical://private/<alias>`."""
         res = classify_and_sanitize(
@@ -202,6 +235,8 @@ class PrivacyVault:
             llm_fn=llm_fn,
             model=model,
             config=config,
+            vision_model=vision_model,
+            keep_terms=keep_terms,
         )
         comp = compress_structured(res["sanitized_text"])
         is_path = isinstance(path_or_text, Path) or (
@@ -273,6 +308,8 @@ class PrivacyVault:
         llm_fn: Optional[Callable[[str], str]] = None,
         model: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
+        vision_model: Optional[str] = None,
+        keep_terms: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Sanitizes, compresses, and stores uploaded file bytes while stripping metadata via extension handlers."""
         safe_name = Path(filename or "upload.txt").name or "upload.txt"
@@ -290,6 +327,8 @@ class PrivacyVault:
                 llm_fn=llm_fn,
                 model=model,
                 config=config,
+                vision_model=vision_model,
+                keep_terms=keep_terms,
             )
 
     def list_items(self, include_local_only: bool = True) -> list[dict[str, Any]]:
@@ -339,6 +378,8 @@ class PrivacyVault:
         llm_fn: Optional[Callable[[str], str]] = None,
         model: Optional[str] = None,
         config: Optional[dict[str, Any]] = None,
+        vision_model: Optional[str] = None,
+        keep_terms: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Refines privacy policy/profile or masks additional custom terms on an existing Vault item."""
         raw = str(alias_or_uri or "").replace("cortical://private/", "").lstrip("@").strip()
