@@ -1,6 +1,6 @@
 # ADR-007: Zero-Friction Workspace Auto-Discovery, IDE Integration & Control Plane SSOT
 
-- **Status:** Accepted (Implementation in progress for SSOT reconciliation #7)
+- **Status:** Accepted (SSOT reconciliation #7 & default model fix #17 implemented and closed)
 - **Date:** 2026-11-23
 - **GitHub Issue:** #29
 
