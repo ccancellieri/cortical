@@ -228,6 +228,7 @@ const ST = {{
   drawerItem: null,
   pendingModels: [],
   planHarnesses: [],
+  privacySampleText: '',
   lastFocus: null,
   cmdOpen: false,
   cmdQuery: '',
@@ -962,6 +963,10 @@ function renderSettings() {{
   }} else if (tab === 'privacy') {{
     const pv = c.privacy || {{}};
     const cp = c.compression || {{}};
+    const prof = pv.default_profile || 'medium';
+    const termsCsv = Array.isArray(pv.custom_terms) ? pv.custom_terms.join(', ') : (pv.custom_terms || '');
+    const ignTxt = Array.isArray(pv.folder_ignore_rules) ? pv.folder_ignore_rules.join('\\n') : (pv.folder_ignore_rules || '.cortical_data/\\n.env*\\n*.key\\n*.pem\\n*secret*');
+    const folderTarget = pv.crawl_folder || '~/Dropbox';
     body = `
       <div class="card">
         <div class="grid-3">
@@ -974,8 +979,8 @@ function renderSettings() {{
           </div>
           <div class="field">
             <label for="s-pprof">Default Sensitivity Profile</label>
-            <select id="s-pprof" class="select" onchange="setCfg('privacy.default_profile', this.value)">
-              ${{['max_security','low','medium','max_context'].map((p)=>`<option value="${{p}}" ${{pv.default_profile===p?'selected':''}}>${{p}}</option>`).join('')}}
+            <select id="s-pprof" class="select" onchange="setCfg('privacy.default_profile', this.value);renderPrivacySample()">
+              ${{['max_security','low','medium','max_context'].map((p)=>`<option value="${{p}}" ${{prof===p?'selected':''}}>${{p}}</option>`).join('')}}
             </select>
           </div>
           <div class="field">
@@ -985,7 +990,44 @@ function renderSettings() {{
             ${{err('max_context_share')}}
           </div>
         </div>
+      </div>
+      <div class="card" style="margin-top:14px;">
+        <div class="card-head">
+          <h2>📂 Folder Ingestion &amp; Privacy Policy Presets</h2>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn sm primary" onclick="applyFolderPrivacyPreset('dropbox')">☁️ Cloud Drive / Dropbox Vault (<code>medium</code>)</button>
+            <button class="btn sm" onclick="applyFolderPrivacyPreset('strict')">🔒 Strict Local-Only Vault (<code>max_security</code>)</button>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-bottom:12px;">
+          <div class="field">
+            <label for="s-cfolder">Target Folder Path</label>
+            <input id="s-cfolder" class="input mono" value="${{esc(folderTarget)}}" oninput="setCfg('privacy.crawl_folder', this.value);renderPrivacySample()" />
+            <div class="hint">Used for generated <code>cortical crawl --sanitize</code> and <code>cortical sanitize --recursive</code> commands.</div>
+          </div>
+          <div class="field">
+            <label for="s-cterms">Custom Redaction Terms (comma-separated)</label>
+            <input id="s-cterms" class="input" placeholder="Project Orion, Client Alpha, InternalTaxID" value="${{esc(termsCsv)}}" oninput="setCfg('privacy.custom_terms', this.value.split(',').map(s=>s.trim()).filter(Boolean));renderPrivacySample()" />
+            <div class="hint">Masked deterministically before any 4-tier summary or FTS5 indexing runs.</div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="s-cign">Auto-Ignore Rules (<code>.corticalignore</code> / <code>.geminiignore</code> / <code>.cursorignore</code> / <code>.claudeignore</code>)</label>
+            <textarea id="s-cign" class="input mono" rows="5" oninput="setCfg('privacy.folder_ignore_rules', this.value.split('\\n').map(s=>s.trim()).filter(Boolean))">${{esc(ignTxt)}}</textarea>
+          </div>
+          <div class="field">
+            <label for="s-csamp">Live Sample Text Preview (Real-Time PII Masking)</label>
+            <textarea id="s-csamp" class="input mono" rows="3" oninput="ST.privacySampleText=this.value;renderPrivacySample()">${{esc(ST.privacySampleText || 'Contract with alice@acme.example, IBAN IT60X0542811101000000123456, phone +39 347 555 0199, Project Orion.')}}</textarea>
+            <pre id="s-csamp-out" class="code-pre" style="margin-top:8px;min-height:66px;"></pre>
+            <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:6px;">
+              <code id="s-ccmd" class="mono" style="font-size:11.5px;color:var(--ok);"></code>
+              <button class="btn sm" onclick="copyText(document.getElementById('s-ccmd')?.textContent||'', 'crawl command')">📋 Copy Crawl Command</button>
+            </div>
+          </div>
+        </div>
       </div>`;
+    setTimeout(renderPrivacySample, 0);
   }} else if (tab === 'compression') {{
     const cp = c.compression || {{}};
     body = `
@@ -1036,6 +1078,51 @@ function setCfg(path, val) {{
   cur[parts[parts.length - 1]] = val;
   validateCfg();
   renderDirtyDock();
+}}
+
+function applyFolderPrivacyPreset(kind) {{
+  if (kind === 'dropbox') {{
+    setCfg('privacy.default_policy', 'auto');
+    setCfg('privacy.default_profile', 'medium');
+    setCfg('privacy.crawl_folder', '~/Dropbox');
+    setCfg('privacy.folder_ignore_rules', ['.cortical_data/', '.env*', '*.key', '*.pem', '*secret*', '*.dmg', '*.zip']);
+  }} else {{
+    setCfg('privacy.default_policy', 'fail_closed');
+    setCfg('privacy.default_profile', 'max_security');
+    setCfg('privacy.crawl_folder', '~/Documents/PrivateVault');
+    setCfg('privacy.folder_ignore_rules', ['.cortical_data/', '.env*', '*.key', '*.pem', '*secret*']);
+  }}
+  renderAll();
+  toast('ok', 'Applied preset: ' + (kind === 'dropbox' ? 'Cloud Drive / Dropbox Vault' : 'Strict Local-Only Vault'));
+}}
+
+function renderPrivacySample() {{
+  const out = document.getElementById('s-csamp-out');
+  const cmdEl = document.getElementById('s-ccmd');
+  if (!out) return;
+  const pv = ST.draftCfg?.privacy || {{}};
+  const prof = pv.default_profile || 'medium';
+  let txt = document.getElementById('s-csamp')?.value || 'Contract with alice@acme.example, IBAN IT60X0542811101000000123456.';
+  const cnt = {{}};
+  const tok = (cat) => {{ cnt[cat] = (cnt[cat] || 0) + 1; return `[${{cat}}_${{cnt[cat]}}]`; }};
+  const rawTerms = Array.isArray(pv.custom_terms) ? pv.custom_terms : [];
+  rawTerms.slice().sort((a,b) => b.length - a.length).forEach((t) => {{
+    if (!t) return;
+    const re = new RegExp(t.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\$&'), 'gi');
+    txt = txt.replace(re, () => tok('CUSTOM'));
+  }});
+  txt = txt.replace(/\\b(?:sk-[a-zA-Z0-9_-]{{16,}}|gh[pous]_[a-zA-Z0-9]{{20,}}|AKIA[0-9A-Z]{{16}})\\b/g, () => tok('SECRET'));
+  txt = txt.replace(/\\b[A-Z]{{2}}\\d{{2}}[A-Z0-9]{{11,30}}\\b/g, () => tok('IBAN'));
+  txt = txt.replace(/\\b[A-Z]{{6}}\\d{{2}}[A-Z]\\d{{2}}[A-Z]\\d{{3}}[A-Z]\\b/g, () => tok('TAX_ID'));
+  txt = txt.replace(/\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{{2,}}\\b/g, () => tok('EMAIL'));
+  txt = txt.replace(/(?<!\\w)(?:\\+?\\d{{1,3}}[\\s.-]?)?(?:\\(?\\d{{2,4}}\\)?[\\s.-]?)\\d{{3,4}}[\\s.-]?\\d{{3,4}}(?!\\w)/g, () => tok('PHONE'));
+  txt = txt.replace(/\\b(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){{3}}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\b/g, () => tok('IP'));
+  out.innerHTML = esc(txt).replace(/(\\[[A-Z0-9_]+_\\d+\\])/g, '<span class="pill ok" style="padding:1px 5px;font-size:11px;">$1</span>');
+  if (cmdEl) {{
+    const p = (pv.crawl_folder || '~/Dropbox').replace(/"/g, '\\\\"');
+    const tFlag = rawTerms.length ? ` --custom-terms "${{rawTerms.join(',').replace(/"/g, '\\\\"')}}"` : '';
+    cmdEl.textContent = `cortical crawl "${{p}}" --sanitize --privacy-profile ${{prof}}${{tFlag}} --dry-run`;
+  }}
 }}
 
 function validateCfg() {{

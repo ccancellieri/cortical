@@ -39,8 +39,9 @@ from .hardware.models import (
     remove_custom_model,
 )
 from .hardware.probe import probe_hardware
-from .privacy.sanitizer import FailClosedError
+from .privacy.sanitizer import FailClosedError, classify_and_sanitize
 from .privacy.vault import PrivacyVault
+from .wiki.store import DEFAULT_IGNORE_PATTERNS, KnowledgeStore, SANITIZABLE_BINARY_EXTENSIONS, TEXT_EXTENSIONS, _matches_ignore
 
 
 def _print_json(data: Any) -> None:
@@ -972,6 +973,38 @@ def build_parser() -> argparse.ArgumentParser:
     br.add_argument("--submit", action="store_true")
     br.set_defaults(func=_cmd_browser)
 
+    crw = sub.add_parser("crawl", help="Recursively index a folder into wiki.db (with optional --sanitize PII/metadata masking)")
+    crw.add_argument("path", help="Folder path to crawl recursively")
+    crw.add_argument("--sanitize", action="store_true", help="Strip OOXML/PDF metadata and mask PII in-memory before indexing")
+    crw.add_argument("--privacy-profile", choices=["max_security", "low", "medium", "max_context"], default=None)
+    crw.add_argument("--custom-terms", default="", help="Comma-separated custom terms to redact/pseudonymize")
+    crw.add_argument("--custom-term", action="append", default=[])
+    crw.add_argument("--principal", default="local_owner")
+    crw.add_argument("--namespace", default="cortical://private")
+    crw.add_argument("--db", default=None)
+    crw.add_argument("--dry-run", action="store_true", help="Preview scan/ignore/sanitization counts without writing wiki.db")
+    crw.add_argument("--full-reindex", action="store_true")
+    crw.add_argument("--json", action="store_true")
+    crw.set_defaults(func=_cmd_crawl)
+
+    san = sub.add_parser("sanitize", help="Batch-sanitize files or recursive folders to an anonymized output directory")
+    san.add_argument("path", help="Source file or directory")
+    san.add_argument("--recursive", action="store_true", help="Walk subdirectories recursively")
+    san.add_argument("--output-dir", required=True, help="Destination directory for sanitized text/markdown files")
+    san.add_argument("--privacy-profile", choices=["max_security", "low", "medium", "max_context"], default=None)
+    san.add_argument("--custom-terms", default="", help="Comma-separated custom terms to mask")
+    san.add_argument("--dry-run", action="store_true")
+    san.add_argument("--json", action="store_true")
+    san.set_defaults(func=_cmd_sanitize)
+
+    wdash = sub.add_parser("wiki-dashboard", help="Export static zero-CDN Wiki Explorer & Sanitization Audit HTML (wiki.html)")
+    wdash.add_argument("--db", default=None)
+    wdash.add_argument("--out-dir", default=None)
+    wdash.add_argument("--principal", default="local_owner")
+    wdash.add_argument("--open", action="store_true")
+    wdash.add_argument("--json", action="store_true")
+    wdash.set_defaults(func=_cmd_wiki_dashboard)
+
     return p
 
 
@@ -1023,6 +1056,248 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         print(f"  - [{ch['action']:9s}] {ch['harness']:15s} -> {ch['path']}")
     if res.get("dashboard"):
         print(f"  Dashboard regenerated: {res['dashboard']}")
+    return 0
+
+
+def _parse_custom_terms(raw_str: str = "", raw_list: Optional[list[str]] = None) -> list[str]:
+    out: list[str] = []
+    if raw_str:
+        out.extend([s.strip() for s in raw_str.split(",") if s.strip()])
+    for raw in (raw_list or []):
+        out.extend([s.strip() for s in str(raw).split(",") if s.strip()])
+    return list(dict.fromkeys(out))
+
+
+class _CrawlProgressPrinter:
+    """Stdlib-only TTY-aware progress bar showing live files/s and O(1) Merkle skip rate."""
+
+    def __init__(self, *, enabled: bool) -> None:
+        import time as _time
+
+        self.enabled = enabled
+        self.is_tty = enabled and sys.stdout.isatty()
+        self.t0 = _time.perf_counter()
+        self.skipped = 0
+        self.last_pct = -1
+        self._time = _time
+
+    def __call__(self, ev: dict[str, Any]) -> None:
+        if ev.get("action") == "unchanged":
+            self.skipped += 1
+        if not self.enabled:
+            return
+        total = max(1, int(ev.get("total") or 1))
+        done = int(ev.get("processed") or 0)
+        elapsed = max(0.001, self._time.perf_counter() - self.t0)
+        rate = done / elapsed
+        hit_pct = int((self.skipped / max(1, done)) * 100)
+        pct = int((done / total) * 100)
+        if self.is_tty:
+            fill = int((done / total) * 20)
+            bar = "#" * fill + "-" * (20 - fill)
+            sys.stdout.write(f"\r[{bar}] {done}/{total} ({pct}%) | {rate:.1f} files/s | O(1) hit {hit_pct}%")
+            if done >= total:
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        elif pct >= self.last_pct + 25 or done == total:
+            self.last_pct = pct
+            print(f"  progress: {done}/{total} ({pct}%) | {rate:.1f} files/s | O(1) hit {hit_pct}%")
+
+
+def _cmd_crawl(args: argparse.Namespace) -> int:
+    target = Path(args.path).expanduser().resolve()
+    if not target.is_dir():
+        print(f"Directory does not exist: {target}", file=sys.stderr)
+        return 1
+    cfg = load_cortical_config()
+    profile = args.privacy_profile or str((cfg.get("privacy") or {}).get("default_profile") or "medium")
+    custom_terms = _parse_custom_terms(args.custom_terms, args.custom_term)
+    db_path = resolve_default_db(args.db, start_dir=target)
+    store = KnowledgeStore(db_path)
+
+    existing_roots = [r for r in store.list_roots(principal_id=args.principal) if Path(r["path"]).resolve() == target]
+    printer = _CrawlProgressPrinter(enabled=not bool(args.json))
+
+    if args.dry_run and not existing_roots:
+        res = store._crawl_single_root(
+            {
+                "root_id": "dry_preview",
+                "path": str(target),
+                "principal_id": args.principal,
+                "ignore_patterns": list(DEFAULT_IGNORE_PATTERNS),
+            },
+            full_reindex=bool(args.full_reindex),
+            embedding_model="",
+            embedding_dim=0,
+            sanitize=bool(args.sanitize),
+            privacy_profile=profile,
+            custom_terms=custom_terms or None,
+            privacy_namespace=args.namespace,
+            dry_run=True,
+            progress_cb=printer,
+        )
+        summary: dict[str, Any] = {
+            "roots_crawled": 1,
+            "sanitized": bool(args.sanitize),
+            "privacy_profile": profile if args.sanitize else "raw",
+            "dry_run": True,
+            **res,
+            "merkle_roots": {"dry_preview": res.get("merkle_root_hash", "")},
+        }
+    else:
+        root_id = existing_roots[0]["root_id"] if existing_roots else store.add_root(target, principal_id=args.principal)["root_id"]
+        summary = store.crawl_delta(
+            root_id=root_id,
+            principal_id=args.principal,
+            full_reindex=bool(args.full_reindex),
+            sanitize=bool(args.sanitize),
+            privacy_profile=profile,
+            custom_terms=custom_terms or None,
+            privacy_namespace=args.namespace,
+            dry_run=bool(args.dry_run),
+            progress_cb=printer,
+        )
+
+    summary["db_path"] = str(db_path)
+    if args.json:
+        _print_json(summary)
+        return 0
+
+    mode = "DRY-RUN" if summary.get("dry_run") else "INDEXED"
+    san_tag = f"sanitized:{summary['privacy_profile']}" if summary.get("sanitized") else "raw"
+    print(
+        f"Cortical Crawl [{mode} · {san_tag}]: "
+        f"{summary['files_scanned']} files scanned | {summary['files_skipped']} skipped (O(1)) | "
+        f"{summary['files_sanitized']} sanitized | {summary['entities_masked_total']} PII entities masked | "
+        f"{summary['metadata_stripped_count']} meta stripped | {summary['unsupported_binary']} binary skipped"
+    )
+    by_cat = summary.get("entities_by_category") or {}
+    if by_cat:
+        print("  Privacy Audit:", " | ".join(f"{k}: {v}" for k, v in sorted(by_cat.items())))
+    if summary.get("errors"):
+        print(f"  Errors: {summary['errors']} (check wiki-dashboard for sanitized file warnings)")
+    return 0
+
+
+def _cmd_sanitize(args: argparse.Namespace) -> int:
+    src = Path(args.path).expanduser().resolve()
+    out_dir = Path(args.output_dir).expanduser().resolve()
+    cfg = load_cortical_config()
+    profile = args.privacy_profile or str((cfg.get("privacy") or {}).get("default_profile") or "medium")
+    custom_terms = _parse_custom_terms(args.custom_terms)
+    policy = "fail_closed" if profile == "max_security" else "auto"
+
+    if not src.exists():
+        print(f"Path not found: {src}", file=sys.stderr)
+        return 1
+
+    base_root = src.parent if src.is_file() else src
+    store_helper = KnowledgeStore.__new__(KnowledgeStore)
+    patterns = store_helper._collect_ignore_patterns(base_root, list(DEFAULT_IGNORE_PATTERNS)) if src.is_dir() else []
+
+    candidates: list[tuple[str, Path]] = []
+    if src.is_file():
+        candidates.append((src.name, src))
+    elif args.recursive:
+        for dirpath, dirnames, filenames in os.walk(src):
+            rel_dir = os.path.relpath(dirpath, src).replace("\\", "/")
+            if rel_dir == ".":
+                rel_dir = ""
+            dirnames[:] = [d for d in sorted(dirnames) if not _matches_ignore(f"{rel_dir}/{d}" if rel_dir else d, patterns)]
+            for fn in sorted(filenames):
+                rel = f"{rel_dir}/{fn}" if rel_dir else fn
+                if not _matches_ignore(rel, patterns):
+                    candidates.append((rel, Path(dirpath) / fn))
+    else:
+        for f in sorted(src.iterdir()):
+            if f.is_file() and not _matches_ignore(f.name, patterns):
+                candidates.append((f.name, f))
+
+    folder_state: dict[str, Any] = {"rev": {}, "counters": {}}
+    results: list[dict[str, Any]] = []
+    total_entities = 0
+    by_cat_total: dict[str, int] = {}
+    skipped_binary = 0
+    errors = 0
+
+    for rel, fpath in candidates:
+        ext = fpath.suffix.lower()
+        try:
+            raw_head = fpath.read_bytes()[:1024]
+        except OSError as exc:
+            errors += 1
+            results.append({"rel_path": rel, "status": "error", "error": type(exc).__name__})
+            continue
+        if ext and ext not in SANITIZABLE_BINARY_EXTENSIONS and ext not in TEXT_EXTENSIONS and b"\x00" in raw_head:
+            skipped_binary += 1
+            results.append({"rel_path": rel, "status": "skipped_binary"})
+            continue
+        try:
+            san = classify_and_sanitize(
+                fpath,
+                policy=policy,
+                profile=profile,
+                custom_terms=custom_terms or None,
+                pseudonym_state=folder_state,
+                preserve_pseudonyms=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            results.append({"rel_path": rel, "status": "error", "error": type(exc).__name__})
+            continue
+
+        out_rel = Path(rel)
+        if ext in SANITIZABLE_BINARY_EXTENSIONS:
+            out_rel = out_rel.with_suffix(".sanitized.md")
+        dest = out_dir / out_rel
+        if not args.dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(san.get("sanitized_text") or "", encoding="utf-8")
+
+        ent_cnt = int(san.get("entity_count") or 0)
+        total_entities += ent_cnt
+        for cat, cnt in (san.get("entities_by_category") or {}).items():
+            by_cat_total[cat] = by_cat_total.get(cat, 0) + int(cnt)
+        results.append({
+            "rel_path": rel,
+            "output_path": str(dest),
+            "status": "sanitized",
+            "entity_count": ent_cnt,
+            "stripped_metadata": san.get("stripped_metadata") or [],
+        })
+
+    payload = {
+        "source": str(src),
+        "output_dir": str(out_dir),
+        "privacy_profile": profile,
+        "dry_run": bool(args.dry_run),
+        "files_sanitized": sum(1 for r in results if r["status"] == "sanitized"),
+        "skipped_binary": skipped_binary,
+        "errors": errors,
+        "entities_masked_total": total_entities,
+        "entities_by_category": by_cat_total,
+        "files": results,
+    }
+    if args.json:
+        _print_json(payload)
+        return 0
+    mode = "DRY-RUN" if args.dry_run else "WRITTEN"
+    print(f"Cortical Sanitize [{mode} · {profile}]: {payload['files_sanitized']} sanitized -> {out_dir} | {total_entities} PII entities masked | {skipped_binary} binary skipped")
+    return 0
+
+
+def _cmd_wiki_dashboard(args: argparse.Namespace) -> int:
+    from .analytics.wiki_dashboard import export_wiki_dashboard
+
+    out_dir = resolve_default_export_dir(args.out_dir)
+    db_path = resolve_default_db(args.db)
+    target = export_wiki_dashboard(out_dir, db_path=db_path, principal_id=args.principal)
+    if args.open:
+        webbrowser.open(target.resolve().as_uri())
+    if args.json:
+        _print_json({"wiki_dashboard": str(target), "db_path": str(db_path)})
+        return 0
+    print(f"Exported Wiki Explorer & Privacy Audit dashboard -> {target}")
     return 0
 
 

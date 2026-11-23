@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import re
 import shutil
@@ -149,13 +150,17 @@ def extract_text_and_strip_metadata(
                     or name.startswith("xl/sharedStrings")
                     or name.startswith("ppt/slides/slide")
                 ):
+                    raw_xml = zf.read(name)
                     try:
-                        root = ET.fromstring(zf.read(name))
+                        root = ET.fromstring(raw_xml)
                         parts = [el.text.strip() for el in root.iter() if el.text and el.text.strip()]
                         if parts:
                             texts.append(" ".join(parts))
                     except ET.ParseError:
-                        continue
+                        fallback = re.sub(r"<[^>]+>", " ", raw_xml.decode("utf-8", errors="replace"))
+                        clean_fb = " ".join(html.unescape(fallback).split())
+                        if clean_fb:
+                            texts.append(clean_fb)
         return (_normalize_extracted_text("\n".join(texts)), stripped)
 
     raw_bytes = p.read_bytes()
@@ -237,12 +242,13 @@ def pseudonymize_structured(
     custom_terms: Optional[list[str]] = None,
     extra_entities: Optional[list[dict[str, str]]] = None,
     keep_terms: Optional[list[str]] = None,
+    pseudonym_state: Optional[dict[str, Any]] = None,
 ) -> tuple[str, dict[str, str]]:
     """Replaces structural PII, `custom_terms`, and verified NER entities without false-positive bigram regexes."""
     allowed = {c.upper() for c in strip_categories} if strip_categories else None
     mapping: dict[str, str] = {}
-    rev: dict[str, str] = {}
-    counters: dict[str, int] = {}
+    rev: dict[str, str] = pseudonym_state.setdefault("rev", {}) if pseudonym_state is not None else {}
+    counters: dict[str, int] = pseudonym_state.setdefault("counters", {}) if pseudonym_state is not None else {}
 
     keep = {str(k).strip().lower() for k in (keep_terms or []) if str(k).strip()}
 
@@ -250,7 +256,12 @@ def pseudonymize_structured(
         if raw_val.strip().lower() in keep:
             return raw_val
         if raw_val in rev:
-            return rev[raw_val]
+            tok = rev[raw_val]
+            if redact:
+                mapping[f"{cat}_{len(mapping) + 1}"] = raw_val
+            else:
+                mapping[tok] = raw_val
+            return tok
         if redact:
             rev[raw_val] = "[REDACTED]"
             mapping[f"{cat}_{len(mapping) + 1}"] = raw_val
@@ -347,6 +358,8 @@ def classify_and_sanitize(
     config: Optional[dict[str, Any]] = None,
     vision_model: Optional[str] = None,
     keep_terms: Optional[list[str]] = None,
+    pseudonym_state: Optional[dict[str, Any]] = None,
+    preserve_pseudonyms: bool = False,
 ) -> dict[str, Any]:
     """Classifies content sensitivity dynamically (`auto` | `fail_closed` | `fail_open`) and sanitizes fail-safely."""
     eff_policy = policy.strip().lower()
@@ -398,8 +411,8 @@ def classify_and_sanitize(
             if resolved_policy == "fail_closed":
                 raise FailClosedError(f"Fail-closed abort: local NER failed ({exc})") from exc
 
-    redact = profile in {"max_security", "low"}
-    if profile == "max_context" and resolved_policy == "fail_open":
+    redact = False if preserve_pseudonyms else (profile in {"max_security", "low"})
+    if profile == "max_context" and resolved_policy == "fail_open" and not preserve_pseudonyms:
         final_text, mapping = raw_text, {}
     else:
         final_text, mapping = pseudonymize_structured(
@@ -408,7 +421,16 @@ def classify_and_sanitize(
             custom_terms=custom_terms,
             extra_entities=ner_entities,
             keep_terms=keep_terms,
+            pseudonym_state=pseudonym_state,
         )
+
+    by_category: dict[str, int] = {}
+    for tok in mapping:
+        clean_tok = tok.strip("[]")
+        cat = clean_tok.rsplit("_", 1)[0] if "_" in clean_tok else clean_tok
+        by_category[cat] = by_category.get(cat, 0) + 1
+    if stripped_meta:
+        by_category["METADATA"] = len(stripped_meta)
 
     return {
         "resolved_policy": resolved_policy,
@@ -419,7 +441,9 @@ def classify_and_sanitize(
         "sensitive_signals": len(pre_map) + len(stripped_meta) + (1 if path_sensitive else 0),
         "sanitized_text": final_text,
         "stripped_metadata": stripped_meta,
+        "metadata_stripped_count": len(stripped_meta),
         "entity_count": len(mapping),
+        "entities_by_category": by_category,
         "ner_used": ner_used,
         "pseudonym_map": mapping,
     }

@@ -299,8 +299,10 @@ const STATE = {
   roots: [],
   filesData: { files: [], counts: { indexed: 0, modified: 0, ignored: 0, error: 0 }, total: 0 },
   fileFilterStatus: 'all',
+  fileFilterPrivacy: 'all',
   fileFilterRoot: '',
   fileFilterQuery: '',
+  drawerTier: 'light',
   crawlJob: null,
   crawlPollTimer: null,
   modelsStatus: null,
@@ -564,6 +566,7 @@ function renderFilesDomain() {
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
               <button class="btn sm primary" onclick="triggerCrawl('${esc(r.root_id)}', false)">⟳ Delta Sync</button>
+              <button class="btn sm" onclick="triggerSanitizedCrawl('${esc(r.root_id)}')">🛡 Sanitized Crawl</button>
               <button class="btn sm" onclick="confirmFullReindex('${esc(r.root_id)}', '${esc(r.path)}')">↻ Full Re-index</button>
               <button class="btn sm danger" onclick="confirmRemoveRoot('${esc(r.root_id)}', '${esc(r.path)}')">✕ Remove</button>
             </div>
@@ -572,7 +575,14 @@ function renderFilesDomain() {
       </div>`;
 
   const counts = fdata.counts || {};
+  const privSum = fdata.privacy_summary || { sanitized: 0, raw: 0, private_gated: 0, entities_masked_total: 0, entities_by_category: {} };
   const files = fdata.files || [];
+  const privBadge = (f) => {
+    if (f.private_gated) return `<span class="pill err">🔒 PRIVATE-GATED</span> <span class="pill info">${esc(f.privacy_profile || 'max_security')}</span>`;
+    if (f.sanitized) return `<span class="pill ok">🛡 SANITIZED</span> <span class="pill info">${esc(f.privacy_profile || 'medium')}</span>`;
+    return `<span class="pill warn">⚠ RAW</span>`;
+  };
+  const highlightTok = (txt) => esc(txt || '(empty)').replace(/(\[(?:PERSON|PERSON_NAME|EMAIL|IBAN|TAX_ID|SECRET|PHONE|IP|CUSTOM|ORG|METADATA)_\d+\]|\[REDACTED\])/g, '<mark style="background:rgba(52,211,153,0.22);color:#6ee7b7;padding:1px 4px;border-radius:4px;">$1</mark>');
 
   return `
     <div class="page-head">
@@ -622,6 +632,14 @@ function renderFilesDomain() {
           `).join('')}
         </div>
       </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+        <span class="hint"><strong>Privacy Audit:</strong> ${privSum.sanitized || 0} sanitized · ${privSum.raw || 0} raw · ${privSum.private_gated || 0} private-gated · <strong>${privSum.entities_masked_total || 0}</strong> PII entities masked</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${[['all','All Privacy'],['sanitized','🛡 Sanitized'],['private_gated','🔒 Private-Gated'],['raw','⚠ Raw']].map(([pv,lbl]) => `
+            <button class="btn sm ${STATE.fileFilterPrivacy === pv ? 'primary' : ''}" onclick="setFileFilter('privacy','${pv}')">${lbl}</button>
+          `).join('')}
+        </div>
+      </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <input class="input" style="max-width:340px;" placeholder="Filter by relative path..." value="${esc(STATE.fileFilterQuery)}" oninput="setFileFilter('q', this.value)" aria-label="Filter files by path" />
         <select class="select" style="max-width:280px;" onchange="setFileFilter('root', this.value)" aria-label="Filter by root directory">
@@ -629,17 +647,18 @@ function renderFilesDomain() {
           ${roots.map((r) => `<option value="${esc(r.root_id)}" ${STATE.fileFilterRoot === r.root_id ? 'selected' : ''}>${esc(r.path)}</option>`).join('')}
         </select>
       </div>
-      ${files.length === 0 ? `<div class="muted" style="padding:14px 0;">No files match the current filter. Run <strong>Delta Sync</strong> to index your registered roots.</div>` : `
+      ${files.length === 0 ? `<div class="muted" style="padding:14px 0;">No files match the current filter. Run <strong>Delta Sync</strong> or <strong>Sanitized Crawl</strong> to index your registered roots.</div>` : `
       <div style="overflow-x:auto;">
         <table>
-          <thead><tr><th>File Path</th><th>Status</th><th>Size</th><th>Modified</th><th>Merkle Hash</th><th>RBAC</th></tr></thead>
+          <thead><tr><th>File Path</th><th>Status</th><th>Privacy</th><th>PII Masked</th><th>Size</th><th>Merkle Hash</th><th>RBAC</th></tr></thead>
           <tbody>
             ${files.map((f) => `
               <tr class="clickable" tabindex="0" onclick="openFileDrawer('${esc(f.doc_id)}')" onkeydown="if(event.key==='Enter')openFileDrawer('${esc(f.doc_id)}')">
                 <td class="mono"><strong>${esc(f.rel_path)}</strong></td>
                 <td>${statusPill(f.status)}</td>
+                <td>${privBadge(f)}</td>
+                <td>${f.entities_masked || 0}</td>
                 <td>${esc(fmtBytes(f.file_size))}</td>
-                <td class="muted">${esc(fmtTime(f.mtime))}</td>
                 <td class="mono muted">${esc(shortHash(f.merkle_hash))}</td>
                 <td><span class="pill ${f.principal_id === 'local_owner' ? 'owner' : 'tenant'}">${esc(f.principal_id)}</span></td>
               </tr>
@@ -739,11 +758,30 @@ function confirmRemoveRoot(rootId, path) {
   });
 }
 
+async function triggerSanitizedCrawl(rootId) {
+  try {
+    const { data } = await api('POST', '/api/crawl/start', {
+      root_id: rootId,
+      principal_id: STATE.principalId,
+      full_reindex: false,
+      sanitize: true,
+      privacy_profile: 'medium',
+    });
+    STATE.crawlJob = data.job;
+    toast('info', 'Sanitized Crawl started (medium profile).');
+    if (STATE.domain === 'files') renderMain();
+    ensureCrawlPolling(data.job.job_id);
+  } catch (err) {
+    toast('err', 'Failed to start sanitized crawl: ' + err.message);
+  }
+}
+
 function setFileFilter(kind, val) {
   if (kind === 'status') STATE.fileFilterStatus = val;
+  if (kind === 'privacy') STATE.fileFilterPrivacy = val;
   if (kind === 'root') STATE.fileFilterRoot = val;
   if (kind === 'q') STATE.fileFilterQuery = val;
-  api('GET', `/api/files/tree?principal_id=${encodeURIComponent(STATE.principalId)}&root_id=${encodeURIComponent(STATE.fileFilterRoot)}&status=${encodeURIComponent(STATE.fileFilterStatus)}&q=${encodeURIComponent(STATE.fileFilterQuery)}`)
+  api('GET', `/api/files/tree?principal_id=${encodeURIComponent(STATE.principalId)}&root_id=${encodeURIComponent(STATE.fileFilterRoot)}&status=${encodeURIComponent(STATE.fileFilterStatus)}&privacy=${encodeURIComponent(STATE.fileFilterPrivacy)}&q=${encodeURIComponent(STATE.fileFilterQuery)}`)
     .then(({ data }) => { STATE.filesData = data; renderMain(); })
     .catch((e) => toast('err', e.message));
 }
@@ -795,8 +833,10 @@ function renderFileDrawer() {
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <span class="pill ${d.principal_id === 'local_owner' ? 'owner' : 'tenant'}">${esc(d.principal_id)}</span>
           <span class="pill ok">✓ ${esc(d.status)}</span>
+          ${d.private_gated ? '<span class="pill err">🔒 PRIVATE-GATED</span>' : (d.sanitized ? `<span class="pill ok">🛡 SANITIZED (${esc(d.privacy_profile)})</span>` : '<span class="pill warn">⚠ RAW</span>')}
           <span class="pill info">${esc(fmtBytes(d.file_size))}</span>
           <span class="pill info">${(d.chunks || []).length} chunks</span>
+          <span class="pill info">${d.entities_masked || 0} PII masked</span>
         </div>
         <div class="card" style="margin:0;">
           <div class="hint"><strong>Merkle Node Hash:</strong> <span class="mono">${esc(d.merkle_hash)}</span></div>
@@ -805,8 +845,13 @@ function renderFileDrawer() {
         </div>
         ${(d.warnings || []).length ? `<div class="card" style="margin:0;border-color:var(--warn);"><strong>⚠ Indexing Warnings</strong><ul>${d.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>` : ''}
         <div>
-          <strong>Extracted Text Preview</strong>
-          <pre class="code-pre">${esc(d.preview || '(empty)')}</pre>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <strong>4-Tier Summary / Sanitized Preview</strong>
+            <div style="display:flex;gap:4px;">
+              ${['light','medium','high','max'].map((t) => `<button class="btn sm ${STATE.drawerTier===t?'primary':''}" onclick="STATE.drawerTier='${t}';renderFileDrawer()">${t.toUpperCase()}</button>`).join('')}
+            </div>
+          </div>
+          <pre class="code-pre">${esc((d.summaries && d.summaries[STATE.drawerTier]) || d.preview || '(empty)').replace(/(\[(?:PERSON|PERSON_NAME|EMAIL|IBAN|TAX_ID|SECRET|PHONE|IP|CUSTOM|ORG|METADATA)_\d+\]|\[REDACTED\])/g, '<mark style="background:rgba(52,211,153,0.22);color:#6ee7b7;padding:1px 4px;border-radius:4px;">$1</mark>')}</pre>
         </div>
         <div>
           <strong>Chunk Metadata (${(d.chunks || []).length})</strong>

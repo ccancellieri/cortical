@@ -240,6 +240,8 @@ class CrawlJobManager:
         full_reindex: bool = False,
         embedding_model: str = "",
         embedding_dim: int = 0,
+        sanitize: bool = False,
+        privacy_profile: str = "medium",
     ) -> dict[str, Any]:
         job_id = "crawl_" + uuid.uuid4().hex[:10]
         now = time.time()
@@ -285,6 +287,8 @@ class CrawlJobManager:
                     full_reindex=full_reindex,
                     embedding_model=embedding_model,
                     embedding_dim=embedding_dim,
+                    sanitize=sanitize,
+                    privacy_profile=privacy_profile,
                     progress_cb=_on_progress,
                 )
                 with self._lock:
@@ -642,6 +646,8 @@ class DashboardController:
                 full_reindex=full,
                 embedding_model=str(emb.get("model_id") or ""),
                 embedding_dim=int(emb.get("dimensions") or 0),
+                sanitize=bool(payload.get("sanitize", False)),
+                privacy_profile=str(payload.get("privacy_profile") or "medium"),
             )
             return 200, {"ok": True, "job": job}
 
@@ -655,6 +661,7 @@ class DashboardController:
                 principal_id=qget("principal_id", "local_owner"),
                 root_id=qget("root_id") or None,
                 status_filter=qget("status", "all"),
+                privacy_filter=qget("privacy", "all"),
                 search_path=qget("q", ""),
             )
             return 200, {"ok": True, **nav}
