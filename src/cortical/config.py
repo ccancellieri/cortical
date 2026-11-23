@@ -26,11 +26,113 @@ DEFAULT_CONFIG_DIR = DATA_DIR / "cortical.config.d"
 DEFAULT_TELEMETRY_DB = DATA_DIR / "telemetry.db"
 DEFAULT_VAULT_DB = DATA_DIR / "vault.db"
 
+ORCHESTRATOR_PRESETS: dict[str, dict[str, Any]] = {
+    "local_deep": {
+        "mode": "local",
+        "provider": "router",
+        "model": "cortical-deep",
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:4000/v1",
+        "label": "Local · Cortical Deep (27B Variable Quant)",
+        "native_ctx": 131072,
+    },
+    "local_ollama": {
+        "mode": "local",
+        "provider": "ollama",
+        "model": "qwen3.8:27b-iq2_xxs",
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:11434/v1",
+        "label": "Local · Ollama Direct",
+        "native_ctx": 131072,
+    },
+    "local_unsloth": {
+        "mode": "local",
+        "provider": "unsloth",
+        "model": "qwen3.5:9b-q3_k_xl",
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8888/v1",
+        "label": "Local · Unsloth Studio",
+        "native_ctx": 131072,
+    },
+    "gemini": {
+        "mode": "remote",
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
+        "api_key_env": "GEMINI_API_KEY",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "litellm_prefix": "gemini",
+        "label": "Remote · Google Gemini",
+        "native_ctx": 1000000,
+    },
+    "anthropic": {
+        "mode": "remote",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "endpoint": "https://api.anthropic.com/v1",
+        "litellm_prefix": "anthropic",
+        "label": "Remote · Anthropic Claude",
+        "native_ctx": 200000,
+    },
+    "openai": {
+        "mode": "remote",
+        "provider": "openai",
+        "model": "gpt-5",
+        "api_key_env": "OPENAI_API_KEY",
+        "endpoint": "https://api.openai.com/v1",
+        "litellm_prefix": "openai",
+        "label": "Remote · OpenAI / ChatGPT",
+        "native_ctx": 200000,
+    },
+    "deepseek": {
+        "mode": "remote",
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "endpoint": "https://api.deepseek.com/v1",
+        "litellm_prefix": "deepseek",
+        "label": "Remote · DeepSeek API",
+        "native_ctx": 128000,
+    },
+    "openrouter": {
+        "mode": "remote",
+        "provider": "openrouter",
+        "model": "google/gemini-2.5-flash",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "endpoint": "https://openrouter.ai/api/v1",
+        "litellm_prefix": "openrouter",
+        "label": "Remote · OpenRouter",
+        "native_ctx": 200000,
+    },
+    "custom": {
+        "mode": "remote",
+        "provider": "custom",
+        "model": "custom-orchestrator",
+        "api_key_env": "CUSTOM_LLM_API_KEY",
+        "endpoint": "https://api.example.com/v1",
+        "litellm_prefix": "openai",
+        "label": "Remote · Custom OpenAI-Compatible",
+        "native_ctx": 128000,
+    },
+}
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "active_runner": "ollama",
     "active_model": "",
     "max_context_window": 200000,
     "custom_models": [],
+    "orchestrator": {
+        "mode": "local",  # "local" | "remote"
+        "provider": "router",
+        "model": "cortical-deep",
+        "api_key_env": "",
+        "endpoint": "",
+        "context_strategy": "auto_max",  # "auto_max" | "fixed"
+        "fixed_num_ctx": 65536,
+        "timeout_sec": 0,  # 0 => adaptive hardware/model timeout
+        "local_first_delegation": True,
+        "strict_remote_privacy": True,
+    },
     "models_by_role": {
         "router": "qwen2.5:1.5b",
         "ner": "qwen2.5:1.5b",
@@ -165,6 +267,98 @@ def load_cortical_config(
         except Exception:  # noqa: BLE001
             pass
     return merged
+
+
+def remote_orchestrator_active(config: Optional[dict[str, Any]] = None) -> bool:
+    """Returns True when the configured orchestrator operates on a remote cloud LLM endpoint."""
+    cfg = config if config is not None else load_cortical_config()
+    orch = cfg.get("orchestrator") or {}
+    mode = str(orch.get("mode") or "local").strip().lower()
+    prov = str(orch.get("provider") or "").strip().lower()
+    if mode == "remote":
+        return True
+    return prov in {"gemini", "anthropic", "openai", "deepseek", "openrouter", "custom"}
+
+
+def resolve_orchestrator_spec(
+    config: Optional[dict[str, Any]] = None,
+    *,
+    hw: Optional[dict[str, Any]] = None,
+    rec_models: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Resolves effective local/remote orchestrator, hardware-ceiling num_ctx, timeout, and env var name."""
+    from .hardware.context_window import compute_adaptive_timeout, compute_hardware_context_profile
+
+    cfg = config if config is not None else load_cortical_config()
+    orch = cfg.get("orchestrator") or {}
+    by_role = cfg.get("models_by_role") or {}
+    rec_by_role = (rec_models or {}).get("recommended_by_role") or {}
+    router_cfg = cfg.get("router") or {}
+
+    mode = str(orch.get("mode") or "local").strip().lower()
+    prov = str(orch.get("provider") or ("router" if router_cfg.get("enabled") else "ollama")).strip().lower()
+    if prov in {"gemini", "anthropic", "openai", "deepseek", "openrouter", "custom"}:
+        mode = "remote"
+    is_remote = mode == "remote"
+
+    preset = ORCHESTRATOR_PRESETS.get(prov) or ORCHESTRATOR_PRESETS["local_deep" if not is_remote else "gemini"]
+    d_rec = rec_by_role.get("daily_coder") or {}
+    r_rec = rec_by_role.get("deep_reasoner") or {}
+    daily_local = str((d_rec.get("model_id") if d_rec.get("installed") else None) or by_role.get("daily_coder") or d_rec.get("model_id") or "qwen3.5:9b-q3_k_xl")
+    deep_local = str((r_rec.get("model_id") if r_rec.get("installed") else None) or by_role.get("deep_reasoner") or r_rec.get("model_id") or "qwen3.8:27b-iq2_xxs")
+
+    model = str(orch.get("model") or "").strip()
+    if not model:
+        model = str(preset.get("model") or ("cortical-deep" if not is_remote else "gemini-2.5-pro"))
+    api_key_env = str(orch.get("api_key_env") or (preset.get("api_key_env") if is_remote else "") or "").strip()
+    endpoint = str(orch.get("endpoint") or "").strip()
+    if not endpoint:
+        if is_remote:
+            endpoint = str(preset.get("endpoint") or "")
+        elif prov == "router":
+            endpoint = str(router_cfg.get("base_url") or "http://127.0.0.1:4000/v1")
+        elif prov == "unsloth":
+            endpoint = str((((cfg.get("runners") or {}).get("unsloth") or {}).get("base_url")) or "http://127.0.0.1:8888/v1")
+        else:
+            endpoint = "http://127.0.0.1:11434/v1"
+
+    strategy = str(orch.get("context_strategy") or "auto_max").strip().lower()
+    max_cfg_ctx = int(cfg.get("max_context_window") or 200000)
+    target_for_hw = deep_local if model in {"cortical-deep", "cortical-orchestrator", "local-default"} else model
+
+    hw_data = hw or {"total_ram_gb": 16.0, "free_ram_gb": 8.0, "unified_memory": True, "vram_gb": 11.2, "memory_pressure_level": 1}
+    ctx_profile = compute_hardware_context_profile(target_for_hw, hw_data, max_ctx=max_cfg_ctx)
+    if is_remote:
+        auto_ctx = min(max_cfg_ctx, int(preset.get("native_ctx") or 128000))
+    else:
+        auto_ctx = int(ctx_profile["auto_max_num_ctx"])
+
+    fixed_ctx = max(4096, min(max_cfg_ctx, int(orch.get("fixed_num_ctx") or auto_ctx)))
+    eff_ctx = fixed_ctx if strategy == "fixed" else auto_ctx
+    raw_timeout = int(orch.get("timeout_sec") or 0)
+    eff_timeout = raw_timeout if raw_timeout > 0 else compute_adaptive_timeout(model, num_ctx=eff_ctx, is_remote=is_remote)
+
+    return {
+        "mode": "remote" if is_remote else "local",
+        "is_remote": is_remote,
+        "provider": prov,
+        "model": model,
+        "api_key_env": api_key_env,
+        "endpoint": endpoint,
+        "litellm_prefix": str(preset.get("litellm_prefix") or "openai"),
+        "context_strategy": strategy if strategy in {"auto_max", "fixed"} else "auto_max",
+        "effective_num_ctx": eff_ctx,
+        "auto_max_num_ctx": auto_ctx,
+        "timeout_sec": eff_timeout,
+        "local_first_delegation": bool(orch.get("local_first_delegation", True)),
+        "strict_remote_privacy": bool(orch.get("strict_remote_privacy", True)),
+        "local_workers": {
+            "fast": daily_local,
+            "deep": deep_local,
+            "router": str((rec_by_role.get("router") or {}).get("model_id") or by_role.get("router") or "qwen2.5:1.5b"),
+        },
+        "context_profile": ctx_profile,
+    }
 
 
 def save_cortical_config(cfg: dict[str, Any], config_path: Optional[Path] = None) -> Path:

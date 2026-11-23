@@ -22,6 +22,8 @@ from .config import (
     DEFAULT_VAULT_DB,
     default_data_dir,
     load_cortical_config,
+    remote_orchestrator_active,
+    resolve_orchestrator_spec,
     save_cortical_config,
 )
 from .harnesses.adapters import (
@@ -62,9 +64,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         project_root=Path(args.repo_root).resolve() if getattr(args, "repo_root", None) else None,
         ping_mcp=not bool(getattr(args, "no_mcp_ping", False)),
     )
+    orch = resolve_orchestrator_spec(cfg, hw=hw, rec_models=rec)
     report = {
         "hardware": hw,
         "recommended_models": rec,
+        "orchestrator": orch,
         "composed_tools": composed,
         "presend_interception_harnesses": presend,
         "diagnostics": diag,
@@ -86,6 +90,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         f"Disk free={hw.get('disk_free_gb')} GB"
     )
     print(f"  Recommendation: {cls.get('recommendation')}")
+    print(
+        f"  Orchestrator:   mode={orch['mode']} · {orch['provider']}/{orch['model']} · "
+        f"num_ctx={orch['effective_num_ctx']:,} ({orch['context_strategy']}) · timeout={orch['timeout_sec']}s"
+        + (f" · env={orch['api_key_env']}" if orch.get("api_key_env") else "")
+    )
     print("  Recommended Models:")
     for role, info in (rec.get("recommended_by_role") or {}).items():
         quant = info.get("quantization") or ""
@@ -223,7 +232,12 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         vault = PrivacyVault(vault_db)
         eff_ctx = int(((rec.get("recommended_by_role") or {}).get("daily_coder") or {}).get("recommended_num_ctx") or 16384)
         share = float((cfg.get("compression") or {}).get("max_context_share") or 0.15)
-        vault_md = vault.export_sanitized_memory_markdown(num_ctx=eff_ctx, max_share=share)
+        vault_md = vault.export_sanitized_memory_markdown(
+            num_ctx=eff_ctx,
+            max_share=share,
+            remote_egress=remote_orchestrator_active(cfg),
+            custom_terms=list((cfg.get("privacy") or {}).get("custom_terms") or []) or None,
+        )
 
     selected = [h.strip().lower() for h in args.harness.split(",") if h.strip()] if args.harness else None
     if selected:
@@ -358,6 +372,7 @@ def _cmd_vault(args: argparse.Namespace) -> int:
 
 def _cmd_intercept(args: argparse.Namespace) -> int:
     vault = PrivacyVault(resolve_default_db(args.db))
+    cfg = load_cortical_config()
     try:
         res = vault.intercept_pre_send(
             args.harness,
@@ -366,6 +381,7 @@ def _cmd_intercept(args: argparse.Namespace) -> int:
             policy=args.policy,
             profile=args.profile,
             use_local_ner=bool(args.ner),
+            config=cfg,
         )
     except FailClosedError as exc:
         _print_json({"supported": True, "blocked_raw_upload": True, "fail_closed": True, "error": str(exc)})
@@ -517,7 +533,11 @@ def _cmd_tune(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(res)
         return 0
-    print(f"Cortical Auto-Tuner · tier={res['tier']} · applied={res['applied']} · budget={res['recommended_context_budget_tokens']} tok")
+    print(
+        f"Cortical Auto-Tuner · tier={res['tier']} · applied={res['applied']} "
+        f"· deep_ctx={res.get('recommended_deep_num_ctx', '?')} · timeout={res.get('recommended_timeout_sec', '?')}s "
+        f"· budget={res['recommended_context_budget_tokens']} tok"
+    )
     for s in res["suggestions"]:
         print(f"  - {s}")
     return 0

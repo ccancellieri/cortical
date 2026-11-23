@@ -62,12 +62,15 @@ def _probe_memory_macos() -> dict[str, Any]:
             free_gb = round((free_pages * page_bytes) / (1024 ** 3), 2)
     cpu_brand = _run_text(["sysctl", "-n", "machdep.cpu.brand_string"]) or platform.processor() or "Apple Silicon"
     unified = "apple" in cpu_brand.lower() or platform.machine().lower() in {"arm64", "aarch64"}
+    raw_press = _run_text(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+    pressure = int(raw_press) if raw_press.isdigit() else 1
     return {
         "total_ram_gb": total_gb,
         "free_ram_gb": min(total_gb, free_gb),
         "unified_memory": unified,
         "gpu_name": cpu_brand if unified else "macOS GPU",
         "vram_gb": round(total_gb * 0.70, 2) if unified else 0.0,
+        "memory_pressure_level": pressure,
     }
 
 
@@ -271,6 +274,7 @@ def probe_hardware(
         "gpu_name": mem["gpu_name"],
         "vram_gb": mem["vram_gb"],
         "disk_free_gb": disk_free_gb,
+        "memory_pressure_level": int(mem.get("memory_pressure_level") or 1),
         "binaries": binaries,
         "ollama_online": ollama_online,
         "installed_ollama_models": installed_models,

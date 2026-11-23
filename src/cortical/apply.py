@@ -99,6 +99,23 @@ def validate_plan(plan: dict[str, Any], *, current_vault: Optional[dict[str, dic
     rt = patch.get("routing") or {}
     if "mode" in rt and rt["mode"] not in _ROUTING_MODES:
         errs.append(f"routing.mode must be one of {sorted(_ROUTING_MODES)}.")
+    orch = patch.get("orchestrator") or {}
+    if orch:
+        if "mode" in orch and orch["mode"] not in {"local", "remote"}:
+            errs.append("orchestrator.mode must be 'local' or 'remote'.")
+        if "context_strategy" in orch and orch["context_strategy"] not in {"auto_max", "fixed"}:
+            errs.append("orchestrator.context_strategy must be 'auto_max' or 'fixed'.")
+        if "fixed_num_ctx" in orch:
+            fc = orch["fixed_num_ctx"]
+            if not isinstance(fc, int) or not (4096 <= fc <= 1_000_000):
+                errs.append("orchestrator.fixed_num_ctx must be an integer between 4096 and 1000000.")
+        if "timeout_sec" in orch:
+            ts = orch["timeout_sec"]
+            if not isinstance(ts, int) or not (0 <= ts <= 3600):
+                errs.append("orchestrator.timeout_sec must be an integer between 0 and 3600.")
+        ake = str(orch.get("api_key_env") or "").strip()
+        if ake and (ake.startswith(("sk-", "AIza", "ghp_", "pplx-")) or len(ake) > 64 or not ake.replace("_", "").isalnum()):
+            errs.append("orchestrator.api_key_env must be an environment variable name (e.g. GEMINI_API_KEY), never a raw secret.")
     pv = patch.get("privacy") or {}
     if "default_policy" in pv and pv["default_policy"] not in _POLICIES:
         errs.append(f"privacy.default_policy must be one of {sorted(_POLICIES)}.")

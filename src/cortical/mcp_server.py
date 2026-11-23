@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from .compression.engine import compress_structured
 from .composers.tools import inspect_composed_tools
-from .config import DEFAULT_VAULT_DB, invoke_configured_runner, load_cortical_config
+from .config import DEFAULT_VAULT_DB, invoke_configured_runner, load_cortical_config, remote_orchestrator_active
 from .hardware.models import recommend_models_for_hardware
 from .hardware.probe import probe_hardware
 from .privacy.vault import PrivacyVault
@@ -263,12 +263,31 @@ class CorticalMCPServer:
             self._inbox_thread = threading.Thread(target=lambda: self.vault.sync_from_disk(process_inbox=True), daemon=True)
             self._inbox_thread.start()
 
+    def _remote_egress_ctx(self) -> tuple[bool, list[str]]:
+        cfg = load_cortical_config()
+        is_remote = remote_orchestrator_active(cfg) and bool((cfg.get("orchestrator") or {}).get("strict_remote_privacy", True))
+        terms = list((cfg.get("privacy") or {}).get("custom_terms") or [])
+        return is_remote, terms
+
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "cortical_vault_read":
             tier = str(args.get("tier") or "max")
+            is_remote, terms = self._remote_egress_ctx()
             if args.get("task_tag") and not args.get("alias"):
-                return self.vault.read_task_context(str(args["task_tag"]), allow_local_only=False, tier=tier if tier != "max" else "medium")
-            return self.vault.read_resource(str(args.get("alias") or ""), allow_local_only=False, tier=tier)
+                return self.vault.read_task_context(
+                    str(args["task_tag"]),
+                    allow_local_only=False,
+                    tier=tier if tier != "max" else "medium",
+                    remote_egress=is_remote,
+                    custom_terms=terms or None,
+                )
+            return self.vault.read_resource(
+                str(args.get("alias") or ""),
+                allow_local_only=False,
+                tier=tier,
+                remote_egress=is_remote,
+                custom_terms=terms or None,
+            )
         if name == "cortical_ingest_private":
             cfg = load_cortical_config()
             priv = cfg.get("privacy") or {}
@@ -418,7 +437,8 @@ class CorticalMCPServer:
                     "isError": False,
                 }
             elif method == "resources/list":
-                res = self.vault.list_resources(include_local_only=False)
+                is_remote, terms = self._remote_egress_ctx()
+                res = self.vault.list_resources(include_local_only=False, remote_egress=is_remote, custom_terms=terms or None)
                 res.append({"uri": "cortical://brain", "name": "cortical-brain", "description": "Factorized 3+1 Local Brain (concepts, tasks, skills)", "mimeType": "application/json"})
                 result = {"resources": res}
             elif method == "resources/read":
@@ -427,7 +447,8 @@ class CorticalMCPServer:
                     snap = self.vault.brain.get_snapshot(include_local_only=False)
                     result = {"contents": [{"uri": "cortical://brain", "mimeType": "application/json", "text": json.dumps(snap, ensure_ascii=False, indent=2)}]}
                 else:
-                    item = self.vault.read_resource(uri, allow_local_only=False)
+                    is_remote, terms = self._remote_egress_ctx()
+                    item = self.vault.read_resource(uri, allow_local_only=False, remote_egress=is_remote, custom_terms=terms or None)
                     result = {"contents": [{"uri": item["uri"], "mimeType": "text/plain", "text": item["text"]}]}
             elif method == "completion/complete":
                 prefix = str((params.get("argument") or {}).get("value") or "").lower()

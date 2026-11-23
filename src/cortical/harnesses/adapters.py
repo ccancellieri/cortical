@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ..config import resolve_orchestrator_spec
+from ..hardware.context_window import DEFAULT_MODEL_CONTEXT_WINDOWS, compute_dynamic_num_ctx
 from ..privacy.vault import VERIFIED_PRESEND_HARNESSES
 
 ALL_HARNESSES: tuple[str, ...] = (
@@ -154,16 +156,24 @@ def _build_shared_rules_md(
     composed: dict[str, Any],
     routing: Optional[dict[str, Any]] = None,
     report: Optional[dict[str, Any]] = None,
+    orchestrator: Optional[dict[str, Any]] = None,
 ) -> str:
     tools_active = [k for k, v in composed.items() if (v.get("installed") if isinstance(v, dict) else bool(v))]
     rt = routing or {}
     r_mode = str(rt.get("mode") or "auto")
     r_thresh = int(rt.get("cloud_token_threshold") or 50000)
     auto_rep = bool((report or {}).get("auto_report", True))
+    orch = orchestrator or {}
+    is_remote = bool(orch.get("is_remote"))
+    orch_desc = (
+        f"`{orch.get('mode', 'local')}` (`{orch.get('provider', 'router')}/{orch.get('model', model_id)}`, "
+        f"`num_ctx={int(orch.get('effective_num_ctx') or 65536):,}`, `timeout={int(orch.get('timeout_sec') or 600)}s`)"
+    )
     lines = [
         "# Cortical Unified Harness Contract",
         "",
-        f"- **Default Local Model:** `{model_id}` · **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
+        f"- **Orchestrator:** {orch_desc}" + (f" · **Auth Env:** `{orch['api_key_env']}`" if orch.get("api_key_env") else " · **Posture:** Air-Gapped Local"),
+        f"- **Default Local Workers:** `{model_id}` · **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
         f"- **Active Token-Savers:** {', '.join(f'`{t}`' for t in tools_active) if tools_active else '`serena`, `rtk`, `TOON`'}",
         "- **Code Navigation & Edits:** Prefer Serena LSP symbol tools (`get_symbols_overview`, `find_symbol`, `replace_symbol_body`) over reading full files.",
         "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items).",
@@ -172,11 +182,60 @@ def _build_shared_rules_md(
         "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
         "- **Dashboard (`/cortical-dashboard`):** Launch `cortical cortical --open` in Chrome to configure per-machine models/frameworks and upload task files or directories.",
     ]
+    if is_remote:
+        lines.extend([
+            "- **Local-First Delegation (Remote Orchestrator Active):** Offload bulk repository reads, file summaries, OCR/NER, `TOON` compaction, and private item analysis to local workers via `cortical_local_offload`; send only compact `TOON`-compressed plans upstream.",
+            "- **Zero-Leakage Remote Guard (`fail_closed`):** NEVER send raw private files, unmasked PII/secrets, or `max_security` items to the remote orchestrator. `cortical_vault_read` & `cortical intercept` fail-closed on unverified remote egress.",
+        ])
     if auto_rep:
         lines.append("- **End-of-Response ROI Recap:** At the end of substantial tasks, call `cortical_roi_report` (0 cloud tokens) and append its compact markdown summary.")
     if vault_md.strip():
         lines.extend(["", vault_md.strip()])
     return "\n".join(lines)
+
+
+def _model_ctx_for_harness(model_id: str, hw: dict[str, Any], rec_by_role: dict[str, Any], orch: dict[str, Any]) -> int:
+    """Computes hardware-ceiling `num_ctx` for a specific local model or alias."""
+    alias_map = {
+        "cortical-deep": (rec_by_role.get("deep_reasoner") or {}).get("model_id") or "qwen3.8:27b-iq2_xxs",
+        "cortical-orchestrator": (rec_by_role.get("orchestrator") or {}).get("model_id") or "qwen3.8:27b-iq2_xxs",
+        "cortical-fast": (rec_by_role.get("daily_coder") or {}).get("model_id") or "qwen3.5:9b-q3_k_xl",
+        "local-default": (rec_by_role.get("daily_coder") or {}).get("model_id") or "qwen3.5:9b-q3_k_xl",
+    }
+    eff_mid = alias_map.get(model_id, model_id)
+    if orch.get("context_strategy") == "fixed" and model_id in {orch.get("model"), "cortical-deep", "cortical-orchestrator"}:
+        return int(orch.get("effective_num_ctx") or 65536)
+    base_ctx = DEFAULT_MODEL_CONTEXT_WINDOWS.get(eff_mid, 32768)
+    tot_ram = float(hw.get("total_ram_gb") or 16.0)
+    return compute_dynamic_num_ctx(
+        base_ctx,
+        eff_mid,
+        ram_available_gb=float(hw.get("free_ram_gb") or 10.0),
+        vram_gb=float(hw.get("vram_gb") or round(tot_ram * 0.70, 2)),
+        unified_memory=bool(hw.get("unified_memory", True)),
+        total_ram_gb=tot_ram,
+        memory_pressure_level=int(hw.get("memory_pressure_level") or 1),
+    )
+
+
+def _build_pi_model_entry(mid: str, ctx_win: int, *, reasoning: bool = False) -> dict[str, Any]:
+    """Builds a `pi` models.json entry with expanded hardware ceiling and non-blocking reasoning defaults."""
+    return {
+        "id": mid,
+        "name": mid,
+        "reasoning": reasoning,
+        "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": ctx_win,
+        "maxTokens": min(16384, max(8192, ctx_win // 4)),
+        "samplingParams": {"reasoning_effort": "none"},
+        "samplingParamsByThinkingLevel": {
+            "off": {"reasoning_effort": "none"},
+            "low": {"reasoning_effort": "low"},
+            "medium": {"reasoning_effort": "medium"},
+            "high": {"reasoning_effort": "high"},
+        },
+    }
 
 
 def plan_sync(
@@ -208,8 +267,17 @@ def plan_sync(
     router_url = str(router_cfg.get("base_url") or "http://127.0.0.1:4000/v1") if router_enabled else ""
     ollama_v1 = "http://127.0.0.1:11434/v1"
     eff_base_url = router_url or ollama_v1
+    orch = resolve_orchestrator_spec(config, hw=hw, rec_models=rec_models)
 
-    rules_body = _build_shared_rules_md(vault_markdown, daily_model, router_url, hw.get("binaries") or {}, routing=config.get("routing"), report=config.get("report"))
+    rules_body = _build_shared_rules_md(
+        vault_markdown,
+        daily_model,
+        router_url,
+        hw.get("binaries") or {},
+        routing=config.get("routing"),
+        report=config.get("report"),
+        orchestrator=orch,
+    )
     changes: list[FileChange] = []
 
     def _add(harness: str, path: Path, content: str, kind: str, detail: str) -> None:
@@ -228,7 +296,7 @@ def plan_sync(
         _add("antigravity", p, json.dumps(cur, indent=2) + "\n", "json", "Add lean Serena + cortical-mcp (Dashboard Ingest Only)")
         rp = paths_map["antigravity"]["rules"]
         r_old = rp.read_text(encoding="utf-8") if rp.is_file() else ""
-        _add("antigravity", rp, _upsert_marked_block(r_old, rules_body, "<!-- CORTICAL:START -->", "<!-- CORTICAL:END -->"), "markdown", "Sync shared token-saving rules")
+        _add("antigravity", rp, _upsert_marked_block(r_old, rules_body, "<!-- CORTICAL:START -->", "<!-- CORTICAL:END -->"), "markdown", "Sync shared orchestrator, privacy & token-saving rules")
 
     if "pi" in targets:
         mp = paths_map["pi"]["mcp"]
@@ -257,11 +325,11 @@ def plan_sync(
         sp = paths_map["pi"]["settings"]
         cur_s = _read_json_safe(sp)
         prov_name = "router" if router_enabled else "ollama"
-        cur_s["defaultProvider"] = prov_name
-        cur_s["defaultModel"] = daily_model
-        pi_models = list(dict.fromkeys([daily_model, reasoner_model, router_model]))
-        cur_s["enabledModels"] = [f"{prov_name}/{m}" for m in pi_models]
-        _add("pi", sp, json.dumps(cur_s, indent=2) + "\n", "json", f"Set defaultModel={daily_model} ({'HTTP router' if router_enabled else 'Ollama'})")
+        base_pi_models = [daily_model, reasoner_model, router_model]
+        if router_enabled:
+            base_pi_models.extend(["cortical-fast", "cortical-deep", "local-default"])
+        pi_models = list(dict.fromkeys(base_pi_models))
+        enabled_list = [f"{prov_name}/{m}" for m in pi_models]
 
         mod_p = paths_map["pi"]["models"]
         cur_mod = _read_json_safe(mod_p)
@@ -271,20 +339,42 @@ def plan_sync(
             "api": "openai-completions",
             "apiKey": "ollama",
             "models": [
-                {
-                    "id": m,
-                    "name": m,
-                    "reasoning": False,
-                    "input": ["text"],
-                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                    "contextWindow": 131072 if "9b" in m else 32768,
-                    "maxTokens": 8192,
-                }
+                _build_pi_model_entry(m, _model_ctx_for_harness(m, hw, rec_by_role, orch))
                 for m in pi_models
             ],
         }
+        if orch["is_remote"]:
+            r_prov = orch["provider"]
+            api_kind = "anthropic-messages" if r_prov == "anthropic" else "openai-completions"
+            env_ref = f"${{{orch['api_key_env']}}}" if orch.get("api_key_env") else "env"
+            provs[r_prov] = {
+                "baseUrl": orch["endpoint"],
+                "api": api_kind,
+                "apiKey": env_ref,
+                "models": [
+                    {
+                        "id": orch["model"],
+                        "name": orch["model"],
+                        "reasoning": True,
+                        "input": ["text"],
+                        "contextWindow": orch["effective_num_ctx"],
+                        "maxTokens": min(16384, max(8192, orch["effective_num_ctx"] // 8)),
+                    }
+                ],
+            }
+            cur_s["defaultProvider"] = r_prov
+            cur_s["defaultModel"] = orch["model"]
+            enabled_list = [f"{r_prov}/{orch['model']}", *enabled_list]
+        else:
+            cur_s["defaultProvider"] = prov_name
+            cur_s["defaultModel"] = orch["model"] if (router_enabled and orch["model"] in pi_models) else daily_model
+        cur_s["enabledModels"] = list(dict.fromkeys(enabled_list))
         cur_mod["providers"] = provs
-        _add("pi", mod_p, json.dumps(cur_mod, indent=2) + "\n", "json", f"Sync pi {prov_name} provider models")
+        _add("pi", sp, json.dumps(cur_s, indent=2) + "\n", "json", f"Set orchestrator={cur_s['defaultProvider']}/{cur_s['defaultModel']}")
+        _add("pi", mod_p, json.dumps(cur_mod, indent=2) + "\n", "json", f"Sync pi models w/ hardware-ceiling num_ctx & reasoning_effort=none")
+        pi_rp = paths_map["pi"]["rules"]
+        pi_r_old = pi_rp.read_text(encoding="utf-8") if pi_rp.is_file() else ""
+        _add("pi", pi_rp, _upsert_marked_block(pi_r_old, rules_body, "<!-- CORTICAL:START -->", "<!-- CORTICAL:END -->"), "markdown", "Sync pi shared rules & privacy/delegation policy")
 
     if "opencode" in targets:
         op_p = paths_map["opencode"]["opencode"]
@@ -293,43 +383,88 @@ def plan_sync(
         prov["ollama"] = {
             "npm": "@ai-sdk/openai-compatible",
             "name": "Cortical Local / Router",
-            "options": {"baseURL": eff_base_url},
+            "options": {"baseURL": eff_base_url, "timeout": int(orch["timeout_sec"]) * 1000},
             "models": {
-                m: {"name": m, "num_ctx": int((rec_by_role.get("daily_coder") or {}).get("recommended_num_ctx") or 32768)}
-                for m in dict.fromkeys([daily_model, reasoner_model, router_model])
+                m: {"name": m, "num_ctx": _model_ctx_for_harness(m, hw, rec_by_role, orch)}
+                for m in dict.fromkeys([daily_model, reasoner_model, router_model, "cortical-fast", "cortical-deep"])
             },
         }
+        if orch["is_remote"] and orch.get("api_key_env"):
+            rp_id = orch["provider"]
+            prov[rp_id] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": f"Cortical Orchestrator ({rp_id})",
+                "options": {"baseURL": orch["endpoint"], "apiKey": f"{{env:{orch['api_key_env']}}}"},
+                "models": {orch["model"]: {"name": orch["model"], "num_ctx": orch["effective_num_ctx"]}},
+            }
+            cur_o["model"] = f"{rp_id}/{orch['model']}"
+        else:
+            cur_o["model"] = f"ollama/{orch['model'] if orch['model'] in {'cortical-deep', 'cortical-fast', daily_model, reasoner_model} else daily_model}"
         cur_o["provider"] = prov
         oc_mcp = dict(cur_o.get("mcp") or {})
         oc_mcp["serena"] = {"type": "local", "command": [serena_bin, *_serena_args("ide")], "enabled": True}
         oc_mcp["cortical-mcp"] = {"type": "local", "command": [_cortical_mcp_entry(root, v_db)["command"], "-m", "cortical.mcp_server"], "enabled": True}
         cur_o["mcp"] = oc_mcp
-        _add("opencode", op_p, json.dumps(cur_o, indent=2) + "\n", "json", "Sync OpenCode Ollama/Router models + Serena + cortical-mcp")
+        _add("opencode", op_p, json.dumps(cur_o, indent=2) + "\n", "json", "Sync OpenCode Orchestrator + Local Workers + Serena + cortical-mcp")
 
     if "openclaw" in targets:
         ocp = paths_map["openclaw"]["config"]
         cur_c = _read_json_safe(ocp)
         provs = dict(cur_c.get("providers") or {})
-        provs["cortical_local"] = {"baseURL": eff_base_url, "model": daily_model, "reasonerModel": reasoner_model}
+        provs["cortical_local"] = {
+            "baseURL": eff_base_url,
+            "model": daily_model,
+            "reasonerModel": reasoner_model,
+            "numCtx": _model_ctx_for_harness(reasoner_model, hw, rec_by_role, orch),
+            "timeoutSec": orch["timeout_sec"],
+        }
         cur_c["providers"] = provs
+        cur_c["orchestrator"] = {
+            "mode": orch["mode"],
+            "provider": orch["provider"],
+            "model": orch["model"],
+            "endpoint": orch["endpoint"],
+            "apiKeyEnv": orch["api_key_env"],
+            "numCtx": orch["effective_num_ctx"],
+            "timeoutSec": orch["timeout_sec"],
+            "localFirstDelegation": orch["local_first_delegation"],
+            "strictRemotePrivacy": orch["strict_remote_privacy"],
+        }
         mcps = dict(cur_c.get("mcpServers") or {})
         mcps["serena"] = {"command": serena_bin, "args": _serena_args("oaicompat-agent")}
         mcps["cortical-mcp"] = _cortical_mcp_entry(root, v_db)
         cur_c["mcpServers"] = mcps
-        _add("openclaw", ocp, json.dumps(cur_c, indent=2) + "\n", "json", "Configure OpenClaw local/router provider + MCPs")
+        _add("openclaw", ocp, json.dumps(cur_c, indent=2) + "\n", "json", "Configure OpenClaw orchestrator, local workers & MCPs")
 
     if "codex" in targets:
         cxp = paths_map["codex"]["config"]
         existing = cxp.read_text(encoding="utf-8") if cxp.is_file() else ""
+        remote_toml = ""
+        if orch["is_remote"] and orch.get("api_key_env"):
+            rp_id = orch["provider"].replace("-", "_")
+            remote_toml = (
+                f"\n\n[model_providers.cortical_{rp_id}]\n"
+                f'name = "Cortical Remote ({orch["provider"]})"\n'
+                f'base_url = {json.dumps(orch["endpoint"])}\n'
+                f'env_key = {json.dumps(orch["api_key_env"])}\n'
+                f'request_max_retries = 4\n'
+                f'stream_idle_timeout_ms = {int(orch["timeout_sec"]) * 1000}\n\n'
+                "[profiles.cortical_orchestrator]\n"
+                f'model_provider = "cortical_{rp_id}"\n'
+                f'model = {json.dumps(orch["model"])}'
+            )
         toml_block = (
             "[model_providers.cortical_local]\n"
             'name = "Cortical Local / Router"\n'
             f'base_url = {json.dumps(eff_base_url)}\n'
-            'wire_api = "chat"\n\n'
+            'wire_api = "chat"\n'
+            "request_max_retries = 4\n"
+            f"stream_idle_timeout_ms = {int(orch['timeout_sec']) * 1000}\n\n"
             "[profiles.cortical_local]\n"
             'model_provider = "cortical_local"\n'
-            f'model = {json.dumps(daily_model)}\n\n'
-            "[mcp_servers.serena]\n"
+            f'model = {json.dumps(daily_model if orch["is_remote"] else orch["model"])}'
+            + remote_toml
+            + "\n\n[mcp_servers.serena]\n"
             f'command = {json.dumps(serena_bin)}\n'
             f'args = {json.dumps(_serena_args("codex"))}\n\n'
             "[mcp_servers.cortical_mcp]\n"
@@ -339,7 +474,7 @@ def plan_sync(
             f'PYTHONPATH = {json.dumps(str((root / "src").resolve()))}\n'
             f'CORTICAL_VAULT_DB = {json.dumps(str(v_db.resolve()))}'
         )
-        _add("codex", cxp, _upsert_marked_block(existing, toml_block, "# >>> CORTICAL START >>>", "# <<< CORTICAL END <<<"), "toml", "Upsert Codex CLI MCP blocks")
+        _add("codex", cxp, _upsert_marked_block(existing, toml_block, "# >>> CORTICAL START >>>", "# <<< CORTICAL END <<<"), "toml", "Upsert Codex CLI orchestrator, local profile & MCP blocks")
 
     if "claude-code" in targets:
         clp = paths_map["claude-code"]["mcp"]
@@ -349,15 +484,28 @@ def plan_sync(
         ms["cortical-mcp"] = _cortical_mcp_entry(root, v_db)
         cur_cl["mcpServers"] = ms
         _add("claude-code", clp, json.dumps(cur_cl, indent=2) + "\n", "json", "Merge Serena + cortical-mcp into ~/.claude.json preserving prefs")
+        cl_rp = paths_map["claude-code"]["rules"]
+        cl_r_old = cl_rp.read_text(encoding="utf-8") if cl_rp.is_file() else ""
+        _add("claude-code", cl_rp, _upsert_marked_block(cl_r_old, rules_body, "<!-- CORTICAL:START -->", "<!-- CORTICAL:END -->"), "markdown", "Sync Claude Code shared rules & privacy/delegation policy")
 
     if "dsh" in targets:
         dsp = paths_map["dsh"]["settings"]
         existing = dsp.read_text(encoding="utf-8") if dsp.is_file() else ""
+        orch_yaml = (
+            f"orchestrator_mode: {orch['mode']}\n"
+            f"orchestrator_provider: {orch['provider']}\n"
+            f"orchestrator_model: {orch['model']}\n"
+            f"context_window: {orch['effective_num_ctx']}\n"
+            f"request_timeout_ms: {int(orch['timeout_sec']) * 1000}\n"
+        )
+        if orch["is_remote"] and orch.get("api_key_env"):
+            orch_yaml += f"api_key_env: {orch['api_key_env']}\norchestrator_base_url: {orch['endpoint']}\n"
         yaml_block = (
             f"base_url: {eff_base_url}\n"
             f"default_model: {daily_model}\n"
             f"reasoner_model: {reasoner_model}\n"
-            "plugins:\n"
+            + orch_yaml
+            + "plugins:\n"
             "  - id: mcp-serena\n"
             "    name: '@deepseek-ai/dsh-mcp-client'\n"
             "    config:\n"
@@ -373,7 +521,7 @@ def plan_sync(
             f"      command: {_cortical_mcp_entry(root, v_db)['command']}\n"
             "      args: ['-m', 'cortical.mcp_server']"
         )
-        _add("dsh", dsp, _upsert_marked_block(existing, yaml_block, "# >>> CORTICAL START >>>", "# <<< CORTICAL END <<<"), "yaml", "Configure DeepSeek Harness (dsh) model URL & @deepseek-ai/dsh-mcp-client")
+        _add("dsh", dsp, _upsert_marked_block(existing, yaml_block, "# >>> CORTICAL START >>>", "# <<< CORTICAL END <<<"), "yaml", "Configure DeepSeek Harness (dsh) orchestrator, timeout & @deepseek-ai/dsh-mcp-client")
 
     if "unsloth-studio" in targets:
         usp = paths_map["unsloth-studio"]["manifest"]
@@ -383,9 +531,11 @@ def plan_sync(
             "launch_serena_cmd": "cortical serve-mcp serena --port 9121",
             "launch_cortical_cmd": "cortical serve-mcp cortical --port 9122",
             "supported_cli_wrappers": ["unsloth start pi", "unsloth start opencode", "unsloth start claude", "unsloth start dsh"],
+            "orchestrator": {k: v for k, v in orch.items() if k != "context_profile"},
+            "context_profile": orch.get("context_profile"),
             "recommended_models": rec_by_role,
         }
-        _add("unsloth-studio", usp, json.dumps(manifest, indent=2) + "\n", "json", "Write Unsloth Studio HTTP MCP manifest & wrapper reference")
+        _add("unsloth-studio", usp, json.dumps(manifest, indent=2) + "\n", "json", "Write Unsloth Studio HTTP MCP manifest & orchestrator reference")
 
     return changes
 

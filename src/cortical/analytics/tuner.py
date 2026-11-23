@@ -41,6 +41,9 @@ def analyze_and_tune(
     daily = (rec_roles.get("daily_coder") or {}).get("model_id") or cfg.get("active_model")
     reasoner = (rec_roles.get("deep_reasoner") or {}).get("model_id") or daily
     eff_ctx = int((rec_roles.get("daily_coder") or {}).get("recommended_num_ctx") or 16384)
+    deep_info = rec_roles.get("deep_reasoner") or rec_roles.get("daily_coder") or {}
+    deep_ctx = int(deep_info.get("recommended_num_ctx") or eff_ctx)
+    deep_timeout = int(deep_info.get("adaptive_timeout_sec") or 600)
     max_share = float((cfg.get("compression") or {}).get("max_context_share") or 0.15)
     recommended_budget = max(256, int(eff_ctx * max_share))
 
@@ -48,13 +51,13 @@ def analyze_and_tune(
     if daily and daily != cfg.get("active_model"):
         suggestions.append(f"Set daily active_model -> `{daily}` (swap-safe for `{rec.get('tier')}` at `num_ctx={eff_ctx}`).")
     if reasoner and reasoner != (cfg.get("models_by_role") or {}).get("deep_reasoner"):
-        suggestions.append(f"Assign deep_reasoner/orchestrator -> `{reasoner}` (variable quant fits RAM headroom).")
+        suggestions.append(f"Assign deep_reasoner/orchestrator -> `{reasoner}` (auto_max num_ctx={deep_ctx}, timeout={deep_timeout}s).")
     for m_id, st in model_perf.items():
         avg_s = st["elapsed"] / max(1, st["runs"])
         if avg_s > 90.0 or st["failures"] > 0:
-            suggestions.append(f"Local model `{m_id}` avg {avg_s:.1f}s ({st['failures']} failures): bound `num_ctx` to {min(eff_ctx, 16384)} or shift light steps to router model.")
+            suggestions.append(f"Local model `{m_id}` avg {avg_s:.1f}s ({st['failures']} failures): keep reasoning_effort=none & adaptive timeout>={deep_timeout}s.")
     if not suggestions:
-        suggestions.append(f"Configuration balanced for `{rec.get('tier')}`; memory injection capped at {recommended_budget} tokens ({int(max_share * 100)}% of {eff_ctx}).")
+        suggestions.append(f"Configuration balanced for `{rec.get('tier')}`; auto_max num_ctx={deep_ctx} (daily={eff_ctx}), timeout={deep_timeout}s, memory injection <= {recommended_budget} tok ({int(max_share * 100)}%).")
 
     applied = False
     if apply_changes:
@@ -71,6 +74,8 @@ def analyze_and_tune(
         "applied": applied,
         "recommended_by_role": rec_roles,
         "recommended_context_budget_tokens": recommended_budget,
+        "recommended_deep_num_ctx": deep_ctx,
+        "recommended_timeout_sec": deep_timeout,
         "observed_model_stats": model_perf,
         "suggestions": suggestions,
     }

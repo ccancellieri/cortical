@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..composers.tools import inspect_composed_tools
-from ..config import DEFAULT_CONFIG, default_data_dir, load_cortical_config
+from ..config import DEFAULT_CONFIG, ORCHESTRATOR_PRESETS, default_data_dir, load_cortical_config, resolve_orchestrator_spec
 from ..hardware.context_window import compute_dynamic_num_ctx
 from ..hardware.models import list_all_models, recommend_models_for_hardware
 from ..hardware.probe import classify_hardware_tier
@@ -160,12 +160,54 @@ def _demo_hardware() -> dict[str, Any]:
         "free_ram_gb": 10.5,
         "unified_memory": True,
         "vram_gb": 11.2,
+        "memory_pressure_level": 1,
         "gpu_name": "Apple Silicon (Demo Profile)",
         "disk_free_gb": 120.0,
         "installed_ollama_models": [],
     }
     hw["classification"] = classify_hardware_tier(hw)
     return hw
+
+
+def _build_orchestration_matrix(orch: dict[str, Any], harnesses_out: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Builds a per-harness orchestration & zero-leakage binding summary across all 8 harnesses."""
+    is_remote = bool(orch.get("is_remote"))
+    mode_label = f"Remote ({orch.get('provider')})" if is_remote else f"Local ({orch.get('provider')})"
+    workers = orch.get("local_workers") or {}
+    worker_str = f"fast={workers.get('fast', 'qwen3.5:9b-q3_k_xl')} · router={workers.get('router', 'qwen2.5:1.5b')}"
+    targets_hint = {
+        "antigravity": "GEMINI.md + cortical-mcp (local offload)",
+        "pi": "models.json + settings.json + AGENTS.md",
+        "opencode": "opencode.json + config.json + AGENTS.md",
+        "openclaw": "openclaw.json + AGENTS.md",
+        "codex": "config.toml [profiles.cortical_*] + AGENTS.md",
+        "claude-code": "~/.claude.json + CLAUDE.md + Serena/Cortical",
+        "dsh": "settings.yaml + Cordis MCP plugins",
+        "unsloth-studio": "unsloth-studio-mcp.json + HTTP wrappers",
+    }
+    rows: list[dict[str, Any]] = []
+    for h in harnesses_out:
+        hid = str(h.get("id") or "")
+        presend = bool(h.get("presend_verified"))
+        if not is_remote:
+            guard = "Air-Gapped Local Only (zero cloud egress)"
+        elif presend:
+            guard = "fail_closed + verified pre-send hook + MCP vault block"
+        else:
+            guard = "fail_closed MCP & sync guard (no native attachment hook)"
+        rows.append({
+            "harness": hid,
+            "lifecycle": h.get("lifecycle", "not_detected"),
+            "orchestrator_binding": mode_label,
+            "orchestrator_model": orch.get("model", "cortical-deep"),
+            "local_workers": worker_str,
+            "num_ctx": int(orch.get("effective_num_ctx") or 65536),
+            "timeout_sec": int(orch.get("timeout_sec") or 600),
+            "delegation": "local_first_offload" if orch.get("local_first_delegation", True) else "direct",
+            "privacy_guard": guard,
+            "target_files": targets_hint.get(hid, ""),
+        })
+    return rows
 
 
 def build_dashboard_snapshot(
@@ -191,14 +233,18 @@ def build_dashboard_snapshot(
 
     rec = recommend_models_for_hardware(hw_data, custom_models=cfg.get("custom_models"))
     catalog = list_all_models(custom_models=cfg.get("custom_models"))
+    orch = resolve_orchestrator_spec(cfg, hw=hw_data, rec_models=rec)
     active_model = str(cfg.get("active_model") or (cfg.get("models_by_role") or {}).get("daily_coder") or "qwen3.5:9b-q3_k_xl")
-    active_meta = next((m for m in catalog if m["model_id"] == active_model), {"memory_gb": 5.1, "native_ctx": 32768})
+    active_meta = next((m for m in catalog if m["model_id"] == active_model), {"memory_gb": 5.1, "native_ctx": 65536})
     dyn_ctx = compute_dynamic_num_ctx(
-        int(active_meta.get("native_ctx") or 32768),
+        int(active_meta.get("native_ctx") or 65536),
         active_model,
         ram_available_gb=float(hw_data.get("free_ram_gb") or 8.0),
+        vram_gb=float(hw_data.get("vram_gb") or 0.0),
         unified_memory=bool(hw_data.get("unified_memory")),
         model_ram_gb=float(active_meta.get("memory_gb") or 5.1),
+        total_ram_gb=float(hw_data.get("total_ram_gb") or 16.0),
+        memory_pressure_level=int(hw_data.get("memory_pressure_level") or 1),
     )
 
     # Harnesses + drift + backups
@@ -402,10 +448,17 @@ def build_dashboard_snapshot(
             "free_ram_gb": float(hw_data.get("free_ram_gb") or 8.0),
             "unified_memory": bool(hw_data.get("unified_memory", False)),
             "vram_gb": float(hw_data.get("vram_gb") or 0.0),
+            "memory_pressure_level": int(hw_data.get("memory_pressure_level") or 1),
             "gpu_name": str(hw_data.get("gpu_name") or "CPU"),
             "classification": hw_data.get("classification") or {},
             "dynamic_num_ctx": dyn_ctx,
             "active_model": active_model,
+        },
+        "orchestration": {
+            "active": {k: v for k, v in orch.items() if k != "context_profile"},
+            "presets": copy.deepcopy(ORCHESTRATOR_PRESETS),
+            "context_profile": orch.get("context_profile") or {},
+            "harness_matrix": _build_orchestration_matrix(orch, harnesses_out),
         },
         "models": {
             "catalog": catalog,

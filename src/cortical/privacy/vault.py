@@ -13,9 +13,18 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..compression.engine import compress_structured, fit_to_token_budget
+from ..config import load_cortical_config, remote_orchestrator_active
 from .brain import LocalBrain
-from .sanitizer import FailClosedError, classify_and_sanitize
+from .sanitizer import FailClosedError, classify_and_sanitize, pseudonymize_structured
 from ._auto_tagger import get_default_tags_for_path
+
+
+def _verify_zero_residual_pii(text: str, custom_terms: Optional[list[str]] = None) -> list[str]:
+    """Scans sanitized text to ensure zero unmasked PII/secrets remain before remote egress."""
+    if not text:
+        return []
+    _, residual = pseudonymize_structured(text, redact=False, custom_terms=custom_terms)
+    return list(residual.values())
 
 VERIFIED_PRESEND_HARNESSES: frozenset[str] = frozenset({
     "pi",
@@ -536,7 +545,13 @@ class PrivacyVault:
             "sanitized_preview": comp["compressed"][:320],
         }
 
-    def list_resources(self, include_local_only: bool = False) -> list[dict[str, Any]]:
+    def list_resources(
+        self,
+        include_local_only: bool = False,
+        *,
+        remote_egress: bool = False,
+        custom_terms: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
         """Channel 1: Lists native MCP resource descriptors without exposing local filesystem paths."""
         self.sync_from_disk()
         with self._connect() as conn:
@@ -544,6 +559,8 @@ class PrivacyVault:
         out: list[dict[str, Any]] = []
         for r in rows:
             if r["local_only"] and not include_local_only:
+                continue
+            if remote_egress and not include_local_only and _verify_zero_residual_pii(str(r["sanitized_content"] or ""), custom_terms):
                 continue
             out.append({
                 "uri": f"cortical://private/{r['alias']}",
@@ -555,8 +572,16 @@ class PrivacyVault:
             })
         return out
 
-    def read_resource(self, alias_or_uri: str, allow_local_only: bool = False, tier: str = "max") -> dict[str, Any]:
-        """Channel 1: Reads sanitized/public content at `light|medium|high|max`; blocks `max_security` from cloud."""
+    def read_resource(
+        self,
+        alias_or_uri: str,
+        allow_local_only: bool = False,
+        tier: str = "max",
+        *,
+        remote_egress: bool = False,
+        custom_terms: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Channel 1: Reads sanitized/public content at `light|medium|high|max`; blocks `max_security` & unmasked PII from cloud."""
         self.sync_from_disk()
         alias = str(alias_or_uri).replace("cortical://private/", "").lstrip("@").strip()
         with self._connect() as conn:
@@ -564,10 +589,19 @@ class PrivacyVault:
         if not row:
             raise KeyError(f"Vault item not found: {alias}")
         if row["local_only"] and not allow_local_only:
-            raise FailClosedError(f"Vault item '{alias}' is marked max_security (local-only); cloud egress blocked.")
+            raise FailClosedError(
+                f"Vault item '{alias}' is marked max_security (local-only); cloud egress blocked. "
+                f"Process locally via cortical_local_offload(vault_alias='{alias}')."
+            )
         eff_tier = str(tier or "max").lower().strip()
         tier_text = self.brain.read_tier(row["alias"], eff_tier) if eff_tier not in {"max", "l4"} else None
         text_out = tier_text if tier_text is not None else row["sanitized_content"]
+        if remote_egress and not allow_local_only:
+            if _verify_zero_residual_pii(str(text_out or ""), custom_terms):
+                raise FailClosedError(
+                    f"Remote orchestrator active: unmasked PII detected in '{alias}'; fail-closed remote egress blocked. "
+                    f"Delegate locally via cortical_local_offload(vault_alias='{alias}')."
+                )
         return {
             "uri": f"cortical://private/{row['alias']}",
             "alias": row["alias"],
@@ -576,10 +610,19 @@ class PrivacyVault:
             "profile": row["profile"],
             "format_used": row["format_used"],
             "tokens_est": int(row["tokens_est"]) if tier_text is None else max(1, len(text_out) // 4),
+            "remote_egress_verified": bool(remote_egress),
             "text": text_out,
         }
 
-    def read_task_context(self, task_tag: str, *, allow_local_only: bool = False, tier: str = "medium") -> dict[str, Any]:
+    def read_task_context(
+        self,
+        task_tag: str,
+        *,
+        allow_local_only: bool = False,
+        tier: str = "medium",
+        remote_egress: bool = False,
+        custom_terms: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         """Reads sanitized context across all Vault documents tagged with `task_tag`."""
         needle = str(task_tag or "").strip().lower().lstrip("#")
         matches = self.list_items(include_local_only=True, task_tag=needle)
@@ -589,7 +632,18 @@ class PrivacyVault:
             if m["local_only"] and not allow_local_only:
                 blocked_local.append(m["alias"])
                 continue
-            docs.append(self.read_resource(m["alias"], allow_local_only=allow_local_only, tier=tier))
+            try:
+                docs.append(
+                    self.read_resource(
+                        m["alias"],
+                        allow_local_only=allow_local_only,
+                        tier=tier,
+                        remote_egress=remote_egress,
+                        custom_terms=custom_terms,
+                    )
+                )
+            except FailClosedError:
+                blocked_local.append(m["alias"])
         return {
             "task_tag": needle,
             "tier": tier,
@@ -598,14 +652,25 @@ class PrivacyVault:
             "blocked_max_security_aliases": blocked_local,
         }
 
-    def export_sanitized_memory_markdown(self, num_ctx: int = 16384, max_share: float = 0.15) -> str:
+    def export_sanitized_memory_markdown(
+        self,
+        num_ctx: int = 16384,
+        max_share: float = 0.15,
+        *,
+        remote_egress: bool = False,
+        custom_terms: Optional[list[str]] = None,
+    ) -> str:
         """Channel 2: Exports auto-sized sanitized memory blocks safe for harness rule/skill injection."""
         self.sync_from_disk()
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM vault_items WHERE local_only = 0 ORDER BY updated_at DESC LIMIT 25"
             ).fetchall()
-        if not rows:
+        safe_rows = [
+            r for r in rows
+            if not (remote_egress and _verify_zero_residual_pii(str(r["sanitized_content"] or ""), custom_terms))
+        ]
+        if not safe_rows:
             return ""
         blocks = [
             {
@@ -614,12 +679,19 @@ class PrivacyVault:
                 "content": r["sanitized_content"],
                 "priority": 100 - idx,
             }
-            for idx, r in enumerate(rows)
+            for idx, r in enumerate(safe_rows)
         ]
         sized = fit_to_token_budget(blocks, num_ctx=num_ctx, max_share=max_share)
+        guard_note = (
+            "_Zero-Leakage Remote Guard: only verified PII-free summaries exported; process private items offline via `cortical_local_offload`._\n"
+            if remote_egress
+            else ""
+        )
         return (
             "## Cortical Sanitized Context (Zero Cloud PII)\n"
-            f"_Budget: {sized['used_tokens']}/{sized['budget_tokens']} tok_\n\n"
+            f"_Budget: {sized['used_tokens']}/{sized['budget_tokens']} tok_\n"
+            + guard_note
+            + "\n"
             + sized["markdown"]
         )
 
@@ -634,6 +706,7 @@ class PrivacyVault:
         custom_terms: Optional[list[str]] = None,
         use_local_ner: bool = False,
         llm_fn: Optional[Callable[[str], str]] = None,
+        config: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Channel 3: Intercepts prompt attachments strictly on verified pre-send harnesses before network dispatch."""
         hid = str(harness_id or "").strip().lower()
@@ -648,29 +721,49 @@ class PrivacyVault:
                 ),
             }
 
+        cfg = config if config is not None else load_cortical_config()
+        is_remote = remote_orchestrator_active(cfg)
+        eff_terms = list(custom_terms or (cfg.get("privacy") or {}).get("custom_terms") or []) or None
+        eff_policy = "fail_closed" if (is_remote and policy == "auto") else policy
+
+        clean_prompt = prompt.strip()
+        prompt_pii_masked = False
+        if is_remote and clean_prompt:
+            masked_p, p_map = pseudonymize_structured(clean_prompt, redact=False, custom_terms=eff_terms)
+            if p_map:
+                clean_prompt = masked_p
+                prompt_pii_masked = True
+
         ingested: list[dict[str, Any]] = []
         refs_text: list[str] = []
         for f in files:
             item = self.ingest(
                 f,
-                policy=policy,
+                policy=eff_policy,
                 profile=profile,
-                custom_terms=custom_terms,
+                custom_terms=eff_terms,
                 use_local_ner=use_local_ner,
                 llm_fn=llm_fn,
+                config=cfg,
             )
             ingested.append(item)
-            if item["local_only"]:
-                refs_text.append(f"[LOCAL-ONLY VAULT: @private:{item['alias']}] Keep on local runner; do not upload.")
+            if item["local_only"] or (is_remote and _verify_zero_residual_pii(item["sanitized_preview"], eff_terms)):
+                refs_text.append(
+                    f"[LOCAL-ONLY VAULT: @private:{item['alias']}] Blocked from remote orchestrator; "
+                    f"delegate analysis locally via cortical_local_offload(vault_alias='{item['alias']}')."
+                )
             else:
-                refs_text.append(f"[SANITIZED CONTEXT: @private:{item['alias']}]\n{item['sanitized_preview']}")
+                tag = "ZERO-PII SANITIZED CONTEXT" if is_remote else "SANITIZED CONTEXT"
+                refs_text.append(f"[{tag}: @private:{item['alias']}]\n{item['sanitized_preview']}")
 
         return {
             "supported": True,
             "harness_id": hid,
             "blocked_raw_upload": True,
-            "requires_approval": any(i["requires_confirmation"] or i["local_only"] for i in ingested),
+            "remote_egress_guarded": is_remote,
+            "prompt_pii_masked": prompt_pii_masked,
+            "requires_approval": any(i["requires_confirmation"] or i["local_only"] for i in ingested) or prompt_pii_masked,
             "vault_aliases": [i["alias"] for i in ingested],
             "ingested": ingested,
-            "proposed_remote_prompt": prompt.strip() + ("\n\n" + "\n\n".join(refs_text) if refs_text else ""),
+            "proposed_remote_prompt": clean_prompt + ("\n\n" + "\n\n".join(refs_text) if refs_text else ""),
         }

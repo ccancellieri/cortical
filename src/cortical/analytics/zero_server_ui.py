@@ -585,6 +585,168 @@ function closeDrawer() {{ ST.drawerItem = null; document.getElementById('drawer-
 // =========================================================================
 // VIEW 3: MODELS & HARDWARE AUTO-TUNER (Tier Bar, Role Slots, Local Probes)
 // =========================================================================
+function setOrchMode(mode) {{
+  const c = ST.draftCfg;
+  if (!c.orchestrator) c.orchestrator = {{}};
+  c.orchestrator.mode = mode;
+  if (mode === 'local') {{
+    const p = (ST.snap.orchestration?.presets || {{}}).local_deep || {{}};
+    c.orchestrator.provider = p.provider || 'router';
+    c.orchestrator.model = p.model || 'cortical-deep';
+    c.orchestrator.api_key_env = '';
+    c.orchestrator.endpoint = p.endpoint || '';
+  }} else if (!['gemini','anthropic','openai','deepseek','openrouter','custom'].includes(c.orchestrator.provider)) {{
+    setOrchPreset('gemini');
+    return;
+  }}
+  validateCfg();
+  renderAll();
+}}
+
+function setOrchPreset(key) {{
+  const presets = ST.snap.orchestration?.presets || {{}};
+  const p = presets[key];
+  if (!p) return;
+  const c = ST.draftCfg;
+  if (!c.orchestrator) c.orchestrator = {{}};
+  c.orchestrator.mode = p.mode || 'local';
+  c.orchestrator.provider = p.provider || 'router';
+  c.orchestrator.model = p.model || 'cortical-deep';
+  c.orchestrator.api_key_env = p.api_key_env || '';
+  c.orchestrator.endpoint = p.endpoint || '';
+  if (p.mode === 'remote') {{
+    c.orchestrator.local_first_delegation = true;
+    c.orchestrator.strict_remote_privacy = true;
+  }}
+  validateCfg();
+  renderAll();
+}}
+
+function syncAllHarnessesInPlan() {{
+  const allIds = (ST.snap.harnesses || []).map((h) => h.id);
+  ST.planHarnesses = allIds.length ? allIds : ['antigravity','pi','opencode','openclaw','codex','claude-code','dsh','unsloth-studio'];
+  toast('ok', 'Added all ' + ST.planHarnesses.length + ' harnesses to Apply Plan.');
+  renderAll();
+}}
+
+function renderOrchestrationCard() {{
+  const c = ST.draftCfg;
+  const o = c.orchestrator || {{}};
+  const snapOrch = ST.snap.orchestration || {{}};
+  const presets = snapOrch.presets || {{}};
+  const cp = snapOrch.context_profile || {{}};
+  const isRemote = o.mode === 'remote' || ['gemini','anthropic','openai','deepseek','openrouter','custom'].includes(o.provider);
+  const autoCtx = cp.auto_max_num_ctx || ST.snap.hardware?.dynamic_num_ctx || 65536;
+  const effCtx = (o.context_strategy === 'fixed' && o.fixed_num_ctx) ? o.fixed_num_ctx : autoCtx;
+  const effTimeout = (o.timeout_sec && o.timeout_sec > 0) ? o.timeout_sec : (cp.adaptive_timeout_sec || (isRemote ? 180 : 600));
+  const curPresetKey = Object.keys(presets).find((k) => presets[k].provider === o.provider && (presets[k].mode || 'local') === (isRemote ? 'remote' : 'local')) || (isRemote ? 'custom' : 'local_deep');
+  const errMsg = (k) => ST.cfgErrors[k] ? `<div class="err-msg">⚠ ${{esc(ST.cfgErrors[k])}}</div>` : '';
+  const matrix = snapOrch.harness_matrix || [];
+
+  return `
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>🧭 Hybrid Orchestrator, Auto-Context Ceiling &amp; 8-Harness Matrix</h2>
+          <div class="hint">Select a Local or Remote Orchestrator while keeping worker offload local and private vault data fail-closed.</div>
+        </div>
+        <span class="pill ${{isRemote ? 'warn' : 'ok'}}">${{isRemote ? '🛡️ Remote Orchestrator • Strict Zero-Leakage fail_closed Guard Active' : '🔒 100% Local Air-Gapped • Zero Cloud Egress'}}</span>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+        <button class="btn sm ${{!isRemote ? 'primary' : ''}}" onclick="setOrchMode('local')">🔒 100% Local Air-Gapped</button>
+        <button class="btn sm ${{isRemote ? 'primary' : ''}}" onclick="setOrchMode('remote')">🌐 Hybrid Remote Orchestrator + Local Workers</button>
+        <button class="btn sm" style="margin-left:auto;" onclick="syncAllHarnessesInPlan()">＋ Sync All 8 Harnesses in Apply Plan</button>
+      </div>
+
+      <div class="grid-3" style="margin-bottom:12px;">
+        <div class="field">
+          <label for="orch-preset">Orchestrator Provider Preset</label>
+          <select id="orch-preset" class="select" onchange="setOrchPreset(this.value)">
+            ${{Object.entries(presets).map(([k, p]) => `<option value="${{esc(k)}}" ${{curPresetKey===k?'selected':''}}>${{esc(p.label || k)}}</option>`).join('')}}
+          </select>
+          <div class="hint">Presets never store keys — remote providers reference env var names only.</div>
+        </div>
+        <div class="field">
+          <label for="orch-model">Orchestrator Model</label>
+          <input id="orch-model" class="input mono" value="${{esc(o.model || 'cortical-deep')}}" oninput="setCfg('orchestrator.model', this.value)" />
+          <div class="hint">e.g. <code>cortical-deep</code>, <code>gemini-2.5-pro</code>, <code>claude-sonnet-4-5</code>, <code>gpt-5</code>, <code>deepseek-chat</code>.</div>
+        </div>
+        <div class="field">
+          <label for="orch-ctx-strat">Context Window &amp; Timeout Strategy</label>
+          <select id="orch-ctx-strat" class="select" onchange="setCfg('orchestrator.context_strategy', this.value); renderAll()">
+            <option value="auto_max" ${{o.context_strategy!=='fixed'?'selected':''}}>Auto Max Safe (${{autoCtx}} tok)</option>
+            <option value="fixed" ${{o.context_strategy==='fixed'?'selected':''}}>Fixed Context Limit</option>
+          </select>
+          <div class="hint">Hardware ceiling avoids Ollama 4096 clipping &amp; prevents 300s stream timeouts.</div>
+        </div>
+      </div>
+
+      <div class="grid-3" style="margin-bottom:12px;">
+        ${{isRemote ? `
+          <div class="field">
+            <label for="orch-env">API Key Environment Variable (Name Only)</label>
+            <input id="orch-env" class="input mono ${{ST.cfgErrors.orch_api_key_env?'invalid':''}}" placeholder="GEMINI_API_KEY" value="${{esc(o.api_key_env || '')}}" oninput="setCfg('orchestrator.api_key_env', this.value)" />
+            <div class="hint">Only env var names (e.g. <code>GEMINI_API_KEY</code>); never paste raw tokens.</div>
+            ${{errMsg('orch_api_key_env')}}
+          </div>
+          <div class="field">
+            <label for="orch-ep">Remote OpenAI-Compatible / Provider Endpoint</label>
+            <input id="orch-ep" class="input mono" value="${{esc(o.endpoint || '')}}" oninput="setCfg('orchestrator.endpoint', this.value)" />
+          </div>
+        ` : `
+          <div class="field">
+            <label>Active Local Workers</label>
+            <div class="hint" style="padding-top:6px;">
+              Fast: <code>${{esc(snapOrch.active?.local_workers?.fast || 'qwen3.5:9b-q3_k_xl')}}</code><br/>
+              Deep: <code>${{esc(snapOrch.active?.local_workers?.deep || 'qwen3.8:27b-iq2_xxs')}}</code>
+            </div>
+          </div>
+          <div class="field">
+            <label>Metal / Unified / VRAM KV Budget</label>
+            <div class="hint" style="padding-top:6px;">
+              Safe budget: <strong>${{cp.metal_workset_gb ?? '?'}} GB</strong> · Weights: <strong>${{cp.weights_gb ?? '?'}} GB</strong> · KV: <strong>${{cp.kv_budget_gb ?? '?'}} GB</strong>
+            </div>
+          </div>
+        `}}
+        <div class="field">
+          <label for="orch-timeout">Fixed <code>num_ctx</code> / Timeout Override (sec, 0=Auto)</label>
+          <div style="display:flex;gap:8px;">
+            <input id="orch-fixed-ctx" type="number" class="input mono ${{ST.cfgErrors.orch_fixed_num_ctx?'invalid':''}}" ${{o.context_strategy==='fixed'?'':'disabled'}} value="${{o.fixed_num_ctx || autoCtx}}" oninput="setCfg('orchestrator.fixed_num_ctx', Number(this.value))" />
+            <input id="orch-timeout" type="number" class="input mono ${{ST.cfgErrors.orch_timeout_sec?'invalid':''}}" value="${{o.timeout_sec ?? 0}}" oninput="setCfg('orchestrator.timeout_sec', Number(this.value))" title="Timeout seconds (0 = adaptive ${{effTimeout}}s)" />
+          </div>
+          <div class="hint">Effective: <code>num_ctx=${{effCtx}}</code> · <code>timeout=${{effTimeout}}s</code> · <code>pressure=${{ST.snap.hardware?.memory_pressure_level ?? 1}}</code></div>
+          ${{errMsg('orch_fixed_num_ctx')}}${{errMsg('orch_timeout_sec')}}
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:14px;">
+        <label><input type="checkbox" ${{o.local_first_delegation!==false?'checked':''}} onchange="setCfg('orchestrator.local_first_delegation', this.checked)" /> <strong>Local-First Delegation:</strong> Route repo scans, Serena lookups, RTK/TOON compaction, NER &amp; workers to local models</label>
+        <label><input type="checkbox" ${{o.strict_remote_privacy!==false?'checked':''}} onchange="setCfg('orchestrator.strict_remote_privacy', this.checked); renderAll()" /> <strong>Zero-Leakage Remote Guard:</strong> Enforce <code>fail_closed</code> across MCP Vault, Sync Rules &amp; Pre-Send Intercept</label>
+      </div>
+
+      <div style="overflow-x:auto;">
+        <table class="tbl">
+          <thead>
+            <tr><th>Harness</th><th>Binding</th><th>Effective <code>num_ctx</code></th><th>Timeout</th><th>Delegation</th><th>Privacy Guard</th><th>Targets</th></tr>
+          </thead>
+          <tbody>
+            ${{matrix.map((row) => `
+              <tr>
+                <td><strong>${{esc(row.harness)}}</strong></td>
+                <td class="mono" style="font-size:12px;">${{esc(row.orchestrator_binding)}} · ${{esc(row.orchestrator_model)}}</td>
+                <td class="mono">${{row.num_ctx}}</td>
+                <td class="mono">${{row.timeout_sec}}s</td>
+                <td><span class="pill info">${{esc(row.delegation)}}</span></td>
+                <td><span class="pill ${{isRemote ? 'warn' : 'ok'}}">${{esc(row.privacy_guard)}}</span></td>
+                <td class="hint mono" style="font-size:11px;">${{esc(row.target_files)}}</td>
+              </tr>`).join('')}}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}}
+
 function renderModels() {{
   const hw = ST.snap.hardware || {{}};
   const cfg = ST.draftCfg;
@@ -683,6 +845,7 @@ function renderModels() {{
         ${{ST.pendingModels.length ? `<span class="pill warn">${{ST.pendingModels.length}} model(s) pending in plan</span>` : ''}}
       </div>
     </div>
+    ${{renderOrchestrationCard()}}
   `;
 }}
 
@@ -959,7 +1122,8 @@ function renderSettings() {{
             <input id="s-cbud" type="number" class="input mono" ${{budgetOn?'':'disabled'}} value="${{rt.cloud_budget_tokens || 1000000}}" oninput="setCfg('routing.cloud_budget_tokens', Number(this.value))" />
           </div>
         </div>
-      </div>`;
+      </div>
+      ${{renderOrchestrationCard()}}`;
   }} else if (tab === 'privacy') {{
     const pv = c.privacy || {{}};
     const cp = c.compression || {{}};
@@ -1133,6 +1297,17 @@ function validateCfg() {{
   if (sh < 0.05 || sh > 0.30) e.max_context_share = 'Must be between 0.05 (5%) and 0.30 (30%).';
   const sv = c.compression?.min_toon_saving_pct ?? 10;
   if (sv < 0 || sv > 80) e.min_toon_saving_pct = 'Must be between 0% and 80%.';
+  const o = c.orchestrator || {{}};
+  const ake = String(o.api_key_env || '').trim();
+  if (ake && (/^(?:sk-|AIza|gh[pous]_|AKIA|pplx-|xox)/i.test(ake) || ake.length > 64 || !/^[A-Za-z0-9_]+$/.test(ake))) {{
+    e.orch_api_key_env = 'Must be an env var name (e.g. GEMINI_API_KEY), never a raw secret.';
+  }}
+  if (o.fixed_num_ctx !== undefined && ((o.fixed_num_ctx || 0) < 4096 || (o.fixed_num_ctx || 0) > 1000000)) {{
+    e.orch_fixed_num_ctx = 'Must be between 4,096 and 1,000,000.';
+  }}
+  if (o.timeout_sec !== undefined && ((o.timeout_sec || 0) < 0 || (o.timeout_sec || 0) > 3600)) {{
+    e.orch_timeout_sec = 'Must be between 0 and 3600 seconds.';
+  }}
   ST.cfgErrors = e;
 }}
 

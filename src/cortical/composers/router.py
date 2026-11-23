@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from ..config import default_data_dir, load_cortical_config, save_cortical_config
-from ..hardware.context_window import DEFAULT_MODEL_CONTEXT_WINDOWS, compute_dynamic_num_ctx
+from ..config import default_data_dir, load_cortical_config, resolve_orchestrator_spec, save_cortical_config
+from ..hardware.context_window import DEFAULT_MODEL_CONTEXT_WINDOWS, compute_adaptive_timeout, compute_dynamic_num_ctx
 
 
 def _router_port(config: dict[str, Any]) -> int:
@@ -90,10 +90,26 @@ def ensure_litellm_installed(data_dir: Optional[Path] = None) -> dict[str, Any]:
     return {"ok": bool(bin_path), "bin": bin_path, "installed_now": True}
 
 
-def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None) -> str:
-    """Renders deterministic `litellm_config.yaml` content mapping Cortical roles & Ollama models."""
+def _ollama_model_yaml(model_name: str, ollama_model: str, ollama_base: str, num_ctx: int, timeout_sec: int) -> list[str]:
+    """Formats one LiteLLM `ollama_chat/` entry with thinking off, keep_alive, dynamic num_ctx & adaptive timeout."""
+    return [
+        f"  - model_name: {model_name}",
+        "    litellm_params:",
+        f"      model: ollama_chat/{ollama_model}",
+        f"      api_base: {ollama_base}",
+        f"      num_ctx: {num_ctx}",
+        "      keep_alive: 30m",
+        "      reasoning_effort: none",
+        f"      timeout: {timeout_sec}",
+    ]
+
+
+def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: Optional[dict[str, Any]] = None) -> str:
+    """Renders deterministic `litellm_config.yaml` mapping Cortical roles, dynamic num_ctx, timeouts & orchestrator."""
     cfg = config or load_cortical_config()
     ollama_base = str((((cfg.get("runners") or {}).get("ollama") or {}).get("base_url")) or "http://127.0.0.1:11434").rstrip("/")
+    hw_eff = hw or {"total_ram_gb": 16.0, "free_ram_gb": 10.0, "unified_memory": True, "vram_gb": 11.2, "memory_pressure_level": 1}
+    orch = resolve_orchestrator_spec(cfg, hw=hw_eff)
 
     by_role = cfg.get("models_by_role") or {}
     priv = cfg.get("privacy") or {}
@@ -105,30 +121,47 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None) -> str:
     ]
     models = [m for m in dict.fromkeys(candidates) if m]
 
+    def _ctx_and_timeout(mid: str) -> tuple[int, int]:
+        base_ctx = DEFAULT_MODEL_CONTEXT_WINDOWS.get(mid, 32768)
+        dyn_ctx = compute_dynamic_num_ctx(
+            base_ctx,
+            mid,
+            ram_available_gb=float(hw_eff.get("free_ram_gb") or 10.0),
+            vram_gb=float(hw_eff.get("vram_gb") or 11.2),
+            unified_memory=bool(hw_eff.get("unified_memory", True)),
+            total_ram_gb=float(hw_eff.get("total_ram_gb") or 16.0),
+            memory_pressure_level=int(hw_eff.get("memory_pressure_level") or 1),
+        )
+        return dyn_ctx, compute_adaptive_timeout(mid, num_ctx=dyn_ctx, is_remote=False)
+
     lines = ["model_list:"]
     for m in models:
-        base_ctx = DEFAULT_MODEL_CONTEXT_WINDOWS.get(m, 32768)
-        dyn_ctx = compute_dynamic_num_ctx(base_ctx, m)
-        lines.extend([
-            f"  - model_name: {m}",
-            "    litellm_params:",
-            f"      model: ollama_chat/{m}",
-            f"      api_base: {ollama_base}",
-            f"      num_ctx: {dyn_ctx}",
-        ])
-    # Machine-agnostic semantic aliases (`local-default`, `cortical-fast`, `cortical-deep`, `cortical-vision`)
+        dyn_ctx, t_sec = _ctx_and_timeout(m)
+        lines.extend(_ollama_model_yaml(m, m, ollama_base, dyn_ctx, t_sec))
+
     daily = str(by_role.get("daily_coder") or cfg.get("active_model") or (models[0] if models else "qwen3.5:9b-q3_k_xl"))
-    deep = str(by_role.get("deep_reasoner") or by_role.get("architect") or daily)
+    deep = str(by_role.get("deep_reasoner") or by_role.get("architect") or "qwen3.8:27b-iq2_xxs")
     vision = str(priv.get("vision_model") or "minicpm-ocr:latest")
     for alias, target_m in [("local-default", daily), ("cortical-fast", daily), ("cortical-deep", deep), ("cortical-vision", vision)]:
-        t_ctx = compute_dynamic_num_ctx(DEFAULT_MODEL_CONTEXT_WINDOWS.get(target_m, 32768), target_m)
+        t_ctx, t_sec = _ctx_and_timeout(target_m)
+        lines.extend(_ollama_model_yaml(alias, target_m, ollama_base, t_ctx, t_sec))
+
+    fallbacks: list[str] = []
+    if orch["is_remote"] and orch.get("api_key_env"):
+        r_model = orch["model"] if "/" in orch["model"] else f"{orch['litellm_prefix']}/{orch['model']}"
         lines.extend([
-            f"  - model_name: {alias}",
+            "  - model_name: cortical-orchestrator",
             "    litellm_params:",
-            f"      model: ollama_chat/{target_m}",
-            f"      api_base: {ollama_base}",
-            f"      num_ctx: {t_ctx}",
+            f"      model: {r_model}",
+            f"      api_key: os.environ/{orch['api_key_env']}",
+            f"      timeout: {orch['timeout_sec']}",
         ])
+        fallbacks.append('{"cortical-orchestrator": ["cortical-deep", "cortical-fast"]}')
+    else:
+        o_target = deep if orch["model"] in {"cortical-deep", "cortical-orchestrator", "local-default"} else orch["model"]
+        o_ctx, o_sec = _ctx_and_timeout(o_target)
+        lines.extend(_ollama_model_yaml("cortical-orchestrator", o_target, ollama_base, o_ctx, o_sec))
+
     if os.environ.get("OPENROUTER_API_KEY"):
         or_model = str(((cfg.get("router") or {}).get("openrouter_model")) or "openrouter/google/gemini-2.5-flash")
         lines.extend([
@@ -136,13 +169,19 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None) -> str:
             "    litellm_params:",
             f"      model: {or_model}",
             "      api_key: os.environ/OPENROUTER_API_KEY",
+        ])
+        fallbacks.append(f'{{"cloud-primary": ["{daily}"]}}')
+
+    if fallbacks:
+        lines.extend([
             "router_settings:",
-            f"  fallbacks: [{{\"cloud-primary\": [\"{daily}\"]}}]",
+            f"  fallbacks: [{', '.join(fallbacks)}]",
         ])
     lines.extend([
         "litellm_settings:",
         "  drop_params: true",
         "  num_retries: 2",
+        f"  request_timeout: {max(600, int(orch.get('timeout_sec') or 600))}",
         "general_settings:",
         "  dangerously_permit_weak_or_unset_master_key: true",
     ])

@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from typing import Any, Optional
 
-from .context_window import compute_dynamic_num_ctx
+from .context_window import compute_adaptive_timeout, compute_dynamic_num_ctx, compute_hardware_context_profile
 
 BUILTIN_MODEL_CATALOG: list[dict[str, Any]] = [
     {
@@ -81,11 +81,12 @@ BUILTIN_MODEL_CATALOG: list[dict[str, Any]] = [
         "runner": "ollama",
         "pull_ref": "ollama pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS",
         "memory_gb": 7.2,
-        "native_ctx": 32768,
+        "native_ctx": 131072,
+        "kv_tokens_per_gb": 24576,
         "quantization": "Unsloth Dynamic UD-IQ2_XXS",
         "is_variable_quant": True,
         "roles": ["deep_reasoner", "orchestrator"],
-        "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB.",
+        "notes": "Runs 27B deep reasoning cleanly on 16 GB unified RAM in 7.2 GB (up to 65K ctx in Metal).",
     },
     {
         "model_id": "qwen3.8:27b-q4_xxs",
@@ -174,12 +175,17 @@ def evaluate_model_fit(model: dict[str, Any], hw: dict[str, Any]) -> dict[str, A
         vram_gb=vram,
         unified_memory=unified,
         model_ram_gb=mem_req,
+        total_ram_gb=total_ram,
+        memory_pressure_level=int(hw.get("memory_pressure_level") or 1),
+        kv_tokens_per_gb=model.get("kv_tokens_per_gb"),
     )
+    timeout_sec = compute_adaptive_timeout(str(model.get("model_id") or ""), num_ctx=rec_ctx, is_remote=False)
     return {
         "model_id": model["model_id"],
         "fit": fit,
         "viable": fit != "too_large",
         "recommended_num_ctx": rec_ctx,
+        "adaptive_timeout_sec": timeout_sec,
         "reason": reason,
     }
 
@@ -239,6 +245,7 @@ def recommend_models_for_hardware(
                 "quantization": chosen["quantization"],
                 "memory_gb": chosen["memory_gb"],
                 "recommended_num_ctx": chosen["recommended_num_ctx"],
+                "adaptive_timeout_sec": chosen.get("adaptive_timeout_sec", 300),
                 "fit": chosen["fit"],
                 "installed": chosen["installed"],
                 "pull_ref": chosen["pull_ref"],
