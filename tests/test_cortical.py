@@ -388,7 +388,18 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
                 self.assertEqual(init_r["result"]["serverInfo"]["name"], "cortical-mcp")
 
                 list_r = srv.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-                self.assertEqual(len(list_r["result"]["tools"]), 5)
+                self.assertEqual(len(list_r["result"]["tools"]), 7)
+
+                h_save = srv.handle_request({
+                    "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                    "params": {"name": "cortical_handoff", "arguments": {"action": "save", "goal": "Test handoff", "summary": "Step 1 done", "next_step": "Run pi", "source_harness": "antigravity"}},
+                })
+                self.assertIn("Test handoff", h_save["result"]["content"][0]["text"])
+                h_load = srv.handle_request({
+                    "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                    "params": {"name": "cortical_handoff", "arguments": {"action": "load"}},
+                })
+                self.assertIn("Run pi", h_load["result"]["content"][0]["text"])
 
                 srv.handle_request({
                     "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -409,7 +420,7 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
 
     def test_analytics_and_cli_smoke(self) -> None:
         bench = run_comparative_benchmark()
-        self.assertEqual(bench["lean_mcp"]["tool_count"], 5)
+        self.assertEqual(bench["lean_mcp"]["tool_count"], 7)
         self.assertEqual(bench["compression_before_vs_after"]["format_used"], "toon")
         self.assertGreater(bench["compression_before_vs_after"]["saving_vs_compact_pct"], 50.0)
 
@@ -700,6 +711,155 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
             cfg_low["routing"] = {"mode": "cloud_first", "cloud_budget_tokens": 200000, "cloud_token_threshold": 50000}
             rs_cf = evaluate_routing_state(config=cfg_low, db_path=db_p, brain_dir=tpath / "none")
             self.assertEqual(rs_cf["effective_mode"], "cloud")
+
+    def test_15_pi_chrome_profile_sync_and_form_parser(self) -> None:
+        from cortical.config import DEFAULT_CONFIG
+        from cortical.harnesses.adapters import plan_sync
+        from cortical.harnesses.chrome import _PageParser, discover_chrome_profiles
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_home = Path(tmp) / "home"
+            (fake_home / ".pi" / "agent").mkdir(parents=True)
+            pi_paths = {
+                "pi": {
+                    "mcp": fake_home / ".pi" / "agent" / "mcp.json",
+                    "settings": fake_home / ".pi" / "agent" / "settings.json",
+                    "models": fake_home / ".pi" / "agent" / "models.json",
+                    "rules": fake_home / ".pi" / "agent" / "AGENTS.md",
+                }
+            }
+            plan = plan_sync(DEFAULT_CONFIG, {}, {}, harnesses=["pi"], repo_root=Path(__file__).resolve().parent.parent, user_paths=pi_paths)
+            mcp_changes = [c for c in plan if c.path.name == "mcp.json"]
+            self.assertEqual(len(mcp_changes), 1)
+            mcp_data = json.loads(mcp_changes[0].content)
+            self.assertIn("chrome", mcp_data["mcpServers"])
+            self.assertEqual(mcp_data["mcpServers"]["chrome"]["exposure"], "direct")
+            self.assertIn("--autoConnect", mcp_data["mcpServers"]["chrome"]["args"])
+
+            chrome_dir = Path(tmp) / "Chrome"
+            chrome_dir.mkdir()
+            (chrome_dir / "Local State").write_text(
+                json.dumps({"profile": {"info_cache": {"Default": {"user_name": "ccancellieri@gmail.com", "name": "Carlo"}}}}),
+                encoding="utf-8",
+            )
+            disc = discover_chrome_profiles(system_dir=chrome_dir)
+            self.assertEqual(disc["profiles"][0]["email"], "ccancellieri@gmail.com")
+
+        parser = _PageParser("https://jobs.example.org/apply")
+        parser.feed("<html><title>Geo Job</title><body><form><input name='email' required/></form><a href='/cv'>CV</a></body></html>")
+        self.assertEqual(parser.title, "Geo Job")
+        self.assertEqual(parser.forms[0]["name"], "email")
+        self.assertEqual(parser.links[0]["url"], "https://jobs.example.org/cv")
+
+    def test_16_collect_pi_local_runs_and_roi_cumulative(self) -> None:
+        from cortical.analytics.roi import collect_pi_local_runs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess_dir = Path(tmp) / "sessions"
+            sess_dir.mkdir()
+            (sess_dir / "s1.jsonl").write_text(
+                "\n".join([
+                    json.dumps({"timestamp": "2026-11-22T17:00:00Z", "message": {"role": "assistant", "provider": "router", "model": "qwen3.5:9b-q3_k_xl", "usage": {"input": 10000, "output": 500, "totalTokens": 10500}}}),
+                    json.dumps({"timestamp": "2026-11-22T17:01:00Z", "message": {"role": "assistant", "provider": "anthropic", "model": "claude-sonnet", "usage": {"input": 2000, "output": 200, "totalTokens": 2200}}}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            runs = collect_pi_local_runs(pi_sessions_dir=sess_dir)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["total_tokens"], 10500)
+            self.assertEqual(runs[0]["model"], "qwen3.5:9b-q3_k_xl")
+
+    def test_17_vault_task_tags_and_mcp_task_context(self) -> None:
+        from cortical.mcp_server import CorticalMCPServer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = CorticalMCPServer(vault_db=Path(tmp) / "vault.db")
+            srv._dispatch_tool("cortical_ingest_private", {
+                "path_or_text": "Contratto ESA geoid-dynastore con budget cloud 100 EUR",
+                "alias": "esa_note",
+                "profile": "medium",
+                "task_tags": ["ESA-Apply", "#unsloth"],
+            })
+            srv._dispatch_tool("cortical_ingest_private", {
+                "path_or_text": "Codice fiscale RSSMRA80A01H501U privato",
+                "alias": "secret_id",
+                "profile": "max_security",
+                "task_tags": ["esa-apply"],
+            })
+            ctx = srv._dispatch_tool("cortical_vault_read", {"task_tag": "esa-apply", "tier": "light"})
+            self.assertEqual(ctx["count"], 1)
+            self.assertEqual(ctx["documents"][0]["alias"], "esa_note")
+            self.assertIn("secret_id", ctx["blocked_max_security_aliases"])
+
+    def test_18_composed_tools_test_helper(self) -> None:
+        from cortical.composers.tools import test_composed_tool
+
+        bad = test_composed_tool("unknown_nonexistent_tool")
+        self.assertFalse(bad["ok"])
+        rtk_res = test_composed_tool("rtk")
+        self.assertIn("installed", rtk_res)
+        if rtk_res["installed"]:
+            self.assertTrue(rtk_res["ok"])
+
+    def test_19_vault_auto_tagging_default_tags(self) -> None:
+        from cortical.privacy.vault import PrivacyVault
+
+        with tempfile.TemporaryDirectory() as tmp:
+            v = PrivacyVault(Path(tmp) / "vault.db")
+            p = Path(tmp) / "contratto_consulenza.md"
+            p.write_text("Accordo quadro per servizi cloud con Mario Rossi.", encoding="utf-8")
+            ing = v.ingest(p, alias="acc_quadro", profile="medium")
+            self.assertIn("contract", ing["task_tags"])
+            self.assertIn("notes", ing["task_tags"])
+            ctx = v.read_task_context("contract", tier="light")
+            self.assertEqual(ctx["count"], 1)
+            self.assertEqual(ctx["documents"][0]["alias"], "acc_quadro")
+
+    def test_20_workspace_autodiscovery_and_cortical_init(self) -> None:
+        from cortical.workspace import (
+            discover_workspace_root,
+            init_workspace,
+            read_workspace_config,
+            resolve_default_db,
+            resolve_default_export_dir,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "demo_repo"
+            nested = proj / "src" / "pkg"
+            nested.mkdir(parents=True)
+            (proj / ".git").mkdir()
+
+            self.assertEqual(discover_workspace_root(nested), proj.resolve())
+            res = init_workspace(proj, update_gitignore=True, sync_ignores=True)
+            self.assertTrue(res["ok"])
+            self.assertTrue((proj / ".cortical" / "wiki.db").is_file())
+            self.assertTrue((proj / ".cortical" / "config.json").is_file())
+            self.assertTrue((proj / ".cortical" / "exports").is_dir())
+            self.assertTrue((proj / ".cortical" / "logs").is_dir())
+            self.assertIn(".cortical/", (proj / ".gitignore").read_text(encoding="utf-8"))
+            self.assertTrue((proj / ".corticalignore").is_file())
+            for ig in (".claudeignore", ".cursorignore", ".geminiignore"):
+                txt = (proj / ig).read_text(encoding="utf-8")
+                self.assertIn("# CORTICAL:START", txt)
+                self.assertIn(".cortical/", txt)
+
+            # Idempotent second run does not duplicate .gitignore entry
+            res2 = init_workspace(proj, update_gitignore=True, sync_ignores=True)
+            self.assertFalse(res2["gitignore_updated"])
+            self.assertEqual((proj / ".gitignore").read_text(encoding="utf-8").count(".cortical/"), 1)
+
+            # Auto-discovery from nested subdir resolves <root>/.cortical/wiki.db and exports/
+            old_env = os.environ.pop("CORTICAL_VAULT_DB", None)
+            try:
+                self.assertEqual(resolve_default_db(None, start_dir=nested), (proj / ".cortical" / "wiki.db").resolve())
+                self.assertEqual(resolve_default_export_dir(None, start_dir=nested), (proj / ".cortical" / "exports").resolve())
+            finally:
+                if old_env is not None:
+                    os.environ["CORTICAL_VAULT_DB"] = old_env
+
+            cfg = read_workspace_config(proj / ".cortical")
+            self.assertEqual(cfg["db_path"], ".cortical/wiki.db")
 
 
 if __name__ == "__main__":

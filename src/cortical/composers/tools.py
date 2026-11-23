@@ -24,7 +24,7 @@ COMPOSED_TOOLS: dict[str, dict[str, Any]] = {
         "role": "Sub-10 ms shell & test output compression (-60%..-90% terminal bloat)",
         "binary": "rtk",
         "install_cmd": {
-            "macos": "brew install rtk-ai/tap/rtk",
+            "macos": "brew install rtk",
             "linux": "cargo install rtk",
             "windows": "cargo install rtk",
         },
@@ -154,3 +154,100 @@ def serve_mcp_http(
         return {"ok": True, "dry_run": True, "tool": tool, "url": url, "command": cmd}
     proc = subprocess.run(cmd, check=False)
     return {"ok": proc.returncode == 0, "dry_run": False, "tool": tool, "url": url, "returncode": proc.returncode}
+
+
+def _norm_os_name(os_name: Optional[str] = None) -> str:
+    target_os = (os_name or sys.platform).lower()
+    if "darwin" in target_os or "mac" in target_os:
+        return "macos"
+    if "win" in target_os:
+        return "windows"
+    return "linux"
+
+
+def test_composed_tool(name: str, os_name: Optional[str] = None) -> dict[str, Any]:
+    """Tests whether a composed OSS tool/service is installed and responds cleanly."""
+    key = "http_router" if name in {"router", "litellm"} else name
+    if key not in COMPOSED_TOOLS:
+        return {"ok": False, "name": name, "installed": False, "error": f"Unknown tool: {name}"}
+
+    if key == "http_router":
+        from .router import resolve_router_bin, router_status
+
+        st = router_status()
+        rbin = st.get("bin") or resolve_router_bin() or ""
+        return {
+            "ok": bool(rbin),
+            "name": key,
+            "installed": bool(rbin),
+            "healthy": bool(st.get("healthy")),
+            "url": st.get("url"),
+            "path": rbin,
+            "output": f"litellm={rbin or 'missing'} healthy={st.get('healthy')}",
+            "error": "" if rbin else "LiteLLM router not installed",
+        }
+
+    spec = COMPOSED_TOOLS[key]
+    bname = spec["binary"]
+    found = shutil.which(bname) or ""
+    if not found:
+        norm = _norm_os_name(os_name)
+        return {
+            "ok": False,
+            "name": key,
+            "installed": False,
+            "path": "",
+            "install_cmd": spec["install_cmd"][norm],
+            "output": "",
+            "error": f"Binary '{bname}' not found on PATH",
+        }
+
+    check_args = [found, "--version"] if key in {"rtk", "pinchtab", "playwright_mcp", "context_mode"} else [found, "--help"]
+    try:
+        res = subprocess.run(check_args, capture_output=True, text=True, timeout=8, check=False)
+        out = (res.stdout or res.stderr or "").strip().splitlines()
+        summary = " | ".join(out[:2])[:220]
+        return {
+            "ok": res.returncode == 0,
+            "name": key,
+            "installed": True,
+            "path": found,
+            "output": summary or "ready",
+            "error": "" if res.returncode == 0 else f"exit={res.returncode}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "name": key, "installed": True, "path": found, "output": "", "error": str(exc)}
+
+
+def install_composed_tool(name: str, os_name: Optional[str] = None) -> dict[str, Any]:
+    """Installs a composed OSS tool/service using the host OS package manager."""
+    key = "http_router" if name in {"router", "litellm"} else name
+    if key not in COMPOSED_TOOLS:
+        return {"ok": False, "name": name, "installed": False, "error": f"Unknown tool: {name}"}
+
+    if key == "http_router":
+        from .router import ensure_litellm_installed
+
+        res = ensure_litellm_installed()
+        st = test_composed_tool(key, os_name=os_name)
+        return {**st, "ok": bool(res.get("ok")), "output": str(res.get("bin") or st.get("output") or ""), "error": str(res.get("error") or "")}
+
+    norm = _norm_os_name(os_name)
+    cmd = COMPOSED_TOOLS[key]["install_cmd"][norm]
+    if key == "rtk":
+        cmd = f"{cmd} && (rtk telemetry disable || true) && (rtk init -g --auto-patch || true) && (rtk init -g --agent pi --auto-patch || true)"
+    try:
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=180, check=False)  # noqa: S602
+        st = test_composed_tool(key, os_name=os_name)
+        tail = "\n".join(((proc.stdout or "") + "\n" + (proc.stderr or "")).strip().splitlines()[-8:])
+        return {
+            "ok": proc.returncode == 0 and bool(st.get("installed")),
+            "name": key,
+            "command": cmd,
+            "installed": bool(st.get("installed")),
+            "path": st.get("path", ""),
+            "output": st.get("output") or tail[:300],
+            "error": "" if proc.returncode == 0 else (tail[-300:] or f"exit={proc.returncode}"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "name": key, "command": cmd, "installed": False, "error": str(exc)}

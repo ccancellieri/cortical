@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 from ..compression.engine import compress_structured, fit_to_token_budget
 from .brain import LocalBrain
 from .sanitizer import FailClosedError, classify_and_sanitize
+from ._auto_tagger import get_default_tags_for_path
 
 VERIFIED_PRESEND_HARNESSES: frozenset[str] = frozenset({
     "pi",
@@ -52,10 +53,26 @@ class PrivacyVault:
                        entity_count INTEGER NOT NULL DEFAULT 0,
                        tokens_est INTEGER NOT NULL DEFAULT 0,
                        sha256_hash TEXT NOT NULL,
-                       updated_at REAL NOT NULL
+                       updated_at REAL NOT NULL,
+                       task_tags_json TEXT NOT NULL DEFAULT '[]',
+                       auto_detected_tags_json TEXT NOT NULL DEFAULT '[]'
                    )"""
             )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(vault_items)").fetchall()}
+            if "task_tags_json" not in cols:
+                conn.execute("ALTER TABLE vault_items ADD COLUMN task_tags_json TEXT NOT NULL DEFAULT '[]'")
+            if "auto_detected_tags_json" not in cols:
+                conn.execute("ALTER TABLE vault_items ADD COLUMN auto_detected_tags_json TEXT NOT NULL DEFAULT '[]'")
         self.brain = LocalBrain(self._connect)
+
+    @staticmethod
+    def _normalize_tags(raw: Any) -> list[str]:
+        """Normalizes raw tags input to deduplicated lowercase list."""
+        if isinstance(raw, str):
+            raw = [s.strip() for s in raw.split(",")]
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return list(dict.fromkeys(str(t).strip().lower().lstrip("#") for t in raw if str(t).strip()))
 
     def _write_brain_json(self) -> Path:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +157,7 @@ class PrivacyVault:
                             profile=str(meta.get("profile") or "medium"),
                             custom_terms=list(terms) if isinstance(terms, list) else None,
                             use_local_ner=bool(meta.get("use_local_ner", False)),
+                            task_tags=self._normalize_tags(meta.get("task_tags")) or None,
                         )
                         f.unlink(missing_ok=True)
                         meta_p.unlink(missing_ok=True)
@@ -189,8 +207,8 @@ class PrivacyVault:
                         conn.execute(
                             """INSERT OR REPLACE INTO vault_items(
                                    alias, source_name, resolved_policy, profile, local_only,
-                                   format_used, sanitized_content, entity_count, tokens_est, sha256_hash, updated_at
-                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                   format_used, sanitized_content, entity_count, tokens_est, sha256_hash, updated_at, task_tags_json
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 eff_alias,
                                 str(data.get("source_name") or f"{eff_alias}.json"),
@@ -203,6 +221,7 @@ class PrivacyVault:
                                 int(data.get("tokens_est") or max(1, len(content) // 4)),
                                 digest,
                                 disk_ts,
+                                json.dumps(self._normalize_tags(data.get("task_tags"))),
                             ),
                         )
                         imported_for_brain.append((eff_alias, content, prof == "max_context"))
@@ -239,6 +258,7 @@ class PrivacyVault:
         config: Optional[dict[str, Any]] = None,
         vision_model: Optional[str] = None,
         keep_terms: Optional[list[str]] = None,
+        task_tags: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Sanitizes, compresses, and stores content locally under `cortical://private/<alias>`."""
         res = classify_and_sanitize(
@@ -253,6 +273,11 @@ class PrivacyVault:
             vision_model=vision_model,
             keep_terms=keep_terms,
         )
+        # Auto-detect document tags when no explicit non-empty task_tags provided
+        explicit_tags = self._normalize_tags(task_tags)
+        auto_tags = self._normalize_tags(get_default_tags_for_path(path_or_text, content_hint=res["sanitized_text"]))
+        norm_tags = explicit_tags or auto_tags
+
         comp = compress_structured(res["sanitized_text"])
         is_path = isinstance(path_or_text, Path) or (
             isinstance(path_or_text, str) and "\n" not in path_or_text and len(path_or_text) < 260 and Path(path_or_text).exists()
@@ -266,8 +291,9 @@ class PrivacyVault:
             conn.execute(
                 """INSERT OR REPLACE INTO vault_items(
                        alias, source_name, resolved_policy, profile, local_only,
-                       format_used, sanitized_content, entity_count, tokens_est, sha256_hash, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       format_used, sanitized_content, entity_count, tokens_est, sha256_hash, updated_at,
+                       task_tags_json, auto_detected_tags_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     eff_alias,
                     src_name,
@@ -280,6 +306,8 @@ class PrivacyVault:
                     int(comp["compressed_tokens_est"]),
                     digest,
                     now,
+                    json.dumps(norm_tags),
+                    json.dumps(auto_tags),
                 ),
             )
         self._write_item_json({
@@ -294,6 +322,8 @@ class PrivacyVault:
             "tokens_est": comp["compressed_tokens_est"],
             "sha256_hash": digest,
             "updated_at": now,
+            "task_tags": norm_tags,
+            "auto_detected_tags": auto_tags,
         })
         brain_cfg = (config or {}).get("brain") or {}
         if brain_cfg.get("auto_distill", True):
@@ -320,6 +350,7 @@ class PrivacyVault:
             "format_used": comp["format_used"],
             "tokens_est": comp["compressed_tokens_est"],
             "saving_pct": comp["saving_pct"],
+            "task_tags": norm_tags,
             "sanitized_preview": comp["compressed"][:320],
         }
 
@@ -338,6 +369,7 @@ class PrivacyVault:
         config: Optional[dict[str, Any]] = None,
         vision_model: Optional[str] = None,
         keep_terms: Optional[list[str]] = None,
+        task_tags: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Sanitizes, compresses, and stores uploaded file bytes while stripping metadata via extension handlers."""
         safe_name = Path(filename or "upload.txt").name or "upload.txt"
@@ -359,14 +391,21 @@ class PrivacyVault:
                 keep_terms=keep_terms,
             )
 
-    def list_items(self, include_local_only: bool = True) -> list[dict[str, Any]]:
-        """Lists all local Vault entries with management metadata (including `max_security` items by default)."""
+    def list_items(self, include_local_only: bool = True, task_tag: Optional[str] = None) -> list[dict[str, Any]]:
+        """Lists all local Vault entries with management metadata (optionally filtered by `task_tag`)."""
         self.sync_from_disk()
+        needle = str(task_tag or "").strip().lower().lstrip("#")
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM vault_items ORDER BY updated_at DESC").fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:
             if r["local_only"] and not include_local_only:
+                continue
+            try:
+                tags = self._normalize_tags(json.loads(r["task_tags_json"] or "[]"))
+            except Exception:  # noqa: BLE001
+                tags = []
+            if needle and needle not in tags:
                 continue
             out.append({
                 "alias": r["alias"],
@@ -380,6 +419,7 @@ class PrivacyVault:
                 "tokens_est": int(r["tokens_est"]),
                 "sha256_hash": r["sha256_hash"],
                 "updated_at": float(r["updated_at"]),
+                "task_tags": tags,
                 "preview": str(r["sanitized_content"] or "")[:280],
             })
         return out
@@ -412,6 +452,7 @@ class PrivacyVault:
         config: Optional[dict[str, Any]] = None,
         vision_model: Optional[str] = None,
         keep_terms: Optional[list[str]] = None,
+        task_tags: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """Refines privacy policy/profile or masks additional custom terms on an existing Vault item."""
         raw = str(alias_or_uri or "").replace("cortical://private/", "").lstrip("@").strip()
@@ -536,6 +577,25 @@ class PrivacyVault:
             "format_used": row["format_used"],
             "tokens_est": int(row["tokens_est"]) if tier_text is None else max(1, len(text_out) // 4),
             "text": text_out,
+        }
+
+    def read_task_context(self, task_tag: str, *, allow_local_only: bool = False, tier: str = "medium") -> dict[str, Any]:
+        """Reads sanitized context across all Vault documents tagged with `task_tag`."""
+        needle = str(task_tag or "").strip().lower().lstrip("#")
+        matches = self.list_items(include_local_only=True, task_tag=needle)
+        docs: list[dict[str, Any]] = []
+        blocked_local: list[str] = []
+        for m in matches:
+            if m["local_only"] and not allow_local_only:
+                blocked_local.append(m["alias"])
+                continue
+            docs.append(self.read_resource(m["alias"], allow_local_only=allow_local_only, tier=tier))
+        return {
+            "task_tag": needle,
+            "tier": tier,
+            "count": len(docs),
+            "documents": docs,
+            "blocked_max_security_aliases": blocked_local,
         }
 
     def export_sanitized_memory_markdown(self, num_ctx: int = 16384, max_share: float = 0.15) -> str:

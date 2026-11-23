@@ -40,3 +40,11 @@ wiki_maintenance_patch.json
 .agents/skills/systematic-debugging/
 .agents/skills/test-driven-development/
 .agents/skills/troubleshooting/
+.serena/
+.agents/skills/career-agent-team/
+.agents/skills/career-job-applicant/
+.agents/skills/chrome-autonomous-session/
+.agents/skills/codex-first/
+.agents/skills/fastapi-optimization-skill/
+.agents/skills/international-technical-roles/
+.agents/skills/publish-to-my-wordpress/

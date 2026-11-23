@@ -35,22 +35,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "router": "qwen2.5:1.5b",
         "ner": "qwen2.5:1.5b",
         "daily_coder": "qwen3.5:9b-q3_k_xl",
-        "deep_reasoner": "qwen3.8:27b-q4_xxs",
-        "orchestrator": "qwen3.8:27b-q4_xxs",
+        "deep_reasoner": "qwen3.8:27b-iq2_xxs",
+        "orchestrator": "qwen3.8:27b-iq2_xxs",
     },
     "runners": {
         "ollama": {
             "type": "ollama",
             "base_url": "http://127.0.0.1:11434",
             "default_model": "qwen3.5:9b-q3_k_xl",
-            "heavy_model": "qwen3.8:27b-q4_xxs",
+            "heavy_model": "qwen3.8:27b-iq2_xxs",
             "enabled": True,
         },
         "unsloth": {
             "type": "openai_compatible",
             "base_url": "http://127.0.0.1:8888/v1",
             "default_model": "qwen3.5:9b-q3_k_xl",
-            "heavy_model": "qwen3.8:27b-q4_xxs",
+            "heavy_model": "qwen3.8:27b-iq2_xxs",
             "enabled": False,
         },
         "llama_cpp": {
@@ -107,8 +107,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "routing": {
         "mode": "auto",  # "auto" (mixed), "full_local", "cloud_first"
+        "enforce_cloud_budget": False,
+        "prefer_local_offload": True,
         "cloud_token_threshold": 50000,
-        "cloud_budget_tokens": 200000,
+        "cloud_budget_tokens": 1000000,
         "fallback_on_rate_limit": True,
     },
     "brain": {

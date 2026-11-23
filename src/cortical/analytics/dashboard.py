@@ -287,9 +287,12 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     const IS_WIN = /win/i.test(navigator.platform || '') && !/darwin|mac/i.test(navigator.platform || '');
     const IMG_RX = /\.(png|jpe?g|webp|gif|bmp)$/i;
     let ITEMS = [];
+    let TOOL_RESULTS = {};
+    const IS_SERVED = location.protocol.startsWith('http');
     let SELECTED_FILE = null;
+    let SELECTED_FILES = [];
     let SEL_PROFILE = 'max_security';
-    let DRAFT = { alias: '', policy: 'auto', terms: '' };
+    let DRAFT = { alias: '', policy: 'auto', terms: '', taskTags: '' };
     let LAST_SIG = '';
     let INSPECT = null;
     let DIR_HANDLE = null;
@@ -753,9 +756,10 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
     }
     function jobMeta(alias, extra) {
       const pv = CFG.privacy || {};
+      const taskTags = (document.getElementById('v-task')?.value || DRAFT.taskTags || '').split(',').map((s) => s.trim()).filter(Boolean);
       return Object.assign({
         alias, policy: document.getElementById('v-policy')?.value || 'auto', profile: SEL_PROFILE,
-        custom_terms: [], keep_terms: [], use_local_ner: useModel(),
+        custom_terms: [], keep_terms: [], task_tags: taskTags, use_local_ner: useModel(),
         ner_model: pv.ner_model || '', vision_model: pv.vision_model || '',
       }, extra || {});
     }
@@ -800,22 +804,19 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       return await new Promise((res) => c.toBlob(res, 'image/png'));
     }
 
-    async function processSelectedFile() {
-      if (!SELECTED_FILE) { setBanner('err', T('Seleziona prima un file.', 'Pick a file first.')); return; }
-      const file = SELECTED_FILE;
-      const alias = aliasFrom(file.name);
-      const customTerms = (document.getElementById('v-terms')?.value || '').split(',').map((s) => s.trim()).filter(Boolean);
+    async function _ingestOneFile(file, forcedAlias) {
+      const alias = forcedAlias || aliasFrom(file.name);
+      const customTerms = (document.getElementById('v-terms')?.value || DRAFT.terms || '').split(',').map((s) => s.trim()).filter(Boolean);
+      const taskTags = (document.getElementById('v-task')?.value || DRAFT.taskTags || '').split(',').map((s) => s.trim()).filter(Boolean);
       const pv = CFG.privacy || {};
 
       if (IMG_RX.test(file.name)) {
-        if (!linkedOk()) { setBanner('err', T('Per le immagini serve il modello locale: collega prima la cartella Cortical (scheda Setup guidato).', 'Images need the local model: link the Cortical folder first (Guided Setup tab).')); return; }
-        if (!pv.vision_model) { setBanner('err', T('Scegli un modello con visione (es. qwen2.5vl:3b) nella sezione Modelli locali.', 'Pick a vision model (e.g. qwen2.5vl:3b) in Local models.')); return; }
-        const blob = await redactedPngBlob();
-        await submitJob(alias + '.png', blob, jobMeta(alias, { custom_terms: customTerms, source_name: file.name, use_local_ner: true }));
-        await idbOrig('put', alias, { alias, kind: 'image', text: '', marks: customTerms, keep: [], rects: IMGST ? IMGST.rects.length : 0 });
-        SELECTED_FILE = null; IMGST = null; DRAFT.alias = ''; DRAFT.terms = '';
-        setBanner('info', T('Immagine in coda: i riquadri neri sono già applicati; il modello locale legge il testo residuo.', 'Image queued: black boxes are applied; the local model reads remaining text.'));
-        return;
+        if (!linkedOk()) { throw new Error(T('Per le immagini serve il modello locale: collega prima la cartella Cortical (scheda Setup guidato).', 'Images need the local model: link the Cortical folder first (Guided Setup tab).')); }
+        if (!pv.vision_model) { throw new Error(T('Scegli un modello con visione (es. minicpm-ocr:latest o qwen2.5vl:3b) nella sezione Modelli locali.', 'Pick a vision model (e.g. minicpm-ocr:latest or qwen2.5vl:3b) in Local models.')); }
+        const blob = (IMGST && IMGST.file === file) ? await redactedPngBlob() : file;
+        await submitJob(alias + '.png', blob, jobMeta(alias, { custom_terms: customTerms, task_tags: taskTags, source_name: file.webkitRelativePath || file.name, use_local_ner: true }));
+        await idbOrig('put', alias, { alias, kind: 'image', text: '', marks: customTerms, keep: [], task_tags: taskTags, rects: IMGST ? IMGST.rects.length : 0 });
+        return { queued: true, alias };
       }
 
       const buf = await file.arrayBuffer();
@@ -827,29 +828,47 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       else if (nameLower.endsWith('.pdf')) { const r = await extractPdfTextJS(u8); extracted = r.text; strippedMeta = r.stripped; needsPy = !r.readable; }
       else extracted = new TextDecoder('utf-8', { fatal: false }).decode(u8);
 
-      await idbOrig('put', alias, { alias, kind: 'text', text: extracted, marks: customTerms, keep: [] });
+      await idbOrig('put', alias, { alias, kind: 'text', text: extracted, marks: customTerms, keep: [], task_tags: taskTags });
 
       if (linkedOk() && (useModel() || needsPy)) {
-        await submitJob(file.name, u8, jobMeta(alias, { custom_terms: customTerms, source_name: file.name }));
-        SELECTED_FILE = null; DRAFT.alias = ''; DRAFT.terms = '';
-        setBanner('info', T('In coda per l\'anonimizzazione con il modello locale (' + (pv.ner_model || 'default') + ').', 'Queued for anonymization with the local model (' + (pv.ner_model || 'default') + ').'));
-        return;
+        await submitJob(file.name, u8, jobMeta(alias, { custom_terms: customTerms, task_tags: taskTags, source_name: file.webkitRelativePath || file.name }));
+        return { queued: true, alias };
       }
-      if (needsPy) { setBanner('err', T('Questo PDF richiede il modello/estrattore locale: collega la cartella Cortical.', 'This PDF needs the local model/extractor: link the Cortical folder.')); return; }
+      if (needsPy) { throw new Error(T('Questo PDF richiede il modello/estrattore locale: collega la cartella Cortical.', 'This PDF needs the local model/extractor: link the Cortical folder.')); }
 
       const san = sanitizeTextClient(extracted, SEL_PROFILE, customTerms, []);
       const resolvedPolicy = reqPolicy === 'auto' ? ((san.sensitiveDetected || strippedMeta.length > 0 || SEL_PROFILE === 'max_security') ? 'fail_closed' : 'fail_open') : reqPolicy;
       const record = {
-        alias, uri: 'cortical://private/' + alias, source_name: file.name, resolved_policy: resolvedPolicy, profile: SEL_PROFILE,
-        local_only: SEL_PROFILE === 'max_security', format_used: 'text', sanitized_content: san.text,
+        alias, uri: 'cortical://private/' + alias, source_name: file.webkitRelativePath || file.name, resolved_policy: resolvedPolicy, profile: SEL_PROFILE,
+        task_tags: taskTags, local_only: SEL_PROFILE === 'max_security', format_used: 'text', sanitized_content: san.text,
         entity_count: san.entityCount + strippedMeta.length, tokens_est: Math.max(1, Math.round(san.text.length / 4)),
         sha256_hash: 'ui_' + Math.random().toString(16).slice(2, 14), updated_at: Date.now() / 1000, ner_used: false,
       };
       await idbPutItem(record);
       const synced = linkedOk() ? await writeJsonToFolder('vault', alias + '.json', record) : false;
-      SELECTED_FILE = null; INSPECT = record; ORIG = await idbOrig('get', alias);
-      await syncFolderAndDb();
-      setBanner('ok', T('Anteprima rapida (solo regole, nessun modello): @private:', 'Quick preview (rules only, no model): @private:') + alias + (synced ? '' : T(' — salvata solo nel browser', ' — browser only')));
+      INSPECT = record; ORIG = await idbOrig('get', alias);
+      return { queued: false, alias, synced };
+    }
+
+    async function processSelectedFile() {
+      const queue = SELECTED_FILES.length > 0 ? SELECTED_FILES.slice() : (SELECTED_FILE ? [SELECTED_FILE] : []);
+      if (queue.length === 0) { setBanner('err', T('Seleziona prima uno o più file o una directory.', 'Pick one or more files or a directory first.')); return; }
+      const allowedRx = /\.(pdf|docx|xlsx|pptx|txt|md|json|csv|log|py|ts|tsx|js|jsx|yaml|yml|toml|html|css|png|jpg|jpeg|webp)$/i;
+      const filtered = queue.filter((f) => !f.name.startsWith('.') && (queue.length === 1 || allowedRx.test(f.name)));
+      let okCount = 0; let queuedCount = 0;
+      try {
+        for (const f of filtered) {
+          const basePrefix = queue.length > 1 ? ((DRAFT.alias ? DRAFT.alias + '_' : '') + (f.webkitRelativePath || f.name).replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '')) : '';
+          const res = await _ingestOneFile(f, basePrefix || undefined);
+          okCount += 1;
+          if (res.queued) queuedCount += 1;
+        }
+        SELECTED_FILE = null; SELECTED_FILES = []; IMGST = null; DRAFT.alias = ''; DRAFT.terms = '';
+        await syncFolderAndDb();
+        setBanner(queuedCount > 0 ? 'info' : 'ok', T(`Elaborati ${okCount} file (${queuedCount} inviati al modello locale / queue).`, `Processed ${okCount} file(s) (${queuedCount} queued for local model).`));
+      } catch (err) {
+        setBanner('err', String(err?.message || err));
+      }
     }
 
     async function openInspect(alias) {
@@ -941,9 +960,18 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
 
     async function pickFileObj(f) {
       if (!f) return;
-      SELECTED_FILE = f; IMGST = null;
-      DRAFT.alias = f.name.replace(/\.[^.]+$/, '');
-      if (IMG_RX.test(f.name)) { try { await loadImageEditor(f); return; } catch {} }
+      await pickFileList([f]);
+    }
+    async function pickFileList(files) {
+      const list = Array.from(files || []).filter(Boolean);
+      if (list.length === 0) return;
+      SELECTED_FILES = list;
+      SELECTED_FILE = list[0];
+      IMGST = null;
+      if (list.length === 1) {
+        DRAFT.alias = list[0].name.replace(/\.[^.]+$/, '');
+        if (IMG_RX.test(list[0].name)) { try { await loadImageEditor(list[0]); return; } catch {} }
+      }
       render();
     }
 
@@ -1169,14 +1197,20 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
           <h2>${L.uploadTitle}</h2>
           <div class="dropzone" onclick="document.getElementById('v-file').click()"
                ondragover="event.preventDefault(); this.classList.add('drag');" ondragleave="this.classList.remove('drag');"
-               ondrop="event.preventDefault(); this.classList.remove('drag'); pickFileObj(event.dataTransfer.files[0]);">
-            <div>${SELECTED_FILE ? ('📄 ' + esc(SELECTED_FILE.name) + ' (' + Math.max(1, Math.round(SELECTED_FILE.size / 1024)) + ' KB)') : esc(L.dropHint)}</div>
-            <input type="file" id="v-file" style="display:none;" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.json,.csv,.log,.png,.jpg,.jpeg,.webp" onchange="pickFileObj(this.files[0])" />
+               ondrop="event.preventDefault(); this.classList.remove('drag'); pickFileList(event.dataTransfer.files);">
+            <div>${SELECTED_FILES.length > 1 ? ('📚 ' + SELECTED_FILES.length + ' file selezionati (' + esc(SELECTED_FILES[0].webkitRelativePath || SELECTED_FILES[0].name) + ' ...)') : SELECTED_FILE ? ('📄 ' + esc(SELECTED_FILE.name) + ' (' + Math.max(1, Math.round(SELECTED_FILE.size / 1024)) + ' KB)') : esc(L.dropHint)}</div>
+            <input type="file" id="v-file" multiple style="display:none;" accept=".pdf,.docx,.xlsx,.pptx,.txt,.md,.json,.csv,.log,.py,.ts,.yaml,.png,.jpg,.jpeg,.webp" onchange="pickFileList(this.files)" />
+            <input type="file" id="v-dir" webkitdirectory directory multiple style="display:none;" onchange="pickFileList(this.files)" />
+          </div>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn" onclick="document.getElementById('v-file').click()">📄 ${T('Scegli file (multipli)', 'Choose file(s)')}</button>
+            <button type="button" class="btn" onclick="document.getElementById('v-dir').click()">📁 ${T('Carica intera directory', 'Upload directory')}</button>
           </div>
           ${imgEd}
           <div class="prof-grid">${profCards}</div>
           <div class="grid">
             <label>${L.aliasLbl}<input id="v-alias" placeholder="alsa" value="${esc(DRAFT.alias)}" oninput="DRAFT.alias=this.value;" /></label>
+            <label>${T('Task Tags (contesto multi-task)', 'Task Tags (task context)')}<input id="v-task" placeholder="es. job-apply-esa, sprint-2" value="${esc(DRAFT.taskTags || '')}" oninput="DRAFT.taskTags=this.value;" /></label>
             <label>${L.policyLbl}<select id="v-policy" onchange="DRAFT.policy=this.value;"><option value="auto" ${DRAFT.policy==='auto'?'selected':''}>auto</option><option value="fail_closed" ${DRAFT.policy==='fail_closed'?'selected':''}>fail_closed</option><option value="fail_open" ${DRAFT.policy==='fail_open'?'selected':''}>fail_open</option></select></label>
             <label>${L.termsLbl}<input id="v-terms" placeholder="Mario Rossi, Azienda Srl..." value="${esc(DRAFT.terms)}" oninput="DRAFT.terms=this.value;" /></label>
           </div>
@@ -1220,20 +1254,34 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
             RAM: <b>${HW.total_ram_gb} GB</b> · VRAM: <b>${HW.vram_gb} GB</b> (${HW.unified_memory ? 'Unified' : 'Discrete'})
           </p>
           <div class="grid" style="margin-bottom:12px;">
+            <label>Target Machine OS
+              <select onchange="CFG.target_os=this.value; persistConfigToFolder(); render();">
+                <option value="auto" ${(!CFG.target_os || CFG.target_os==='auto')?'selected':''}>Auto (${esc(HW.os || 'detected')})</option>
+                <option value="macos" ${CFG.target_os==='macos'?'selected':''}>macOS (Metal / Unified RAM)</option>
+                <option value="linux" ${CFG.target_os==='linux'?'selected':''}>Linux (CUDA / Vulkan / CPU)</option>
+                <option value="windows" ${CFG.target_os==='windows'?'selected':''}>Windows (CUDA / DirectML)</option>
+              </select>
+            </label>
             <label>Active Runner
-              <select onchange="CFG.active_runner=this.value; render();">
-                ${Object.keys(CFG.runners || {ollama:{}}).map((r) => `<option value="${r}" ${CFG.active_runner===r?'selected':''}>${r}</option>`).join('')}
+              <select onchange="CFG.active_runner=this.value; persistConfigToFolder(); render();">
+                ${Object.keys(CFG.runners || {ollama:{}, unsloth:{}}).map((r) => `<option value="${r}" ${CFG.active_runner===r?'selected':''}>${r}</option>`).join('')}
               </select>
             </label>
             <label>Router/NER Model (1.5B-3B)
-              <input value="${esc((CFG.models_by_role||{}).router || 'qwen2.5:1.5b')}" oninput="CFG.models_by_role.router=this.value; CFG.models_by_role.ner=this.value;" />
+              <input value="${esc((CFG.models_by_role||{}).router || 'qwen2.5:1.5b')}" oninput="CFG.models_by_role=CFG.models_by_role||{}; CFG.models_by_role.router=this.value; CFG.models_by_role.ner=this.value;" />
             </label>
-            <label>Daily Coder Model
-              <input value="${esc((CFG.models_by_role||{}).daily_coder || 'qwen3.5:9b-q3_k_xl')}" oninput="CFG.models_by_role.daily_coder=this.value;" />
+            <label>Daily Coder (<code>cortical-fast</code>)
+              <input value="${esc((CFG.models_by_role||{}).daily_coder || 'qwen3.5:9b-q3_k_xl')}" oninput="CFG.models_by_role=CFG.models_by_role||{}; CFG.models_by_role.daily_coder=this.value;" />
             </label>
-            <label>Deep Reasoner (27B 4-bit XXS)
-              <input value="${esc((CFG.models_by_role||{}).deep_reasoner || 'qwen3.8:27b-q4_xxs')}" oninput="CFG.models_by_role.deep_reasoner=this.value; CFG.models_by_role.orchestrator=this.value;" />
+            <label>Deep Reasoner (<code>cortical-deep</code>)
+              <input value="${esc((CFG.models_by_role||{}).deep_reasoner || 'qwen3.8:27b-iq2_xxs')}" oninput="CFG.models_by_role=CFG.models_by_role||{}; CFG.models_by_role.deep_reasoner=this.value; CFG.models_by_role.orchestrator=this.value;" />
             </label>
+            <label>Vision/OCR Model (<code>cortical-vision</code>)
+              <input value="${esc((CFG.privacy||{}).vision_model || 'minicpm-ocr:latest')}" oninput="CFG.privacy=CFG.privacy||{}; CFG.privacy.vision_model=this.value;" />
+            </label>
+          </div>
+          <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button type="button" class="btn btn-primary" onclick="persistConfigToFolder(); setBanner('ok', T('Configurazione macchina & modelli salvata!', 'Machine & model config saved!'));">💾 ${T('Salva Configurazione', 'Save Config')}</button>
           </div>
           <table>
             <thead><tr><th>Model &amp; Quantization</th><th>Footprint</th><th>Native Ctx</th><th>Roles</th><th>Download Cmd</th><th>Actions</th></tr></thead>
@@ -1264,18 +1312,37 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
           <span><input type="checkbox" ${(CFG.harnesses||{})[h]!==false?'checked':''} onchange="CFG.harnesses=CFG.harnesses||{}; CFG.harnesses['${h}']=this.checked;" /> <b>${h}</b></span>
           <span class="pill ${PRESEND[h]?'pill-ok':'pill-warn'}">${PRESEND[h] ? 'Pre-Send Safe' : 'Vault UI Only'}</span>
         </label>`).join('');
-      const cCards = Object.keys(CFG.composers || {}).map((k) => `
-        <label class="chk"><input type="checkbox" ${CFG.composers[k]?'checked':''} onchange="CFG.composers['${k}']=this.checked;" /> <code>${k}</code></label>`).join('');
+      const bins = HW.binaries || {};
+      const allKeys = Array.from(new Set([...Object.keys(CFG.composers || {}), 'rtk', 'serena', 'http_router', 'pinchtab', 'playwright_mcp', 'context_mode']));
+      const cCards = allKeys.map((k) => {
+        const st = bins[k];
+        const live = TOOL_RESULTS[k];
+        const ok = live ? !!live.installed : !!(st && (st.installed || (typeof st === 'string' && st.length > 0)));
+        const outTxt = live ? (live.output || live.error || '') : '';
+        return `<div style="padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--card2);display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <label class="chk"><input type="checkbox" ${(CFG.composers||{})[k]!==false?'checked':''} onchange="CFG.composers=CFG.composers||{}; CFG.composers['${k}']=this.checked;" /> <code>${k}</code></label>
+            <span class="pill ${ok?'pill-ok':'pill-warn'}">${ok ? 'Ready' : 'Optional'}</span>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button type="button" class="btn" onclick="runServiceAction('test','${k}')">🧪 Test</button>
+            <button type="button" class="btn" onclick="runServiceAction('install','${k}')">⬇️ Install</button>
+          </div>
+          ${outTxt ? `<div style="font-size:0.75rem;color:${live?.ok?'var(--emerald)':'var(--warn)'};word-break:break-word;">${esc(outTxt)}</div>` : ''}
+        </div>`;
+      }).join('');
       const r = CFG.router || {};
       return `
         <div class="card">
           <h2>Composed External Tools &amp; Optional Router</h2>
+          <p style="margin:0 0 10px;color:var(--muted);font-size:0.82rem;">${IS_SERVED ? T('Modalità server locale attiva: i pulsanti Test / Install eseguono comandi reali su questa macchina.', 'Local live server active: Test / Install run directly on this host.') : T('Modalità Zero-Server file://: Test/Install copiano il comando CLI oppure lancia `cortical cortical --serve --open` per eseguirli da qui.', 'Zero-Server file:// mode: Test/Install copy the CLI command, or run `cortical cortical --serve --open` for live execution.')}</p>
           <div class="grid" style="margin-bottom:12px;">${cCards}</div>
           <div style="border-top:1px solid var(--border); padding-top:12px;" class="grid">
             <label class="chk"><input type="checkbox" ${r.enabled?'checked':''} onchange="CFG.router.enabled=this.checked;" /> Enable Optional Router (70-90% API Offload)</label>
             <label>Provider<select onchange="CFG.router.provider=this.value;"><option value="litellm" ${r.provider==='litellm'?'selected':''}>LiteLLM</option><option value="omniroute" ${r.provider==='omniroute'?'selected':''}>OmniRoute</option><option value="ccr" ${r.provider==='ccr'?'selected':''}>claude-code-router</option></select></label>
             <label>Base URL<input value="${esc(r.base_url||'http://127.0.0.1:4000/v1')}" oninput="CFG.router.base_url=this.value;" /></label>
           </div>
+          <div style="margin-top:12px;"><button type="button" class="btn btn-primary" onclick="persistConfigToFolder(); setBanner('ok', T('Framework & Router salvati!', 'Frameworks & Router saved!'));">💾 ${T('Salva Framework & Router', 'Save Frameworks & Router')}</button></div>
         </div>
         <div class="card">
           <h2>8 Harness Sync Targets (macOS · Linux · Windows)</h2>
@@ -1447,7 +1514,46 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli sync</pre>
       f.text().then((t) => { CFG = JSON.parse(t); setBanner('ok', 'Configurazione importata.'); });
     };
 
+    async function runServiceAction(kind, name) {
+      if (!IS_SERVED) {
+        const cmd = `PYTHONPATH=src .venv/bin/python -m cortical.cli tools ${kind} ${name}`;
+        try { await navigator.clipboard.writeText(cmd); } catch {}
+        TOOL_RESULTS[name] = { ok: false, installed: !!(HW.binaries||{})[name], output: T('Comando copiato: ', 'Copied CLI command: ') + cmd };
+        setBanner('info', T('Modalità file://: incolla nel terminale (oppure avvia `--serve --open`): ', 'file:// mode — run in terminal (or launch `--serve --open`): ') + cmd);
+        return;
+      }
+      setBanner('info', `${kind === 'install' ? 'Installing' : 'Testing'} ${name}...`);
+      try {
+        const r = await fetch('/api/tools/' + kind, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        const data = await r.json();
+        TOOL_RESULTS[name] = data;
+        HW.binaries = HW.binaries || {};
+        HW.binaries[name] = data.installed ? (data.path || name) : '';
+        setBanner(data.ok ? 'ok' : 'err', `${name}: ${data.output || data.error || (data.ok ? 'OK' : 'failed')}`);
+      } catch (err) {
+        TOOL_RESULTS[name] = { ok: false, error: String(err?.message || err) };
+        setBanner('err', `${name}: ${err?.message || err}`);
+      }
+    }
+
     (async function boot() {
+      if (IS_SERVED) {
+        try {
+          const r = await fetch('/api/tools/status');
+          if (r.ok) {
+            const st = await r.json();
+            HW.binaries = HW.binaries || {};
+            Object.entries(st.tools || {}).forEach(([k, v]) => {
+              HW.binaries[k] = v.installed ? (v.path || k) : '';
+              TOOL_RESULTS[k] = { ok: v.installed, installed: v.installed, output: v.path || (v.installed ? 'ready' : 'not installed') };
+            });
+          }
+        } catch {}
+      }
       try {
         const saved = await idbLoadHandle();
         if (saved) {
@@ -1553,11 +1659,137 @@ def export_static_dashboard(
     hw: Optional[dict[str, Any]] = None,
     public_docs: bool = False,
 ) -> tuple[Path, Path]:
-    """Exports `settings.html` and `help.html` into `output_dir` (clean & stripped when `public_docs=True`)."""
+    """Exports the redesigned 6-domain zero-server `settings.html` and `help.html` into `output_dir`."""
+    from .snapshot import build_dashboard_snapshot
+    from .zero_server_ui import render_zero_server_settings_html
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     s_path = out / "settings.html"
     h_path = out / "help.html"
-    s_path.write_text(render_static_settings_html(cfg=config, hw=hw, public_docs=public_docs, env=build_dashboard_env(public=public_docs)), encoding="utf-8")
+    snap = build_dashboard_snapshot(config=config, hw=hw, public_docs=public_docs)
+    s_path.write_text(render_zero_server_settings_html(snap), encoding="utf-8")
     h_path.write_text(render_static_help_html(public_docs=public_docs), encoding="utf-8")
     return (s_path, h_path)
+
+
+def create_dashboard_server(
+    output_dir: Path | str,
+    *,
+    port: int = 8787,
+    host: str = "127.0.0.1",
+    config: Optional[dict[str, Any]] = None,
+    hw: Optional[dict[str, Any]] = None,
+    public_docs: bool = False,
+    db_path: Optional[Path | str] = None,
+    settings_path: Optional[Path | str] = None,
+    http_probe_fn: Any = None,
+) -> tuple[Any, Any]:
+    """Creates a `ThreadingHTTPServer` bound to `(host, port)` with the full Control Plane API."""
+    import functools
+    import http.server
+    from ..dashboard_api import DashboardController
+    from ..dashboard_ui import render_control_plane_html
+
+    out = Path(output_dir).resolve()
+    export_static_dashboard(out, config=config, hw=hw, public_docs=public_docs)
+    (out / "dashboard.html").write_text(render_control_plane_html(), encoding="utf-8")
+    controller = DashboardController(db_path=db_path, settings_path=settings_path, http_probe_fn=http_probe_fn)
+
+    class _DashHandler(http.server.SimpleHTTPRequestHandler):
+        def _send_json(self, code: int, payload: dict[str, Any]) -> None:
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _read_json_body(self) -> dict[str, Any]:
+            ln = int(self.headers.get("Content-Length") or 0)
+            if ln <= 0:
+                return {}
+            raw = self.rfile.read(ln).decode("utf-8", errors="replace")
+            return json.loads(raw) if raw.strip() else {}
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/"):
+                code, res = controller.handle_request("GET", self.path)
+                self._send_json(code, res)
+                return
+            if self.path in {"", "/"}:
+                self.path = "/dashboard.html"
+            super().do_GET()
+
+        def do_POST(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/"):
+                try:
+                    body = self._read_json_body()
+                except json.JSONDecodeError:
+                    self._send_json(400, {"ok": False, "error": "invalid_json"})
+                    return
+                code, res = controller.handle_request("POST", self.path, body)
+                self._send_json(code, res)
+                return
+            self._send_json(404, {"ok": False, "error": "not_found"})
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/"):
+                body = {}
+                try:
+                    body = self._read_json_body()
+                except json.JSONDecodeError:
+                    pass
+                code, res = controller.handle_request("DELETE", self.path, body)
+                self._send_json(code, res)
+                return
+            self._send_json(404, {"ok": False, "error": "not_found"})
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+    handler_cls = functools.partial(_DashHandler, directory=str(out))
+    httpd = http.server.ThreadingHTTPServer((host, port), handler_cls)
+    return httpd, controller
+
+
+def serve_dashboard_http(
+    output_dir: Path | str,
+    *,
+    port: int = 8787,
+    host: str = "127.0.0.1",
+    open_browser: bool = True,
+    config: Optional[dict[str, Any]] = None,
+    hw: Optional[dict[str, Any]] = None,
+    public_docs: bool = False,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Serves the 4-domain Control Plane Dashboard HTML + full local REST API."""
+    import webbrowser
+
+    url = f"http://{host}:{port}/dashboard.html"
+    try:
+        httpd, _ctrl = create_dashboard_server(
+            output_dir,
+            port=port,
+            host=host,
+            config=config,
+            hw=hw,
+            public_docs=public_docs,
+            db_path=db_path,
+        )
+    except OSError:
+        if open_browser:
+            webbrowser.open(url)
+        print(f"Cortical Dashboard server already active at: {url}")
+        return
+    if open_browser:
+        webbrowser.open(url)
+    print(f"Serving interactive Cortical Control Plane Dashboard at: {url}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()

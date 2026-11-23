@@ -1,0 +1,236 @@
+"""Managed Local HTTP Router (LiteLLM Proxy) installer, config generator & lifecycle control."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+from ..config import default_data_dir, load_cortical_config, save_cortical_config
+from ..hardware.context_window import DEFAULT_MODEL_CONTEXT_WINDOWS, compute_dynamic_num_ctx
+
+
+def _router_port(config: dict[str, Any]) -> int:
+    base = str(((config.get("router") or {}).get("base_url")) or "http://127.0.0.1:4000/v1")
+    parsed = urlparse(base)
+    return int(parsed.port or 4000)
+
+
+def _router_host(config: dict[str, Any]) -> str:
+    base = str(((config.get("router") or {}).get("base_url")) or "http://127.0.0.1:4000/v1")
+    parsed = urlparse(base)
+    return str(parsed.hostname or "127.0.0.1")
+
+
+def _litellm_works(bin_path: str) -> bool:
+    """Checks that `litellm` binary exists and has `[proxy]` dependencies installed."""
+    py = Path(bin_path).parent / "python"
+    if not py.is_file():
+        py = Path(bin_path).parent / "python3"
+    if py.is_file():
+        chk = subprocess.run(
+            [str(py), "-c", "import litellm, fastapi_sso, uvicorn"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return chk.returncode == 0
+    res = subprocess.run([bin_path, "--help"], capture_output=True, text=True, timeout=15)
+    return res.returncode == 0
+
+
+def resolve_router_bin(data_dir: Optional[Path] = None) -> Optional[str]:
+    dd = Path(data_dir or default_data_dir())
+    venv_bin = dd / ".router_venv" / ("Scripts" if os.name == "nt" else "bin") / ("litellm.exe" if os.name == "nt" else "litellm")
+    if venv_bin.is_file() and _litellm_works(str(venv_bin)):
+        return str(venv_bin)
+    sys_bin = shutil.which("litellm")
+    if sys_bin and _litellm_works(sys_bin):
+        return sys_bin
+    return None
+
+
+def ensure_litellm_installed(data_dir: Optional[Path] = None) -> dict[str, Any]:
+    """Installs `litellm[proxy]` into `<data_dir>/.router_venv` using `uv` or `pip` if missing."""
+    dd = Path(data_dir or default_data_dir())
+    dd.mkdir(parents=True, exist_ok=True)
+    existing = resolve_router_bin(dd)
+    if existing:
+        return {"ok": True, "bin": existing, "installed_now": False}
+
+    venv_dir = dd / ".router_venv"
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        if not venv_dir.exists():
+            subprocess.run([uv_bin, "venv", str(venv_dir)], check=True, capture_output=True, text=True)
+        res = subprocess.run(
+            [uv_bin, "pip", "install", "--python", str(venv_dir / "bin" / "python"), "litellm[proxy]"],
+            capture_output=True,
+            text=True,
+        )
+    else:
+        if not venv_dir.exists():
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, capture_output=True, text=True)
+        py = venv_dir / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+        res = subprocess.run(
+            [str(py), "-m", "pip", "install", "--quiet", "litellm[proxy]"],
+            capture_output=True,
+            text=True,
+        )
+    if res.returncode != 0:
+        return {"ok": False, "error": (res.stderr or res.stdout or "Failed to install litellm[proxy]").strip()}
+    bin_path = resolve_router_bin(dd)
+    return {"ok": bool(bin_path), "bin": bin_path, "installed_now": True}
+
+
+def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None) -> str:
+    """Renders deterministic `litellm_config.yaml` content mapping Cortical roles & Ollama models."""
+    cfg = config or load_cortical_config()
+    ollama_base = str((((cfg.get("runners") or {}).get("ollama") or {}).get("base_url")) or "http://127.0.0.1:11434").rstrip("/")
+
+    by_role = cfg.get("models_by_role") or {}
+    priv = cfg.get("privacy") or {}
+    candidates = [
+        by_role.get("daily_coder") or "qwen3.5:9b-q3_k_xl",
+        by_role.get("deep_reasoner") or "qwen3.8:27b-iq2_xxs",
+        by_role.get("router") or "qwen2.5:1.5b",
+        priv.get("vision_model") or "",
+    ]
+    models = [m for m in dict.fromkeys(candidates) if m]
+
+    lines = ["model_list:"]
+    for m in models:
+        base_ctx = DEFAULT_MODEL_CONTEXT_WINDOWS.get(m, 32768)
+        dyn_ctx = compute_dynamic_num_ctx(base_ctx, m)
+        lines.extend([
+            f"  - model_name: {m}",
+            "    litellm_params:",
+            f"      model: ollama_chat/{m}",
+            f"      api_base: {ollama_base}",
+            f"      num_ctx: {dyn_ctx}",
+        ])
+    # Machine-agnostic semantic aliases (`local-default`, `cortical-fast`, `cortical-deep`, `cortical-vision`)
+    daily = str(by_role.get("daily_coder") or cfg.get("active_model") or (models[0] if models else "qwen3.5:9b-q3_k_xl"))
+    deep = str(by_role.get("deep_reasoner") or by_role.get("architect") or daily)
+    vision = str(priv.get("vision_model") or "minicpm-ocr:latest")
+    for alias, target_m in [("local-default", daily), ("cortical-fast", daily), ("cortical-deep", deep), ("cortical-vision", vision)]:
+        t_ctx = compute_dynamic_num_ctx(DEFAULT_MODEL_CONTEXT_WINDOWS.get(target_m, 32768), target_m)
+        lines.extend([
+            f"  - model_name: {alias}",
+            "    litellm_params:",
+            f"      model: ollama_chat/{target_m}",
+            f"      api_base: {ollama_base}",
+            f"      num_ctx: {t_ctx}",
+        ])
+    if os.environ.get("OPENROUTER_API_KEY"):
+        or_model = str(((cfg.get("router") or {}).get("openrouter_model")) or "openrouter/google/gemini-2.5-flash")
+        lines.extend([
+            "  - model_name: cloud-primary",
+            "    litellm_params:",
+            f"      model: {or_model}",
+            "      api_key: os.environ/OPENROUTER_API_KEY",
+            "router_settings:",
+            f"  fallbacks: [{{\"cloud-primary\": [\"{daily}\"]}}]",
+        ])
+    lines.extend([
+        "litellm_settings:",
+        "  drop_params: true",
+        "  num_retries: 2",
+        "general_settings:",
+        "  dangerously_permit_weak_or_unset_master_key: true",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def write_litellm_config(config: Optional[dict[str, Any]] = None, data_dir: Optional[Path] = None) -> Path:
+    """Generates `<data_dir>/litellm_config.yaml` mapping Cortical roles & Ollama models."""
+    dd = Path(data_dir or default_data_dir())
+    dd.mkdir(parents=True, exist_ok=True)
+    out = dd / "litellm_config.yaml"
+    out.write_text(render_litellm_config_yaml(config=config), encoding="utf-8")
+    return out
+
+
+def router_status(config: Optional[dict[str, Any]] = None, data_dir: Optional[Path] = None) -> dict[str, Any]:
+    cfg = config or load_cortical_config()
+    dd = Path(data_dir or default_data_dir())
+    host = _router_host(cfg)
+    port = _router_port(cfg)
+    url = f"http://{host}:{port}/v1/models"
+    healthy = False
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as resp:
+            healthy = resp.status == 200
+    except Exception:
+        healthy = False
+    pid_file = dd / "router.pid"
+    pid = int(pid_file.read_text().strip()) if pid_file.is_file() and pid_file.read_text().strip().isdigit() else None
+    return {
+        "enabled": bool((cfg.get("router") or {}).get("enabled", False)),
+        "healthy": healthy,
+        "url": f"http://{host}:{port}/v1",
+        "pid": pid,
+        "bin": resolve_router_bin(dd),
+        "config_yaml": str(dd / "litellm_config.yaml"),
+    }
+
+
+def start_router(config: Optional[dict[str, Any]] = None, data_dir: Optional[Path] = None, *, enable_in_config: bool = True) -> dict[str, Any]:
+    cfg = config or load_cortical_config()
+    dd = Path(data_dir or default_data_dir())
+    inst = ensure_litellm_installed(dd)
+    if not inst.get("ok"):
+        return inst
+    cfg_yaml = write_litellm_config(cfg, dd)
+    if enable_in_config:
+        cfg.setdefault("router", {})
+        cfg["router"]["enabled"] = True
+        cfg["router"]["provider"] = "litellm"
+        save_cortical_config(cfg)
+
+    st = router_status(cfg, dd)
+    if st["healthy"]:
+        return {"ok": True, "already_running": True, **st}
+
+    host = _router_host(cfg)
+    port = _router_port(cfg)
+    log_path = dd / "router.log"
+    with log_path.open("a", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            [str(inst["bin"]), "--config", str(cfg_yaml), "--host", host, "--port", str(port)],
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    (dd / "router.pid").write_text(str(proc.pid), encoding="utf-8")
+
+    for _ in range(25):
+        time.sleep(0.4)
+        if router_status(cfg, dd)["healthy"]:
+            return {"ok": True, "already_running": False, **router_status(cfg, dd)}
+        if proc.poll() is not None:
+            break
+    tail = log_path.read_text(encoding="utf-8", errors="ignore")[-800:] if log_path.is_file() else ""
+    return {"ok": False, "error": f"Router failed to become healthy on {host}:{port}", "log_tail": tail}
+
+
+def stop_router(data_dir: Optional[Path] = None) -> dict[str, Any]:
+    dd = Path(data_dir or default_data_dir())
+    pid_file = dd / "router.pid"
+    if not pid_file.is_file():
+        return {"ok": True, "stopped": False, "reason": "No router.pid"}
+    raw = pid_file.read_text().strip()
+    if raw.isdigit():
+        try:
+            os.kill(int(raw), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    pid_file.unlink(missing_ok=True)
+    return {"ok": True, "stopped": True, "pid": raw}

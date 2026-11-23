@@ -21,14 +21,15 @@ from .privacy.vault import PrivacyVault
 TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "cortical_vault_read",
-        "description": "Read a Vault item at 3+1 depth (`light`, `medium`, `high`, `max`: raw if public, anonymized if private; blocks max_security from cloud).",
+        "description": "Read a Vault item by `alias` OR all items matching a `task_tag` at 3+1 depth (`light`, `medium`, `high`, `max`; blocks max_security from cloud).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "alias": {"type": "string", "description": "Vault alias or cortical://private/<alias> URI"},
+                "task_tag": {"type": "string", "description": "Optional task tag to fetch compact context for all tagged documents"},
                 "tier": {"type": "string", "enum": ["light", "medium", "high", "max"], "default": "max"},
             },
-            "required": ["alias"],
+            "required": [],
         },
     },
     {
@@ -41,6 +42,7 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "alias": {"type": "string"},
                 "policy": {"type": "string", "enum": ["auto", "fail_closed", "fail_open"], "default": "auto"},
                 "profile": {"type": "string", "enum": ["max_security", "low", "medium", "max_context"], "default": "medium"},
+                "task_tags": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["path_or_text"],
         },
@@ -75,6 +77,33 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             "required": ["prompt"],
         },
     },
+    {
+        "name": "cortical_roi_report",
+        "description": "Compute local vs cloud token usage, USD savings, and remaining cloud budget (0 cloud tokens).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string"},
+                "include_local_summary": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    {
+        "name": "cortical_handoff",
+        "description": "Save or load shared working context (goal, modified files, decisions, next_step) across Antigravity, pi, OpenCode, Claude Code & Codex.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["save", "load"], "default": "load"},
+                "goal": {"type": "string"},
+                "summary": {"type": "string"},
+                "modified_files": {"type": "array", "items": {"type": "string"}},
+                "next_step": {"type": "string"},
+                "source_harness": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 
@@ -96,7 +125,10 @@ class CorticalMCPServer:
 
     def _dispatch_tool(self, name: str, args: dict[str, Any]) -> Any:
         if name == "cortical_vault_read":
-            return self.vault.read_resource(str(args.get("alias") or ""), allow_local_only=False, tier=str(args.get("tier") or "max"))
+            tier = str(args.get("tier") or "max")
+            if args.get("task_tag") and not args.get("alias"):
+                return self.vault.read_task_context(str(args["task_tag"]), allow_local_only=False, tier=tier if tier != "max" else "medium")
+            return self.vault.read_resource(str(args.get("alias") or ""), allow_local_only=False, tier=tier)
         if name == "cortical_ingest_private":
             cfg = load_cortical_config()
             priv = cfg.get("privacy") or {}
@@ -107,6 +139,7 @@ class CorticalMCPServer:
                 profile=str(args.get("profile") or priv.get("default_profile") or "medium"),
                 custom_terms=list(priv.get("custom_terms") or []),
                 config=cfg,
+                task_tags=args.get("task_tags"),
             )
         if name == "cortical_compress":
             return compress_structured(str(args.get("text") or ""), fmt=str(args.get("format") or "auto"))
@@ -140,6 +173,58 @@ class CorticalMCPServer:
             elapsed = round(_t.perf_counter() - t0, 2)
             export_roi_json(self.vault.db_path.parent, config=cfg)
             return {"completed_locally": True, "model_used": used_model, "elapsed_sec": elapsed, "response": out}
+        if name == "cortical_roi_report":
+            from .analytics.roi import evaluate_routing_state, export_roi_json, format_roi_markdown
+
+            cfg = load_cortical_config()
+            state = evaluate_routing_state(config=cfg, conversation_id=args.get("conversation_id"))
+            export_roi_json(self.vault.db_path.parent, config=cfg)
+            md = format_roi_markdown(state["roi"])
+            local_note = ""
+            if args.get("include_local_summary"):
+                router_m = str((cfg.get("models_by_role") or {}).get("router") or "qwen2.5:1.5b")
+                local_note = invoke_configured_runner(
+                    f"Summarize in 1 short sentence the token optimization from this table:\n{md}",
+                    system_prompt="Be concise (max 25 words).",
+                    config=cfg,
+                    model_override=router_m,
+                    role="roi_recap",
+                )
+            return {
+                "markdown": md,
+                "local_note": local_note,
+                "effective_mode": state["effective_mode"],
+                "enforce_cloud_budget": bool(state.get("enforce_cloud_budget", False)),
+                "cloud_remaining_tokens": state["cloud_remaining_tokens"],
+                "cloud_token_threshold": state["cloud_token_threshold"],
+                "handoff_recommended": bool(state.get("handoff_recommended", False)),
+            }
+        if name == "cortical_handoff":
+            import time as _t
+
+            action = str(args.get("action") or "load").lower().strip()
+            h_path = self.vault.db_path.parent / "brain" / "handoff.json"
+            h_path.parent.mkdir(parents=True, exist_ok=True)
+            if action == "save":
+                payload = {
+                    "goal": str(args.get("goal") or ""),
+                    "summary": str(args.get("summary") or ""),
+                    "modified_files": list(args.get("modified_files") or []),
+                    "next_step": str(args.get("next_step") or ""),
+                    "source_harness": str(args.get("source_harness") or "unknown"),
+                    "updated_at": int(_t.time()),
+                }
+                h_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                if payload["goal"] or payload["summary"]:
+                    self.vault.brain.distill_and_factorize(
+                        alias="active_handoff",
+                        text=f"Goal: {payload['goal']}\nSummary: {payload['summary']}\nFiles: {', '.join(payload['modified_files'])}\nNext: {payload['next_step']}",
+                        is_public=True,
+                    )
+                return {"saved": True, "path": str(h_path), "handoff": payload}
+            if h_path.is_file():
+                return {"found": True, "handoff": json.loads(h_path.read_text(encoding="utf-8"))}
+            return {"found": False, "handoff": None, "brain_snapshot": self.vault.brain.get_snapshot(include_local_only=False)}
         raise ValueError(f"Unknown tool: {name}")
 
     def _private_prompt_text(self, alias: str) -> str:

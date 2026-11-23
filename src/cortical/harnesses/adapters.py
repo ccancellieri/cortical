@@ -147,11 +147,19 @@ def _cortical_mcp_entry(repo_root: Path, db_path: Path, python_exe: Optional[str
     }
 
 
-def _build_shared_rules_md(vault_md: str, model_id: str, router_url: str, composed: dict[str, Any], routing: Optional[dict[str, Any]] = None) -> str:
+def _build_shared_rules_md(
+    vault_md: str,
+    model_id: str,
+    router_url: str,
+    composed: dict[str, Any],
+    routing: Optional[dict[str, Any]] = None,
+    report: Optional[dict[str, Any]] = None,
+) -> str:
     tools_active = [k for k, v in composed.items() if (v.get("installed") if isinstance(v, dict) else bool(v))]
     rt = routing or {}
     r_mode = str(rt.get("mode") or "auto")
     r_thresh = int(rt.get("cloud_token_threshold") or 50000)
+    auto_rep = bool((report or {}).get("auto_report", True))
     lines = [
         "# Cortical Unified Harness Contract",
         "",
@@ -160,8 +168,12 @@ def _build_shared_rules_md(vault_md: str, model_id: str, router_url: str, compos
         "- **Code Navigation & Edits:** Prefer Serena LSP symbol tools (`get_symbols_overview`, `find_symbol`, `replace_symbol_body`) over reading full files.",
         "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items).",
         "- **Force Local LLM (`/local`):** Whenever the user starts a message with `/local` (or when `routing.mode == 'full_local'`), execute the request strictly via `cortical_local_offload` on `cortical-mcp` and return the local Ollama output.",
+        "- **Context Handoff & Low-Token Switch:** Use `cortical_handoff(action='save'|'load')` to share active task context across harnesses; when cloud budget drops below threshold, save handoff and invite the user to continue locally via `pi`, `opencode`, or `unsloth start claude`.",
         "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
+        "- **Dashboard (`/cortical-dashboard`):** Launch `cortical cortical --open` in Chrome to configure per-machine models/frameworks and upload task files or directories.",
     ]
+    if auto_rep:
+        lines.append("- **End-of-Response ROI Recap:** At the end of substantial tasks, call `cortical_roi_report` (0 cloud tokens) and append its compact markdown summary.")
     if vault_md.strip():
         lines.extend(["", vault_md.strip()])
     return "\n".join(lines)
@@ -197,7 +209,7 @@ def plan_sync(
     ollama_v1 = "http://127.0.0.1:11434/v1"
     eff_base_url = router_url or ollama_v1
 
-    rules_body = _build_shared_rules_md(vault_markdown, daily_model, router_url, hw.get("binaries") or {}, routing=config.get("routing"))
+    rules_body = _build_shared_rules_md(vault_markdown, daily_model, router_url, hw.get("binaries") or {}, routing=config.get("routing"), report=config.get("report"))
     changes: list[FileChange] = []
 
     def _add(harness: str, path: Path, content: str, kind: str, detail: str) -> None:
@@ -222,18 +234,57 @@ def plan_sync(
         mp = paths_map["pi"]["mcp"]
         cur_m = _read_json_safe(mp)
         ms = dict(cur_m.get("mcpServers") or {})
-        ms["serena"] = {"command": serena_bin, "args": _serena_args("ide"), "exposure": "eager", "description": "Serena semantic LSP tools"}
+        ms["serena"] = {"command": serena_bin, "args": _serena_args("ide"), "exposure": "deferred", "description": "Serena semantic LSP tools"}
         ms["cortical-mcp"] = {**_cortical_mcp_entry(root, v_db), "exposure": "deferred", "description": "Cortical Privacy Vault & TOON Compression"}
+        chrome_bin = shutil.which("chrome-devtools-mcp") or ("/opt/homebrew/bin/chrome-devtools-mcp" if Path("/opt/homebrew/bin/chrome-devtools-mcp").exists() else "")
+        npx_bin = shutil.which("npx") or "npx"
+        chrome_cmd = chrome_bin or npx_bin
+        chrome_args = (["-y", "chrome-devtools-mcp@latest"] if not chrome_bin else []) + [
+            "--autoConnect",
+            "--no-usage-statistics",
+            "--no-performance-crux",
+            f"--workspace={root}",
+        ]
+        ms["chrome"] = {
+            "command": chrome_cmd,
+            "args": chrome_args,
+            "exposure": "direct",
+            "description": "Auto-connect to user's live open Chrome profile (with all logins & tabs).",
+        }
         cur_m["mcpServers"] = ms
-        _add("pi", mp, json.dumps(cur_m, indent=2) + "\n", "json", "Configure Serena (eager) & cortical-mcp (deferred)")
+        _add("pi", mp, json.dumps(cur_m, indent=2) + "\n", "json", "Configure Chrome (--autoConnect), Serena & cortical-mcp")
 
         sp = paths_map["pi"]["settings"]
         cur_s = _read_json_safe(sp)
-        cur_s["defaultProvider"] = "router" if router_enabled else "ollama"
+        prov_name = "router" if router_enabled else "ollama"
+        cur_s["defaultProvider"] = prov_name
         cur_s["defaultModel"] = daily_model
-        enabled = [f"{cur_s['defaultProvider']}/{m}" for m in dict.fromkeys([daily_model, reasoner_model, router_model])]
-        cur_s["enabledModels"] = enabled
+        pi_models = list(dict.fromkeys([daily_model, reasoner_model, router_model]))
+        cur_s["enabledModels"] = [f"{prov_name}/{m}" for m in pi_models]
         _add("pi", sp, json.dumps(cur_s, indent=2) + "\n", "json", f"Set defaultModel={daily_model} ({'HTTP router' if router_enabled else 'Ollama'})")
+
+        mod_p = paths_map["pi"]["models"]
+        cur_mod = _read_json_safe(mod_p)
+        provs = dict(cur_mod.get("providers") or {})
+        provs[prov_name] = {
+            "baseUrl": eff_base_url,
+            "api": "openai-completions",
+            "apiKey": "ollama",
+            "models": [
+                {
+                    "id": m,
+                    "name": m,
+                    "reasoning": False,
+                    "input": ["text"],
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                    "contextWindow": 131072 if "9b" in m else 32768,
+                    "maxTokens": 8192,
+                }
+                for m in pi_models
+            ],
+        }
+        cur_mod["providers"] = provs
+        _add("pi", mod_p, json.dumps(cur_mod, indent=2) + "\n", "json", f"Sync pi {prov_name} provider models")
 
     if "opencode" in targets:
         op_p = paths_map["opencode"]["opencode"]
@@ -271,6 +322,13 @@ def plan_sync(
         cxp = paths_map["codex"]["config"]
         existing = cxp.read_text(encoding="utf-8") if cxp.is_file() else ""
         toml_block = (
+            "[model_providers.cortical_local]\n"
+            'name = "Cortical Local / Router"\n'
+            f'base_url = {json.dumps(eff_base_url)}\n'
+            'wire_api = "chat"\n\n'
+            "[profiles.cortical_local]\n"
+            'model_provider = "cortical_local"\n'
+            f'model = {json.dumps(daily_model)}\n\n'
             "[mcp_servers.serena]\n"
             f'command = {json.dumps(serena_bin)}\n'
             f'args = {json.dumps(_serena_args("codex"))}\n\n'

@@ -159,3 +159,14 @@ Reads local SQLite telemetry (`agent_runs`, mtime-cached remote transcripts, ben
 | Closed desktop apps (`Antigravity`) bypass HTTP routers & MCP resources inconsistently | High | Never promise pre-send interception on closed apps; rely on Channel 2 synced memories + `.*ignore`, validate MCP Resources early via Simplicity Gate |
 | Small `4 GB VRAM` (`1.5B–3B`) JSON NER misses edge entities | Medium | Combine deterministic structural regexes (`EMAIL`/`IBAN`/`SECRET`/`TAX_ID`) + `custom_terms` + fail-closed fallback on `max_security` / uncertain scans |
 | MCP schema overhead reduces savings if `cortical-mcp` grows | Medium | Hard-cap `cortical-mcp` at 4–6 tools; defer secondary MCPs wherever the harness supports lazy tool loading |
+
+---
+
+## 9. Living ADRs & v0.3 DX / Control Plane Extensions
+
+All architectural and UX decisions beyond `D1`–`D10` are tracked in [`docs/adr/README.md`](./adr/README.md) and mirrored 1:1 to GitHub Issues (`label: adr`):
+
+- **Zero-Server Dashboard (`ADR-001`..`ADR-004`, #20–#23):** `src/cortical/analytics/snapshot.py` + `src/cortical/analytics/zero_server_ui.py` generate the 6-domain offline-capable `docs/settings.html` hydrated with hardware tier, real `sync_harnesses(..., dry_run=True)` diffs, composed OSS tools, Privacy Vault aliases & `<= 15% num_ctx` gauge, ROI, `bench --compare`, and `docs/adr/` ADRs.
+- **Opt-In Local HTTP Control Plane & Multi-Tenant Wiki (`ADR-005`..`ADR-006`, #10–#11):** `src/cortical/wiki/{store,mcp_server}.py`, `src/cortical/dashboard_api.py`, and `src/cortical/dashboard_ui.py` provide optional `--serve` SQLite WAL + FTS5 + Merkle-tree delta crawling + `principal_id` RBAC without changing the zero-server default or lean 7-tool `CorticalMCPServer` contract.
+- **Zero-Friction DX, IDE Integration & SSOT (`ADR-007`, #29):** `src/cortical/workspace.py` (`cortical init`, Git-style `.cortical/` auto-discovery, `.corticalignore` sync — #8), `src/cortical/integrations.py` (`cortical integrate`, live stdio `doctor` — #9), `src/cortical/harnesses/chrome.py` (non-destructive `--autoConnect` + Tab Groups), and `scripts/cortical_overnight.py` (`1 Loop = 1 fresh pi session`).
+

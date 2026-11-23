@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .analytics.benchmark import run_comparative_benchmark
-from .analytics.dashboard import build_dashboard_env, export_static_dashboard
+from .analytics.dashboard import build_dashboard_env, export_static_dashboard, serve_dashboard_http
 from .analytics.roi import build_roi_report, format_roi_markdown
 from .analytics.tuner import analyze_and_tune
 from .compression.engine import compress_structured
-from .composers.tools import inspect_composed_tools, serve_mcp_http
+from .composers.tools import inspect_composed_tools, install_composed_tool, serve_mcp_http, test_composed_tool
+from .integrations import SUPPORTED_TARGETS, detect_integrations, integrate_target, run_doctor_diagnostics
+from .workspace import init_workspace, resolve_default_db, resolve_default_export_dir
 from .config import (
     DEFAULT_VAULT_DB,
     default_data_dir,
@@ -55,11 +57,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     )
     composed = inspect_composed_tools(os_name=args.os)
     presend = get_harness_presend_matrix()
+    diag = run_doctor_diagnostics(
+        project_root=Path(args.repo_root).resolve() if getattr(args, "repo_root", None) else None,
+        ping_mcp=not bool(getattr(args, "no_mcp_ping", False)),
+    )
     report = {
         "hardware": hw,
         "recommended_models": rec,
         "composed_tools": composed,
         "presend_interception_harnesses": presend,
+        "diagnostics": diag,
     }
     if args.out_dir:
         out = Path(args.out_dir)
@@ -90,6 +97,18 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     for name, info in composed.items():
         mark = "OK" if info.get("installed") else f"missing -> {info.get('install_cmd')}"
         print(f"    - {name:12s} ({info.get('role')}): {mark}")
+    py_d = diag["python"]
+    ws_d = diag["workspace"]
+    mcp_d = diag["mcp_stdio"]
+    ign_ok = [k for k, v in (diag.get("ignore_files") or {}).items() if v]
+    run_ok = [k for k, v in (diag.get("local_runners") or {}).items() if v]
+    print("  Diagnostics:")
+    print(f"    - Python:       {py_d['version']} ({'OK' if py_d['supported'] else 'UNSUPPORTED <3.10'})")
+    print(f"    - Workspace:    {ws_d['cortical_dir'] or 'not initialized'} (writable={ws_d['writable']})")
+    print(f"    - MCP stdio:    {'OK (' + str(mcp_d.get('server_name') or 'cortical-mcp') + ')' if mcp_d.get('ok') else 'FAIL: ' + str(mcp_d.get('error', ''))}")
+    print(f"    - Ignore files: {', '.join(ign_ok) if ign_ok else 'none'}")
+    print(f"    - Runners:      {', '.join(run_ok) if run_ok else 'none'}")
+    print(f"    - IDEs/Agents:  {', '.join(diag.get('detected_integrations') or []) or 'none'}")
     return 0
 
 
@@ -185,6 +204,11 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     if args.with_router:
         cfg.setdefault("router", {})
         cfg["router"]["enabled"] = True
+        from .composers.router import start_router
+
+        r_res = start_router(cfg, enable_in_config=True)
+        if not r_res.get("ok"):
+            print(f"[warn] Router start failed: {r_res.get('error')}", file=sys.stderr)
 
     hw = probe_hardware(os_name=args.os, runners_probe=False)
     rec = recommend_models_for_hardware(
@@ -192,7 +216,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         custom_models=cfg.get("custom_models"),
         installed_models=hw.get("installed_ollama_models"),
     )
-    vault_db = Path(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    vault_db = resolve_default_db(args.db)
     vault_md = ""
     if vault_db.is_file():
         vault = PrivacyVault(vault_db)
@@ -228,7 +252,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
-    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    vault = PrivacyVault(resolve_default_db(args.db))
     cfg = load_cortical_config()
     terms: list[str] = []
     for raw in args.custom_term or []:
@@ -263,7 +287,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def _cmd_vault(args: argparse.Namespace) -> int:
-    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    vault = PrivacyVault(resolve_default_db(args.db))
     action = args.vault_action
 
     if action == "list":
@@ -332,7 +356,7 @@ def _cmd_vault(args: argparse.Namespace) -> int:
 
 
 def _cmd_intercept(args: argparse.Namespace) -> int:
-    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    vault = PrivacyVault(resolve_default_db(args.db))
     try:
         res = vault.intercept_pre_send(
             args.harness,
@@ -379,8 +403,9 @@ def _cmd_serve_mcp(args: argparse.Namespace) -> int:
 def _cmd_dashboard(args: argparse.Namespace) -> int:
     cfg = load_cortical_config()
     hw = probe_hardware(runners_probe=False)
+    out_dir = resolve_default_export_dir(args.out_dir)
     settings_path, help_path = export_static_dashboard(
-        Path(args.out_dir),
+        out_dir,
         config=cfg,
         hw=hw,
         public_docs=bool(args.public_docs),
@@ -424,6 +449,12 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         print(f"Linked. Backup id: {res['backup_id']} (undo: cortical sync --rollback {res['backup_id']})")
     else:
         print("Skipped linking (use --yes to apply). Re-run anytime.")
+    if not args.dry_run and bool((cfg.get("router") or {}).get("enabled")):
+        from .composers.router import start_router
+
+        r_res = start_router(cfg, data, enable_in_config=False)
+        print(f"Router ({r_res.get('url', '127.0.0.1:4000')}): ok={r_res.get('ok')} healthy={r_res.get('healthy', False)}")
+
     from .analytics.roi import export_roi_json
 
     PrivacyVault(data / "vault.db")._write_brain_json()
@@ -435,16 +466,39 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_router(args: argparse.Namespace) -> int:
+    from .composers.router import ensure_litellm_installed, router_status, start_router, stop_router, write_litellm_config
+
+    cfg = load_cortical_config()
+    act = args.router_action
+    if act == "setup":
+        inst = ensure_litellm_installed()
+        cfg_yaml = write_litellm_config(cfg)
+        res = {"ok": inst.get("ok"), "bin": inst.get("bin"), "config_yaml": str(cfg_yaml), "error": inst.get("error")}
+    elif act == "start":
+        res = start_router(cfg, enable_in_config=True)
+    elif act == "stop":
+        res = stop_router()
+    else:
+        res = router_status(cfg)
+    if args.json:
+        _print_json(res)
+    else:
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+    return 0 if res.get("ok", True) else 1
+
+
 def _cmd_watch(args: argparse.Namespace) -> int:
     """Processes queued uploads (local NER / vision models) from the data folder; no ports opened."""
     import time as _t
-    vault = PrivacyVault(args.db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
+    vault = PrivacyVault(resolve_default_db(args.db))
     print(f"Watching {vault.inbox_dir} (Ctrl+C to stop)" if not args.once else f"Processing {vault.inbox_dir}")
     try:
         while True:
             res = vault.sync_from_disk(process_inbox=True)
             if res["inbox_processed"] or res["imported"] or res["deleted"]:
                 from .analytics.roi import export_roi_json
+
                 export_roi_json(vault.db_path.parent)
                 print(f"  processed={res['inbox_processed']} imported={res['imported']} deleted={res['deleted']}")
             if args.once:
@@ -498,6 +552,60 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_browser(args: argparse.Namespace) -> int:
+    from .harnesses.chrome import (
+        click_in_chrome,
+        discover_chrome_profiles,
+        ensure_chrome_connected,
+        extract_page_and_forms,
+        fill_form_and_upload,
+        list_open_tabs,
+        read_active_or_url_tab,
+        relaunch_chrome_with_profile,
+    )
+
+    act = args.action
+    if act in {"status", "profiles"}:
+        _print_json(discover_chrome_profiles())
+        return 0
+    if act == "ensure":
+        res = ensure_chrome_connected(args.profile or "ccancellieri@gmail.com", port=args.port)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if act == "tabs":
+        tabs = list_open_tabs(port=args.port)
+        _print_json({"ok": True, "tabs": tabs, "count": len(tabs)})
+        return 0
+    if act == "read":
+        res = read_active_or_url_tab(args.url or "", port=args.port)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if act == "click":
+        res = click_in_chrome(args.selector or "", url=args.url or "", port=args.port)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if act == "attach":
+        res = relaunch_chrome_with_profile(args.profile or "ccancellieri@gmail.com", port=args.port, target_url=args.url or "")
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if act == "extract":
+        res = extract_page_and_forms(args.url or "", port=args.port)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if act == "fill":
+        fields = json.loads(args.fields_json or "{}")
+        res = fill_form_and_upload(
+            args.url or "",
+            fields if isinstance(fields, dict) else {},
+            upload_file=args.upload or "",
+            submit=bool(args.submit),
+            port=args.port,
+        )
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    return 1
+
+
 def _cmd_roi(args: argparse.Namespace) -> int:
     report = build_roi_report(
         brain_dir=Path(args.brain_dir) if args.brain_dir else None,
@@ -508,6 +616,144 @@ def _cmd_roi(args: argparse.Namespace) -> int:
         _print_json(report)
         return 0
     print(format_roi_markdown(report))
+    return 0
+
+
+def _cmd_integrate(args: argparse.Namespace) -> int:
+    """Auto-detects installed IDEs/agents or idempotently injects `cortical-wiki` MCP config with `.bak` backup."""
+    proj = Path(args.project).resolve() if args.project else None
+    if args.list or not args.target:
+        items = detect_integrations(project_root=proj)
+        if args.json:
+            _print_json({"ok": True, "integrations": items})
+            return 0
+        print("Detected IDE/Agent Integrations:")
+        for it in items:
+            mark = "DETECTED" if it["detected"] else "available"
+            loc = it["project_path"] if it["project_exists"] else (it["global_path"] or it["project_path"] or "")
+            print(f"  - {it['target']:12s} [{mark:9s}] {loc}")
+        return 0
+
+    scope = "global" if args.global_scope else "project"
+    try:
+        res = integrate_target(
+            args.target,
+            scope=scope,
+            server_name=args.server_name,
+            project_root=proj,
+            db_path=args.db,
+            dry_run=bool(args.dry_run),
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.json:
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if not res.get("ok"):
+        print(f"Integration failed: {res.get('error')}", file=sys.stderr)
+        return 1
+    mode = "DRY-RUN" if res["dry_run"] else ("UPDATED" if res["changed"] else "UNCHANGED")
+    print(f"Cortical Integrate [{mode}] {res['target']} ({res['scope']}) -> {res['path']}")
+    if res.get("backup_path"):
+        print(f"  Backup: {res['backup_path']}")
+    if res["dry_run"] and res.get("diff"):
+        print(res["diff"], end="")
+    return 0
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Initializes `.cortical/` workspace, `wiki.db`, `config.json`, `.gitignore` and ignore-file sync."""
+    update_gitignore = not bool(args.no_gitignore)
+    if update_gitignore and not args.yes and sys.stdin.isatty():
+        try:
+            ans = input("Add '.cortical/' to .gitignore? [Y/n] ").strip().lower()
+            if ans in {"n", "no"}:
+                update_gitignore = False
+        except EOFError:
+            pass
+    res = init_workspace(
+        target_dir=args.path,
+        update_gitignore=update_gitignore,
+        sync_ignores=not bool(args.no_sync_ignores),
+    )
+    if args.json:
+        _print_json(res)
+        return 0
+    print(f"Initialized Cortical workspace: {res['cortical_dir']}")
+    print(f"  - Database: {res['db_path']}")
+    print(f"  - Config:   {res['config_path']}")
+    print(f"  - Exports:  {res['exports_dir']}")
+    print(f"  - Logs:     {res['logs_dir']}")
+    if res["gitignore_updated"]:
+        print("  - Updated .gitignore with '.cortical/'")
+    if res["synced_ignores"]:
+        print(f"  - Synced .corticalignore -> {', '.join(res['synced_ignores'])}")
+    return 0
+
+
+def _cmd_tools(args: argparse.Namespace) -> int:
+    action = getattr(args, "tools_action", "status") or "status"
+    name = getattr(args, "name", "") or ""
+    os_name = getattr(args, "os", None)
+    if action == "status" or not name:
+        data = inspect_composed_tools(os_name=os_name)
+        _print_json({"ok": True, "tools": data})
+        return 0
+    if action == "test":
+        res = test_composed_tool(name, os_name=os_name)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    if action == "install":
+        res = install_composed_tool(name, os_name=os_name)
+        _print_json(res)
+        return 0 if res.get("ok") else 1
+    return 1
+
+
+def _cmd_cortical_dash(args: argparse.Namespace) -> int:
+    """Opens the Zero-Server Static HTML Dashboard (or interactive `--serve` HTTP server) in browser."""
+    from pathlib import Path
+
+    out_dir = resolve_default_export_dir(args.out_dir)
+    open_browser = args.open
+    public = args.public_docs
+    serve_live = getattr(args, "serve", False)
+    port = int(getattr(args, "port", 8787) or 8787)
+    cfg = load_cortical_config()
+    hw = probe_hardware(os_name=args.os if hasattr(args, "os") else None, runners_probe=False)
+
+    if serve_live:
+        serve_dashboard_http(out_dir, port=port, open_browser=open_browser, config=cfg, hw=hw, public_docs=public)
+        return 0
+
+    s_path, h_path = export_static_dashboard(
+        output_dir=Path(out_dir),
+        config=cfg,
+        hw=hw,
+        public_docs=public,
+    )
+    
+    json_report = {
+        "dashboard": str(s_path.resolve()),
+        "help": str(h_path.resolve()),
+        "exported": True,
+        "public_docs": public,
+    }
+    
+    if args.json:
+        _print_json(json_report)
+        return 0
+    
+    if open_browser:
+        webbrowser.open(f"file://{s_path.parent.absolute()}/{s_path.name}")
+        print(f"Opened dashboard in browser: file://{s_path.parent.absolute()}/{s_path.name}")
+    else:
+        print(f"Dashboard ready at: file://{s_path.parent.absolute()}/{s_path.name}")
+        print(f"  - Settings UI: {s_path}")
+        print(f"  - Help page:   {h_path}")
+    
     return 0
 
 
@@ -560,6 +806,25 @@ def build_parser() -> argparse.ArgumentParser:
     syn.add_argument("--with-router", action="store_true")
     syn.add_argument("--json", action="store_true")
     syn.set_defaults(func=_cmd_sync)
+
+    apl = sub.add_parser("apply", help="Atomically apply a dashboard cortical-plan.json bundle (validated, single rollback snapshot)")
+    apl.add_argument("plan", nargs="?", default=None, help="Path to cortical-plan.json (or inline JSON)")
+    apl.add_argument("--from-clipboard", action="store_true", help="Read plan JSON from OS clipboard")
+    apl.add_argument("--dry-run", action="store_true")
+    apl.add_argument("--regenerate-dashboard", default=None, metavar="OUT_DIR", help="Re-export settings.html after applying")
+    apl.add_argument("--json", action="store_true")
+    apl.set_defaults(func=_cmd_apply)
+
+    rec = sub.add_parser("reconcile", help="Detect and reconcile drift across models, LiteLLM router, services, and harnesses")
+    rec.add_argument("--apply", action="store_true", help="Apply fixes (default is dry-run unless --apply is passed)")
+    rec.add_argument("--dry-run", action="store_true", help="Preview drift without writing files")
+    rec.add_argument("--json", action="store_true")
+    rec.set_defaults(func=_cmd_reconcile)
+
+    rtr = sub.add_parser("router", help="Install, configure, start/stop or inspect local LiteLLM HTTP router")
+    rtr.add_argument("router_action", choices=["setup", "start", "stop", "status"])
+    rtr.add_argument("--json", action="store_true")
+    rtr.set_defaults(func=_cmd_router)
 
     ing = sub.add_parser("ingest", help="Ingest a file or text into the encrypted-metadata-stripped Privacy Vault")
     ing.add_argument("target")
@@ -624,17 +889,53 @@ def build_parser() -> argparse.ArgumentParser:
     srv.set_defaults(func=_cmd_serve_mcp)
 
     dash = sub.add_parser("dashboard", help="Export self-contained zero-server static HTML settings & help UI")
-    dash.add_argument("--out-dir", default="html")
+    dash.add_argument("--out-dir", default=None)
     dash.add_argument("--public-docs", action="store_true")
     dash.add_argument("--open", action="store_true")
     dash.add_argument("--json", action="store_true")
     dash.set_defaults(func=_cmd_dashboard)
+
+    ini = sub.add_parser("init", help="Initialize `.cortical/` workspace, `wiki.db`, `.gitignore` and `.corticalignore` sync")
+    ini.add_argument("--path", default=None, help="Target project root (defaults to Git root or cwd)")
+    ini.add_argument("-y", "--yes", action="store_true", help="Non-interactive mode (auto-update .gitignore)")
+    ini.add_argument("--no-gitignore", action="store_true", help="Do not modify .gitignore")
+    ini.add_argument("--no-sync-ignores", action="store_true", help="Do not sync .corticalignore to .claudeignore/.cursorignore/.geminiignore")
+    ini.add_argument("--json", action="store_true")
+    ini.set_defaults(func=_cmd_init)
+
+    itg = sub.add_parser("integrate", help="Auto-detect IDEs/agents and idempotently configure Cortical MCP (`--dry-run` supported)")
+    itg.add_argument("target", nargs="?", choices=list(SUPPORTED_TARGETS), default=None, help="Target IDE/agent")
+    scope_grp = itg.add_mutually_exclusive_group()
+    scope_grp.add_argument("--project", action="store_true", help="Write project-local config (default)")
+    scope_grp.add_argument("--global", dest="global_scope", action="store_true", help="Write global user config")
+    itg.add_argument("--list", action="store_true", help="List auto-detected IDE/agent integrations")
+    itg.add_argument("--server-name", default="cortical-wiki", help="MCP server key name (default: cortical-wiki)")
+    itg.add_argument("--project-dir", dest="project", default=None, help="Override project root directory")
+    itg.add_argument("--db", default=None, help="Override SQLite DB path")
+    itg.add_argument("--dry-run", action="store_true", help="Preview unified JSON diff without writing")
+    itg.add_argument("--json", action="store_true")
+    itg.set_defaults(func=_cmd_integrate)
 
     stp = sub.add_parser("setup", help="One-shot setup: data folder (~/Documents/Cortical), harness links & static page")
     stp.add_argument("--yes", action="store_true")
     stp.add_argument("--dry-run", action="store_true")
     stp.add_argument("--no-open", action="store_true")
     stp.set_defaults(func=_cmd_setup)
+
+    dash = sub.add_parser("cortical", help="Open Static or Live Interactive (`--serve`) Dashboard in browser (/cortical)")
+    dash.add_argument("--open", action="store_true", help="Open dashboard in default browser after export")
+    dash.add_argument("--serve", action="store_true", help="Serve dashboard via local HTTP (:8787) to test & install services from UI")
+    dash.add_argument("--port", type=int, default=8787, help="Port for --serve (default: 8787)")
+    dash.add_argument("--out-dir", default=None, help="Output folder (defaults to .cortical/exports or html)")
+    dash.add_argument("--public-docs", action="store_true", help="Export clean public version (no local config)")
+    dash.add_argument("--json", action="store_true", help="Print JSON report instead of opening browser")
+    dash.set_defaults(func=_cmd_cortical_dash)
+
+    tl = sub.add_parser("tools", help="Inspect, test or install composed OSS frameworks (rtk, serena, http_router, pinchtab, ...)")
+    tl.add_argument("tools_action", choices=["status", "test", "install"], default="status", nargs="?")
+    tl.add_argument("name", default="", nargs="?")
+    tl.add_argument("--os", choices=["macos", "linux", "windows"], default=None)
+    tl.set_defaults(func=_cmd_tools)
 
     wch = sub.add_parser("watch", help="Process queued uploads with local models (no ports)")
     wch.add_argument("--once", action="store_true")
@@ -660,7 +961,69 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--json", action="store_true")
     ro.set_defaults(func=_cmd_roi)
 
+    br = sub.add_parser("browser", help="Autonomous Chrome (:9222) session attachment, tabs, click, extraction & authenticated form filling")
+    br.add_argument("action", choices=["status", "profiles", "ensure", "tabs", "read", "click", "attach", "extract", "fill"], default="status", nargs="?")
+    br.add_argument("--profile", default="ccancellieri@gmail.com")
+    br.add_argument("--port", type=int, default=9222)
+    br.add_argument("--url", default="")
+    br.add_argument("--selector", default="")
+    br.add_argument("--fields-json", default="{}")
+    br.add_argument("--upload", default="")
+    br.add_argument("--submit", action="store_true")
+    br.set_defaults(func=_cmd_browser)
+
     return p
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    from .reconcile import reconcile_all
+
+    dry_run = not bool(args.apply) or bool(args.dry_run)
+    res = reconcile_all(dry_run=dry_run)
+    if args.json:
+        _print_json(res)
+        return 0
+    mode = "DRY-RUN" if res["dry_run"] else f"APPLIED (backup={res.get('backup_id')})"
+    print(f"Cortical Reconcile [{mode}]: in_sync={res['in_sync']} drift_count={res['drift_count']}")
+    for m in res["models"]["drifted"]:
+        print(f"  - [model] {m['role']}: {m['configured']} -> {m['replacement']} ({m['reason']})")
+    if res["router"]["config_drift"]:
+        print(f"  - [router] litellm_config.yaml SHA mismatch ({res['router']['disk_sha256'] or 'missing'} != {res['router']['expected_sha256']})")
+    if res["router"]["runtime_drift"]:
+        print(f"  - [router] missing runtime aliases: {', '.join(res['router']['missing_aliases'])}")
+    for ch in res["harnesses"]["pending"]:
+        print(f"  - [harness] [{ch['action']}] {ch['harness']} -> {ch['path']}")
+    return 0
+
+
+def _cmd_apply(args: argparse.Namespace) -> int:
+    from .apply import PlanError, apply_plan, read_clipboard_text
+
+    try:
+        if args.from_clipboard:
+            source: Any = read_clipboard_text()
+        elif args.plan:
+            source = args.plan
+        else:
+            print("Provide a plan path or --from-clipboard.", file=sys.stderr)
+            return 2
+        res = apply_plan(source, dry_run=args.dry_run, regenerate_dashboard=args.regenerate_dashboard)
+    except (PlanError, FileNotFoundError) as exc:
+        if args.json:
+            _print_json({"ok": False, "error": str(exc)})
+        else:
+            print(f"[cortical apply] {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _print_json({"ok": True, **res})
+        return 0
+    mode = "DRY-RUN" if res["dry_run"] else f"APPLIED (rollback: cortical sync --rollback {res['backup_id']})"
+    print(f"Cortical Apply [{mode}]: {res['changed_count']} file change(s), {len(res['vault_updates'])} vault update(s), {len(res['custom_models'])} model(s)")
+    for ch in res["changes"]:
+        print(f"  - [{ch['action']:9s}] {ch['harness']:15s} -> {ch['path']}")
+    if res.get("dashboard"):
+        print(f"  Dashboard regenerated: {res['dashboard']}")
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
