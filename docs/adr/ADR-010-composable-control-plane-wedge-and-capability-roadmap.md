@@ -1,6 +1,6 @@
 # ADR-010: Composable Control Plane Wedge & Top 5 Capability Roadmap
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-23
 - **GitHub Issue:** #36
 

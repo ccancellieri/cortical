@@ -19,6 +19,28 @@ from .sanitizer import FailClosedError, classify_and_sanitize, pseudonymize_stru
 from ._auto_tagger import get_default_tags_for_path
 
 
+_GENESIS_AUDIT_HASH = "0" * 64
+
+
+def _compute_audit_entry_hash(
+    prev_hash: str,
+    ts: float,
+    event_type: str,
+    harness: str,
+    alias: str,
+    policy: str,
+    profile: str,
+    entity_count: int,
+    blocked_egress: bool,
+) -> str:
+    """Computes deterministic SHA-256 chain hash for one tamper-evident privacy audit event."""
+    payload = (
+        f"{prev_hash}|{float(ts):.6f}|{event_type}|{harness}|{alias}|"
+        f"{policy}|{profile}|{int(entity_count)}|{int(bool(blocked_egress))}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _verify_zero_residual_pii(text: str, custom_terms: Optional[list[str]] = None) -> list[str]:
     """Scans sanitized text to ensure zero unmasked PII/secrets remain before remote egress."""
     if not text:
@@ -72,7 +94,150 @@ class PrivacyVault:
                 conn.execute("ALTER TABLE vault_items ADD COLUMN task_tags_json TEXT NOT NULL DEFAULT '[]'")
             if "auto_detected_tags_json" not in cols:
                 conn.execute("ALTER TABLE vault_items ADD COLUMN auto_detected_tags_json TEXT NOT NULL DEFAULT '[]'")
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS privacy_audit_ledger (
+                       seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                       ts REAL NOT NULL,
+                       event_type TEXT NOT NULL,
+                       harness TEXT NOT NULL,
+                       alias TEXT NOT NULL,
+                       policy TEXT NOT NULL,
+                       profile TEXT NOT NULL,
+                       entity_count INTEGER NOT NULL DEFAULT 0,
+                       categories_json TEXT NOT NULL DEFAULT '{}',
+                       stripped_metadata_json TEXT NOT NULL DEFAULT '[]',
+                       blocked_egress INTEGER NOT NULL DEFAULT 0,
+                       prev_hash TEXT NOT NULL,
+                       entry_hash TEXT NOT NULL
+                   )"""
+            )
         self.brain = LocalBrain(self._connect)
+
+    def _append_audit_event(
+        self,
+        event_type: str,
+        *,
+        harness: str = "mcp",
+        alias: str = "",
+        policy: str = "auto",
+        profile: str = "medium",
+        entity_count: int = 0,
+        categories: Optional[dict[str, int]] = None,
+        stripped_metadata: Optional[list[str]] = None,
+        blocked_egress: bool = False,
+    ) -> str:
+        """Appends one zero-PII SHA-256 hash-chained event to `privacy_audit_ledger`."""
+        ts = round(time.time(), 6)
+        cats = {str(k): int(v) for k, v in (categories or {}).items()}
+        meta = [str(m) for m in (stripped_metadata or [])]
+        with self._connect() as conn:
+            last = conn.execute("SELECT entry_hash FROM privacy_audit_ledger ORDER BY seq DESC LIMIT 1").fetchone()
+            prev_hash = str(last["entry_hash"]) if last else _GENESIS_AUDIT_HASH
+            entry_hash = _compute_audit_entry_hash(
+                prev_hash, ts, str(event_type), str(harness), str(alias),
+                str(policy), str(profile), int(entity_count), bool(blocked_egress),
+            )
+            conn.execute(
+                """INSERT INTO privacy_audit_ledger(
+                       ts, event_type, harness, alias, policy, profile,
+                       entity_count, categories_json, stripped_metadata_json,
+                       blocked_egress, prev_hash, entry_hash
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ts,
+                    str(event_type),
+                    str(harness),
+                    str(alias),
+                    str(policy),
+                    str(profile),
+                    int(entity_count),
+                    json.dumps(cats, sort_keys=True),
+                    json.dumps(meta),
+                    1 if blocked_egress else 0,
+                    prev_hash,
+                    entry_hash,
+                ),
+            )
+        return entry_hash
+
+    def get_audit_ledger(self, since: float = 0.0, limit: int = 100) -> list[dict[str, Any]]:
+        """Returns tamper-evident audit entries (newest first, never storing raw PII)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM privacy_audit_ledger WHERE ts >= ? ORDER BY seq DESC LIMIT ?",
+                (float(since or 0.0), max(1, int(limit or 100))),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                cats = json.loads(r["categories_json"] or "{}")
+            except json.JSONDecodeError:
+                cats = {}
+            try:
+                meta = json.loads(r["stripped_metadata_json"] or "[]")
+            except json.JSONDecodeError:
+                meta = []
+            out.append({
+                "seq": int(r["seq"]),
+                "ts": float(r["ts"]),
+                "event_type": r["event_type"],
+                "harness": r["harness"],
+                "alias": r["alias"],
+                "policy": r["policy"],
+                "profile": r["profile"],
+                "entity_count": int(r["entity_count"]),
+                "categories": cats,
+                "stripped_metadata": meta,
+                "blocked_egress": bool(r["blocked_egress"]),
+                "prev_hash": r["prev_hash"],
+                "entry_hash": r["entry_hash"],
+            })
+        return out
+
+    def verify_audit_ledger(self) -> dict[str, Any]:
+        """Recomputes every SHA-256 chain link in `privacy_audit_ledger` to detect tampering."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM privacy_audit_ledger ORDER BY seq ASC").fetchall()
+        expected_prev = _GENESIS_AUDIT_HASH
+        blocked_cnt = 0
+        for r in rows:
+            if r["blocked_egress"]:
+                blocked_cnt += 1
+            if str(r["prev_hash"]) != expected_prev:
+                return {
+                    "ok": False,
+                    "total_entries": len(rows),
+                    "blocked_egress_count": blocked_cnt,
+                    "head_hash": str(rows[-1]["entry_hash"]) if rows else _GENESIS_AUDIT_HASH,
+                    "broken_at_seq": int(r["seq"]),
+                }
+            expected_hash = _compute_audit_entry_hash(
+                expected_prev,
+                float(r["ts"]),
+                str(r["event_type"]),
+                str(r["harness"]),
+                str(r["alias"]),
+                str(r["policy"]),
+                str(r["profile"]),
+                int(r["entity_count"]),
+                bool(r["blocked_egress"]),
+            )
+            if str(r["entry_hash"]) != expected_hash:
+                return {
+                    "ok": False,
+                    "total_entries": len(rows),
+                    "blocked_egress_count": blocked_cnt,
+                    "head_hash": str(rows[-1]["entry_hash"]) if rows else _GENESIS_AUDIT_HASH,
+                    "broken_at_seq": int(r["seq"]),
+                }
+            expected_prev = expected_hash
+        return {
+            "ok": True,
+            "total_entries": len(rows),
+            "blocked_egress_count": blocked_cnt,
+            "head_hash": expected_prev,
+            "broken_at_seq": None,
+        }
 
     @staticmethod
     def _normalize_tags(raw: Any) -> list[str]:
@@ -347,6 +512,17 @@ class PrivacyVault:
                 config=config,
             )
             self._write_brain_json()
+        self._append_audit_event(
+            "vault_ingest",
+            harness="vault",
+            alias=eff_alias,
+            policy=res["resolved_policy"],
+            profile=res["profile"],
+            entity_count=int(res["entity_count"]),
+            categories=res.get("entities_by_category") or {},
+            stripped_metadata=res.get("stripped_metadata") or [],
+            blocked_egress=bool(res["local_only"]),
+        )
         return {
             "alias": eff_alias,
             "uri": f"cortical://private/{eff_alias}",
@@ -589,6 +765,15 @@ class PrivacyVault:
         if not row:
             raise KeyError(f"Vault item not found: {alias}")
         if row["local_only"] and not allow_local_only:
+            self._append_audit_event(
+                "vault_read_blocked",
+                harness="mcp",
+                alias=row["alias"],
+                policy=row["resolved_policy"],
+                profile=row["profile"],
+                entity_count=int(row["entity_count"]),
+                blocked_egress=True,
+            )
             raise FailClosedError(
                 f"Vault item '{alias}' is marked max_security (local-only); cloud egress blocked. "
                 f"Process locally via cortical_local_offload(vault_alias='{alias}')."
@@ -597,11 +782,30 @@ class PrivacyVault:
         tier_text = self.brain.read_tier(row["alias"], eff_tier) if eff_tier not in {"max", "l4"} else None
         text_out = tier_text if tier_text is not None else row["sanitized_content"]
         if remote_egress and not allow_local_only:
-            if _verify_zero_residual_pii(str(text_out or ""), custom_terms):
+            residual = _verify_zero_residual_pii(str(text_out or ""), custom_terms)
+            if residual:
+                self._append_audit_event(
+                    "vault_read_blocked",
+                    harness="remote_mcp",
+                    alias=row["alias"],
+                    policy="fail_closed",
+                    profile=row["profile"],
+                    entity_count=len(residual),
+                    blocked_egress=True,
+                )
                 raise FailClosedError(
                     f"Remote orchestrator active: unmasked PII detected in '{alias}'; fail-closed remote egress blocked. "
                     f"Delegate locally via cortical_local_offload(vault_alias='{alias}')."
                 )
+        self._append_audit_event(
+            "vault_read_local" if allow_local_only else "vault_read_sanitized",
+            harness="local" if allow_local_only else "mcp",
+            alias=row["alias"],
+            policy=row["resolved_policy"],
+            profile=row["profile"],
+            entity_count=int(row["entity_count"]),
+            blocked_egress=False,
+        )
         return {
             "uri": f"cortical://private/{row['alias']}",
             "alias": row["alias"],
@@ -736,6 +940,8 @@ class PrivacyVault:
 
         ingested: list[dict[str, Any]] = []
         refs_text: list[str] = []
+        blocked_any = False
+        total_entities = 0
         for f in files:
             item = self.ingest(
                 f,
@@ -747,7 +953,9 @@ class PrivacyVault:
                 config=cfg,
             )
             ingested.append(item)
+            total_entities += int(item.get("entity_count") or 0)
             if item["local_only"] or (is_remote and _verify_zero_residual_pii(item["sanitized_preview"], eff_terms)):
+                blocked_any = True
                 refs_text.append(
                     f"[LOCAL-ONLY VAULT: @private:{item['alias']}] Blocked from remote orchestrator; "
                     f"delegate analysis locally via cortical_local_offload(vault_alias='{item['alias']}')."
@@ -755,6 +963,16 @@ class PrivacyVault:
             else:
                 tag = "ZERO-PII SANITIZED CONTEXT" if is_remote else "SANITIZED CONTEXT"
                 refs_text.append(f"[{tag}: @private:{item['alias']}]\n{item['sanitized_preview']}")
+
+        self._append_audit_event(
+            "intercept_pre_send",
+            harness=hid,
+            alias=",".join(i["alias"] for i in ingested)[:64],
+            policy=eff_policy,
+            profile=profile,
+            entity_count=total_entities + (1 if prompt_pii_masked else 0),
+            blocked_egress=bool(blocked_any or (is_remote and prompt_pii_masked)),
+        )
 
         return {
             "supported": True,

@@ -912,6 +912,7 @@ async function probeLocalRuntimes() {{
 function renderVault() {{
   const v = ST.snap.vault || {{}};
   const aliases = v.aliases || [];
+  const audit = v.audit_ledger || {{ ok: true, total_entries: 0, blocked_egress_count: 0, head_hash: '' }};
   const pct = Number(v.memory_budget_pct || 0);
   const barColor = pct > 90 ? 'var(--err)' : (pct > 70 ? 'var(--warn)' : 'var(--ok)');
 
@@ -922,8 +923,20 @@ function renderVault() {{
         <p>Inspect sanitized <code>@private:&lt;alias&gt;</code> entries, monitor the <code>&le; 15% num_ctx</code> memory budget, and audit 3-channel egress protection.</p>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn" onclick="copyText('cortical vault audit --verify', 'cortical vault audit --verify')">🔐 Verify Audit Ledger</button>
         <button class="btn" onclick="copyText('cortical watch', 'cortical watch')">👁 Copy Watch Queue CLI</button>
         <button class="btn primary" onclick="copyText('cortical ingest /path/to/file.pdf --policy auto --profile medium', 'cortical ingest')">📋 Copy Ingest CLI</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>🔐 Cryptographic SHA-256 Privacy &amp; Fail-Closed Egress Audit Ledger</h2>
+        <span class="pill ${{audit.ok !== false ? 'ok' : 'err'}}">${{audit.ok !== false ? '✓ Hash Chain Verified' : ('⚠ Tamper at seq #' + audit.broken_at_seq)}}</span>
+      </div>
+      <div class="hint">
+        Entries: <strong>${{audit.total_entries || 0}}</strong> · Blocked Remote Egress Events: <strong>${{audit.blocked_egress_count || 0}}</strong> ·
+        Head Hash: <code class="mono">${{esc(String(audit.head_hash || '').slice(0, 16) || 'genesis')}}</code> · Never stores raw PII.
       </div>
     </div>
 
@@ -1088,6 +1101,21 @@ function renderSettings() {{
             ${{err('max_context_window')}}
           </div>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>📦 Portable Zero-Secret Team Profile &amp; Offline Snapshot Diff</h2>
+          <button class="btn sm primary" onclick="exportPortableProfile()">⬇️ Export Portable Profile</button>
+        </div>
+        <div class="field">
+          <label for="s-prof-diff">Paste Peer <code>cortical-profile/v1</code> JSON to Compare Offline</label>
+          <textarea id="s-prof-diff" class="input mono" rows="3" placeholder='{{"schema":"cortical-profile/v1","hardware_tier":"tier_2_desktop","config_patch":{{"routing":{{"mode":"auto"}}}}}}'></textarea>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="btn sm" onclick="comparePortableProfile()">🔍 Compare Profile Diff</button>
+          <span class="hint">CLI: <code>cortical profile export team.json</code> · <code>cortical profile diff team.json</code> · <code>cortical profile import team.json --dry-run</code></span>
+        </div>
+        <pre id="s-prof-diff-out" class="code-pre" style="margin-top:8px;min-height:42px;">Paste a peer profile JSON above and click Compare Profile Diff.</pre>
       </div>`;
   }} else if (tab === 'routing') {{
     const rt = c.routing || {{}};
@@ -1286,6 +1314,42 @@ function renderPrivacySample() {{
     const p = (pv.crawl_folder || '~/Dropbox').replace(/"/g, '\\\\"');
     const tFlag = rawTerms.length ? ` --custom-terms "${{rawTerms.join(',').replace(/"/g, '\\\\"')}}"` : '';
     cmdEl.textContent = `cortical crawl "${{p}}" --sanitize --privacy-profile ${{prof}}${{tFlag}} --dry-run`;
+  }}
+}}
+
+function exportPortableProfile() {{
+  const c = deepClone(ST.draftCfg);
+  if (c.orchestrator && /^(?:sk-|AIza|gh[pous]_|AKIA|pplx-|xox)/i.test(String(c.orchestrator.api_key_env || ''))) {{
+    c.orchestrator.api_key_env = '';
+  }}
+  const bundle = {{
+    schema: 'cortical-profile/v1',
+    hardware_tier: ST.snap.hardware?.classification?.tier || 'portable',
+    config_patch: c,
+    custom_models: c.custom_models || [],
+  }};
+  downloadFile('cortical-profile.json', JSON.stringify(bundle, null, 2) + '\\n', 'application/json');
+  toast('ok', 'Exported secret-free cortical-profile.json');
+}}
+
+function comparePortableProfile() {{
+  const out = document.getElementById('s-prof-diff-out');
+  const raw = document.getElementById('s-prof-diff')?.value || '';
+  if (!out) return;
+  try {{
+    const peer = JSON.parse(raw);
+    const peerPatch = peer.config_patch || peer || {{}};
+    const cur = ST.draftCfg || {{}};
+    const keys = Array.from(new Set([...Object.keys(cur), ...Object.keys(peerPatch)])).sort();
+    const diffs = [];
+    for (const k of keys) {{
+      if (JSON.stringify(cur[k]) !== JSON.stringify(peerPatch[k])) {{
+        diffs.push(k + ': local=' + JSON.stringify(cur[k]) + ' vs peer=' + JSON.stringify(peerPatch[k]));
+      }}
+    }}
+    out.textContent = diffs.length ? diffs.join('\\n') : 'Identical portable configuration (0 section differences).';
+  }} catch (err) {{
+    out.textContent = 'Invalid JSON: ' + err.message;
   }}
 }}
 

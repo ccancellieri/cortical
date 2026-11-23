@@ -1,6 +1,6 @@
 # ADR-012: Upstream Ecosystem Hooks & High-Leverage OSS Contribution Contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-23
 - **GitHub Issue:** #38
 

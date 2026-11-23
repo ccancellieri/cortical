@@ -367,6 +367,27 @@ def _cmd_vault(args: argparse.Namespace) -> int:
         print(f"Deleted '{args.alias}': {removed}")
         return 0 if removed else 1
 
+    if action == "audit":
+        verify = vault.verify_audit_ledger()
+        entries = vault.get_audit_ledger(since=float(args.since or 0.0), limit=int(args.limit or 100))
+        payload = {"verify": verify, "entries": entries}
+        if args.json:
+            _print_json(payload)
+            return 0 if verify["ok"] else 2
+        status_lbl = "VERIFIED" if verify["ok"] else f"TAMPER DETECTED at seq={verify['broken_at_seq']}"
+        print(
+            f"Cortical Cryptographic Privacy Audit Ledger [{status_lbl}] · "
+            f"entries={verify['total_entries']} · blocked_egress={verify['blocked_egress_count']} · "
+            f"head={str(verify['head_hash'])[:16]}..."
+        )
+        for e in entries[:20]:
+            flag = "BLOCKED" if e["blocked_egress"] else "SAFE"
+            print(
+                f"  #{e['seq']:04d} [{flag}] {e['event_type']:20s} harness={e['harness']:10s} "
+                f"alias={e['alias'] or '-':18s} policy={e['policy']} masked={e['entity_count']} hash={e['entry_hash'][:12]}"
+            )
+        return 0 if verify["ok"] else 2
+
     return 1
 
 
@@ -882,6 +903,12 @@ def build_parser() -> argparse.ArgumentParser:
     v_del.add_argument("alias")
     v_del.add_argument("--db", default=None)
     v_del.add_argument("--json", action="store_true")
+    v_aud = vlt_sub.add_parser("audit", help="Verify tamper-evident SHA-256 privacy & fail-closed egress audit ledger")
+    v_aud.add_argument("--verify", action="store_true", help="Verify hash chain integrity")
+    v_aud.add_argument("--since", type=float, default=0.0, help="Filter events since epoch timestamp")
+    v_aud.add_argument("--limit", type=int, default=100, help="Maximum audit rows to return")
+    v_aud.add_argument("--db", default=None)
+    v_aud.add_argument("--json", action="store_true")
     vlt.set_defaults(func=_cmd_vault)
 
     ic = sub.add_parser("intercept", help="Channel 3 pre-send attachment interceptor for verified harnesses")
@@ -959,6 +986,22 @@ def build_parser() -> argparse.ArgumentParser:
     tl.add_argument("name", default="", nargs="?")
     tl.add_argument("--os", choices=["macos", "linux", "windows"], default=None)
     tl.set_defaults(func=_cmd_tools)
+
+    hk = sub.add_parser("hooks", help="Inspect or install native lifecycle hooks for claude-code, pi, opencode, dsh & litellm")
+    hk.add_argument("hooks_action", choices=["status", "install"], default="status", nargs="?")
+    hk.add_argument("--target", default=None, help="Comma-separated targets (claude-code,pi,opencode,dsh,litellm)")
+    hk.add_argument("--os", choices=["macos", "linux", "windows"], default=None)
+    hk.add_argument("--dry-run", action="store_true")
+    hk.add_argument("--json", action="store_true")
+    hk.set_defaults(func=_cmd_hooks)
+
+    prf = sub.add_parser("profile", help="Export, diff, or import portable secret-free Cortical profiles")
+    prf.add_argument("profile_action", choices=["export", "diff", "import"])
+    prf.add_argument("target", nargs="?", default=None, help="Profile JSON file path")
+    prf.add_argument("--os", choices=["macos", "linux", "windows"], default=None)
+    prf.add_argument("--dry-run", action="store_true")
+    prf.add_argument("--json", action="store_true")
+    prf.set_defaults(func=_cmd_profile)
 
     wch = sub.add_parser("watch", help="Process queued uploads with local models (no ports)")
     wch.add_argument("--once", action="store_true")
@@ -1306,6 +1349,86 @@ def _cmd_sanitize(args: argparse.Namespace) -> int:
     mode = "DRY-RUN" if args.dry_run else "WRITTEN"
     print(f"Cortical Sanitize [{mode} · {profile}]: {payload['files_sanitized']} sanitized -> {out_dir} | {total_entities} PII entities masked | {skipped_binary} binary skipped")
     return 0
+
+
+def _cmd_hooks(args: argparse.Namespace) -> int:
+    from .harnesses.hooks import HOOK_TARGETS, inspect_harness_hooks, install_harness_hooks
+
+    action = args.hooks_action
+    if action == "status":
+        data = inspect_harness_hooks(os_name=args.os)
+        if args.json:
+            _print_json({"targets": data})
+            return 0
+        for name, info in data.items():
+            st = "IN_SYNC" if info["in_sync"] else ("DRIFT" if info["installed"] else "NOT_INSTALLED")
+            print(f"  * {name:12s} [{st}] ({len(info['files'])} file(s))")
+        return 0
+
+    targets = [t.strip() for t in str(args.target).split(",") if t.strip()] if args.target else list(HOOK_TARGETS)
+    res = install_harness_hooks(targets, os_name=args.os, dry_run=bool(args.dry_run))
+    if args.json:
+        _print_json(res)
+        return 0
+    tag = "DRY-RUN" if res["dry_run"] else "INSTALLED"
+    print(f"Cortical Native Hooks [{tag}]: changed={res['changed_count']}")
+    for f in res["files"]:
+        print(f"  - [{f['action']:9s}] {f['target']:11s} -> {f['path']} ({f['detail']})")
+    return 0
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    from .profile import diff_profile_bundles, export_profile_bundle, import_profile_bundle, load_profile_bundle
+
+    act = args.profile_action
+    if act == "export":
+        cfg = load_cortical_config()
+        hw = probe_hardware(os_name=args.os, runners_probe=False)
+        bundle = export_profile_bundle(cfg, hw)
+        if args.target:
+            out_p = Path(args.target).expanduser()
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out_p.write_text(json.dumps(bundle, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            if args.json:
+                _print_json({"exported": True, "path": str(out_p), "bundle": bundle})
+            else:
+                print(f"Exported portable secret-free profile ({bundle['hardware_tier']}) -> {out_p}")
+            return 0
+        _print_json(bundle)
+        return 0
+
+    if act == "diff":
+        if not args.target:
+            print("Provide target profile JSON path: cortical profile diff <other.json>", file=sys.stderr)
+            return 2
+        cfg = load_cortical_config()
+        hw = probe_hardware(os_name=args.os, runners_probe=False)
+        cur = export_profile_bundle(cfg, hw)
+        other = load_profile_bundle(args.target)
+        delta = diff_profile_bundles(cur, other)
+        if args.json:
+            _print_json(delta)
+            return 0
+        print(
+            f"Profile Diff ({delta['tier_comparison']['left']} vs {delta['tier_comparison']['right']}): "
+            f"changed_keys={delta['changed_keys'] or ['none']}, "
+            f"added_models={len(delta['added_custom_models'])}, harness_deltas={list(delta['harness_deltas'].keys()) or ['none']}"
+        )
+        return 0
+
+    if act == "import":
+        if not args.target:
+            print("Provide profile JSON path: cortical profile import <file.json> [--dry-run]", file=sys.stderr)
+            return 2
+        res = import_profile_bundle(args.target, dry_run=bool(args.dry_run))
+        if args.json:
+            _print_json(res)
+            return 0
+        mode = "DRY-RUN" if res.get("dry_run") else f"APPLIED (backup={res.get('backup_id')})"
+        print(f"Cortical Profile Import [{mode}]: changed={res.get('changed_count')}")
+        return 0
+
+    return 1
 
 
 def _cmd_wiki_dashboard(args: argparse.Namespace) -> int:

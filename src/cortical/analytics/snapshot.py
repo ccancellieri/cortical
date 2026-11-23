@@ -337,6 +337,14 @@ def build_dashboard_snapshot(
     budget_tok = max(256, int(dyn_ctx * max_share))
     vault_aliases: list[dict[str, Any]] = []
     watch_queue = 0
+    audit_ledger: dict[str, Any] = {
+        "ok": True,
+        "total_entries": 0,
+        "blocked_egress_count": 0,
+        "head_hash": "0" * 64,
+        "broken_at_seq": None,
+        "recent": [],
+    }
     if not public_docs:
         try:
             from ..privacy.vault import PrivacyVault
@@ -345,6 +353,8 @@ def build_dashboard_snapshot(
             if vdb.is_file():
                 v = PrivacyVault(vdb)
                 watch_queue = len(v.pending_inbox())
+                ver = v.verify_audit_ledger()
+                audit_ledger = {**ver, "recent": v.get_audit_ledger(limit=5)}
                 for it in v.list_items(include_local_only=True):
                     vault_aliases.append({
                         "alias": it.get("alias", ""),
@@ -362,6 +372,16 @@ def build_dashboard_snapshot(
         except Exception:  # noqa: BLE001
             pass
     else:
+        audit_ledger = {
+            "ok": True,
+            "total_entries": 14,
+            "blocked_egress_count": 3,
+            "head_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "broken_at_seq": None,
+            "recent": [
+                {"seq": 14, "event_type": "vault_read_blocked", "harness": "remote_mcp", "alias": "demo_tax_statement", "policy": "fail_closed", "blocked_egress": True, "entity_count": 14},
+            ],
+        }
         vault_aliases = [
             {
                 "alias": "demo_architecture_brief",
@@ -477,6 +497,7 @@ def build_dashboard_snapshot(
             "memory_budget_pct": budget_pct,
             "max_context_share_pct": round(max_share * 100.0, 1),
             "aliases": vault_aliases,
+            "audit_ledger": audit_ledger,
             "channels": [
                 {"id": 1, "name": "Channel 1 — MCP Resource Egress", "status": "enforced", "detail": "cortical://private/<alias> blocks max_security from remote cloud MCP."},
                 {"id": 2, "name": "Channel 2 — Harness Sync Memory Block", "status": "enforced", "detail": f"Sanitized memory capped at <= {round(max_share*100)}% num_ctx ({budget_tok} tok)."},

@@ -213,8 +213,109 @@ def collect_pi_local_runs(
     return runs
 
 
+def _extract_multi_harness_usage(obj: dict[str, Any], harness: str, fallback_ts: float) -> Optional[dict[str, Any]]:
+    """Extracts local-model token counts from Claude Code, Codex, OpenCode, or dsh JSONL records."""
+    msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    usage = (
+        msg.get("usage")
+        or obj.get("usage")
+        or obj.get("tokens")
+        or info.get("last_token_usage")
+        or payload.get("usage")
+    )
+    if not isinstance(usage, dict):
+        return None
+
+    prov = str(obj.get("provider") or obj.get("providerID") or msg.get("provider") or payload.get("provider") or "").lower()
+    model = str(obj.get("model") or obj.get("modelID") or msg.get("model") or payload.get("model") or "")
+    low_m = model.lower()
+    local_alias = low_m in {"cortical-deep", "cortical-fast", "local-default", "cortical-vision"}
+    if not (prov in LOCAL_PROVIDERS or "ollama" in prov or "local" in prov or local_alias or low_m.startswith(LOCAL_MODEL_PREFIXES)):
+        return None
+
+    in_t = int(usage.get("input_tokens") or usage.get("input") or usage.get("prompt_tokens") or 0)
+    out_t = int(usage.get("output_tokens") or usage.get("output") or usage.get("completion_tokens") or 0)
+    tot_t = int(usage.get("total_tokens") or usage.get("totalTokens") or usage.get("total") or (in_t + out_t))
+    if tot_t <= 0:
+        return None
+
+    ts = _parse_ts_epoch(obj.get("timestamp") or msg.get("timestamp") or obj.get("created_at"), fallback=fallback_ts)
+    return {
+        "provider": f"{harness}:{prov or 'local'}",
+        "model": model or "local-model",
+        "input_tokens": in_t,
+        "output_tokens": out_t,
+        "total_tokens": tot_t,
+        "elapsed_sec": 0.0,
+        "finished_at": ts,
+    }
+
+
+def collect_multi_harness_local_runs(
+    home: Optional[Path] = None,
+    cache_path: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    """Collects local LLM token usage across claude-code, codex, opencode, and dsh JSONL logs using `(mtime_ns, size)` caching."""
+    h = Path(home) if home is not None else Path.home()
+    roots: tuple[tuple[str, Path, str], ...] = (
+        ("claude-code", h / ".claude" / "projects", "**/*.jsonl"),
+        ("codex", h / ".codex" / "sessions", "**/*.jsonl"),
+        ("opencode", h / ".local" / "share" / "opencode", "**/*.jsonl"),
+        ("dsh", h / ".dsh" / "logs", "*.jsonl"),
+    )
+    c_file = Path(cache_path or ".cortical_data/multi_harness_usage_cache.json")
+    use_disk_cache = home is None
+    try:
+        disk_cache: dict[str, Any] = json.loads(c_file.read_text(encoding="utf-8")) if (use_disk_cache and c_file.is_file()) else {}
+    except Exception:  # noqa: BLE001
+        disk_cache = {}
+
+    runs: list[dict[str, Any]] = []
+    cache_dirty = False
+    for harness, base_dir, pattern in roots:
+        if not base_dir.is_dir():
+            continue
+        for fp in sorted(base_dir.glob(pattern)):
+            try:
+                st = fp.stat()
+                sig = [int(st.st_mtime_ns), int(st.st_size)]
+                key = str(fp)
+                if use_disk_cache and disk_cache.get(key, {}).get("sig") == sig:
+                    file_runs = disk_cache[key]["runs"]
+                else:
+                    file_runs = []
+                    for raw_line in fp.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if not raw_line.strip():
+                            continue
+                        try:
+                            obj = json.loads(raw_line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(obj, dict):
+                            continue
+                        row = _extract_multi_harness_usage(obj, harness, float(st.st_mtime))
+                        if row is not None:
+                            file_runs.append(row)
+                    if use_disk_cache:
+                        disk_cache[key] = {"sig": sig, "runs": file_runs}
+                        cache_dirty = True
+                runs.extend(file_runs)
+            except OSError:
+                continue
+
+    if cache_dirty and use_disk_cache:
+        try:
+            c_file.parent.mkdir(parents=True, exist_ok=True)
+            c_file.write_text(json.dumps(disk_cache), encoding="utf-8")
+        except OSError:
+            pass
+    return runs
+
+
 def collect_local_runs(db_path: Path | str | None = None, window_sec: float = 1800.0) -> dict[str, Any]:
-    """Aggregates real local LLM `agent_runs` (+ `pi` local sessions when using default DB)."""
+    """Aggregates real local LLM `agent_runs` + `pi`, `claude-code`, `codex`, `opencode`, and `dsh` local sessions."""
     target = Path(db_path or os.environ.get("CORTICAL_TELEMETRY_DB") or DEFAULT_TELEMETRY_DB)
     real_rows: list[dict[str, Any]] = []
     if target.is_file():
@@ -225,6 +326,7 @@ def collect_local_runs(db_path: Path | str | None = None, window_sec: float = 18
     is_default_db = db_path is None or Path(db_path).expanduser().resolve() == DEFAULT_TELEMETRY_DB.expanduser().resolve()
     if is_default_db and not os.environ.get("CORTICAL_TELEMETRY_DB"):
         real_rows.extend(collect_pi_local_runs(window_sec=window_sec))
+        real_rows.extend(collect_multi_harness_local_runs())
 
     if not real_rows:
         return {"global": {"run_count": 0, "total_tokens": 0, "elapsed_sec": 0.0, "models": []}, "active_window": {"run_count": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "elapsed_sec": 0.0, "models": []}}

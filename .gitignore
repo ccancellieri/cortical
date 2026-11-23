@@ -18,7 +18,8 @@ wiki_maintenance_patch.json
 .mcp.json
 .pi/mcp.json
 .pi/hardware_profile.json
-.memory/
+.memory/*
+!.memory/decisions.md
 .agents/skills/learned-*/
 
 # Personal & unrelated third-party workspace skills (never publish upstream)

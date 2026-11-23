@@ -289,7 +289,8 @@ def compute_hardware_context_profile(
     metal_workset = vram if unified and vram > 0 else (round(tot * 0.70, 2) if unified else vram)
     os_reserve = max(3.5, round(tot * 0.27, 2))
     eff_budget = min(metal_workset, max(2.0, tot - os_reserve)) if unified else vram
-    kv_budget = round(max(0.4, eff_budget - weights - (0.65 if unified else 1.0)), 2)
+    gguf_arena = 0.65 if unified else 1.0
+    kv_budget = round(max(0.4, eff_budget - weights - gguf_arena), 2)
     return {
         "model_id": model_id,
         "native_ctx": native_ctx,
@@ -299,9 +300,11 @@ def compute_hardware_context_profile(
         "free_ram_gb": round(free_ram, 2),
         "vram_gb": round(vram, 2),
         "metal_workset_gb": round(metal_workset, 2),
+        "gguf_arena_overhead_gb": gguf_arena,
         "kv_budget_gb": kv_budget,
         "kv_tokens_per_gb": kv_density,
         "memory_pressure_level": pressure,
+        "zero_copy_safe": bool(auto_ctx >= 32768 and pressure < 4),
         "adaptive_timeout_sec": compute_adaptive_timeout(model_id, num_ctx=auto_ctx, is_remote=False),
     }
 

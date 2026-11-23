@@ -12,9 +12,9 @@ This directory is Cortical's in-repo Architecture Decision Record (ADR) index, s
 | [ADR-006](./ADR-006-dirty-state-settings-embedding-guardrail-and-async-crawl.md) | Dirty-State Settings Validation, Embedding Guardrail & Async Crawl | Opt-In `--serve` | Accepted | #11 |
 | [ADR-007](./ADR-007-workspace-autodiscovery-ide-integration-and-control-plane-ssot.md) | Zero-Friction Workspace Auto-Discovery, IDE Integration & Control Plane SSOT | Core DX / CLI | Accepted | #29 |
 | [ADR-008](./ADR-008-atomic-dashboard-plan-and-cortical-apply.md) | Atomic Dashboard Plan Bundle (`cortical-plan/v1`), `cortical apply` & Guided Service Repair | Canonical Default | Accepted | #30 |
-| [ADR-010](./ADR-010-composable-control-plane-wedge-and-capability-roadmap.md) | Composable Control Plane Wedge & Top 5 Capability Roadmap | Strategy / Architecture | Proposed | #36 |
+| [ADR-010](./ADR-010-composable-control-plane-wedge-and-capability-roadmap.md) | Composable Control Plane Wedge & Top 5 Capability Roadmap | Strategy / Architecture | Accepted | #36 |
 | [ADR-011](./ADR-011-mcp-2026-tool-annotations-output-schema-and-registry-standard.md) | MCP 2026 Tool Annotations, Output Schemas, 7-Tool Contract & Registry Metadata Standard | MCP / Protocols | Accepted | #37 |
-| [ADR-012](./ADR-012-upstream-ecosystem-hooks-and-contribution-contract.md) | Upstream Ecosystem Hooks & High-Leverage OSS Contribution Contract | Ecosystem / Upstream | Proposed | #38 |
+| [ADR-012](./ADR-012-upstream-ecosystem-hooks-and-contribution-contract.md) | Upstream Ecosystem Hooks & High-Leverage OSS Contribution Contract | Ecosystem / Upstream | Accepted | #38 |
 | [ADR-013](./ADR-013-hybrid-local-first-remote-orchestrator-architecture.md) | Hybrid Local-First + Remote Orchestrator Architecture & 8-Harness Mapping | Core / Harnesses | Accepted | #54 |
 | [ADR-014](./ADR-014-dynamic-hardware-ceiling-auto-ctx-and-adaptive-timeouts.md) | Dynamic Hardware-Ceiling Context Window (`auto_ctx`) & Adaptive Timeout Sizing | Hardware / Models | Accepted | #55 |
 | [ADR-015](./ADR-015-zero-leakage-remote-orchestrator-egress-defense.md) | Zero-Leakage Remote Orchestrator Egress Defense (`fail_closed` Vault + 3-Channel Isolation) | Privacy / Security | Accepted | #56 |
