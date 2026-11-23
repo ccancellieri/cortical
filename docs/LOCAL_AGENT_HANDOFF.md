@@ -23,7 +23,8 @@
   - `cortical-deep` -> `qwen3.8:27b-iq2_xxs` (`7.2 GB`, `32K` ctx) — slower deep reasoning.
   - `qwen2.5:1.5b` (`1.0 GB`) / `minicpm-ocr:latest` (`2.0 GB`) — router/NER & vision OCR.
 - **Strata Metal Runtime (`:8080/v1`, compiled from `main` `759ccf6c` at `~/.local/bin/strata-inkling-main`):**
-  - `Inkling-2-Mini SQ-10` (`10.47 GB` + `0.64 GB` Vision): `~/.local/bin/strata serve --profile ~/.local/share/strata/sq10-m2-local.json` (`8192` ctx, `10.94 GiB` alloc — keep other heavy apps closed to avoid 16 GB memory pressure).
+  - `Inkling-2-Mini SQ-10` (`10.47 GB` + `0.64 GB` Vision): `~/.local/bin/strata serve --profile ~/.local/share/strata/sq10-m2-local.json` (`8192` ctx, `10.94 GiB` alloc — keep other heavy apps closed to avoid 16 GB memory pressure; **best & only viable `Inkling-2-Mini` quant on 16 GB Apple Silicon**).
+  - *Negative finding (`UD-IQ2_XXS` GGUF):* Tested `8.09 GiB` GGUF — `strata-inkling` (`native_gguf=0`) transcodes GGUFs on Metal (`140.3s`) into a `15.00 GiB` arena (`TotalAlloc=15.80 GiB`), immediately OOMing 16 GB Metal (`kIOGPUCommandBufferCallbackErrorOutOfMemory`). Removed GGUF; keep `.strata` `SQ-10` for isolated Strata sessions and `qwen3.5:9b-q3_k_xl` (`5.1 GB`) / `qwen3.8:27b-iq2_xxs` (`7.2 GB`) on Ollama for everyday `pi` / `unsloth` multi-app coding loops.
   - *Note:* Prebuilt `strata-inkling 0.1.66` crashes `MTLCompilerService` on Apple M1/M2 (`#6608`/`#6720`). Use `~/.local/bin/strata-inkling-main` until `0.1.67` releases.
 
 ---
