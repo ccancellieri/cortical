@@ -13,5 +13,5 @@ This directory is Cortical's in-repo Architecture Decision Record (ADR) index, s
 | [ADR-007](./ADR-007-workspace-autodiscovery-ide-integration-and-control-plane-ssot.md) | Zero-Friction Workspace Auto-Discovery, IDE Integration & Control Plane SSOT | Core DX / CLI | Accepted | #29 |
 | [ADR-008](./ADR-008-atomic-dashboard-plan-and-cortical-apply.md) | Atomic Dashboard Plan Bundle (`cortical-plan/v1`), `cortical apply` & Guided Service Repair | Canonical Default | Accepted | #30 |
 | [ADR-010](./ADR-010-composable-control-plane-wedge-and-capability-roadmap.md) | Composable Control Plane Wedge & Top 5 Capability Roadmap | Strategy / Architecture | Proposed | #36 |
-| [ADR-011](./ADR-011-mcp-2026-tool-annotations-output-schema-and-registry-standard.md) | MCP 2026 Tool Annotations, Output Schemas, 7-Tool Contract & Registry Metadata Standard | MCP / Protocols | Proposed | #37 |
+| [ADR-011](./ADR-011-mcp-2026-tool-annotations-output-schema-and-registry-standard.md) | MCP 2026 Tool Annotations, Output Schemas, 7-Tool Contract & Registry Metadata Standard | MCP / Protocols | Accepted | #37 |
 | [ADR-012](./ADR-012-upstream-ecosystem-hooks-and-contribution-contract.md) | Upstream Ecosystem Hooks & High-Leverage OSS Contribution Contract | Ecosystem / Upstream | Proposed | #38 |

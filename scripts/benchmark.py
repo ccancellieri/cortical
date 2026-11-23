@@ -28,7 +28,7 @@ def format_markdown(report: dict) -> str:
         f"| Bilingual Technical PII Sanitizer | Naive Title-Case false positives | {p['technical_terms_preserved_pct']}% technical preserved | 100% PII masked · policy={p['resolved_policy']} |",
         f"| Tier 1A Hybrid (16GB + 4GB VRAM) | Static defaults | {h['tier_1a_hybrid_4gb_vram']['router_ner']} + {h['tier_1a_hybrid_4gb_vram']['daily_coder']} | Hybrid VRAM+RAM fit |",
         f"| Tier 1B Unified (16GB Unsloth 27B) | 4096 silent clip / OOM | {h['tier_1b_unified_16gb_27b']['deep_reasoner']} @ {h['tier_1b_unified_16gb_27b']['num_ctx_27b_4bit_xxs']} ctx | 8.1 GB variable-quant swap-free |",
-        f"| Lean MCP Surface | 12+ heavy daemon tools | {m['tool_count']} tools + Resources | {m['handshake_ingest_read_ms']} ms ingest+read |",
+        f"| Lean 7-Tool MCP Surface | 12+ heavy daemon tools | {m['tool_count']} tools + Resources | {m['handshake_ingest_read_ms']} ms ingest+read |",
     ]
     return "\n".join(lines)
 

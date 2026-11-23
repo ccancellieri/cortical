@@ -549,7 +549,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
         f"  - Tier 1B (16GB Unif): deep_reasoner={h['tier_1b_unified_16gb_27b']['deep_reasoner']} · "
         f"num_ctx={h['tier_1b_unified_16gb_27b']['num_ctx_27b_4bit_xxs']}"
     )
-    print(f"  - Lean 5-Tool MCP    : {m['tool_count']} tools · ingest+read handshake={m['handshake_ingest_read_ms']} ms")
+    print(f"  - Lean 7-Tool MCP    : {m['tool_count']} tools · ingest+read handshake={m['handshake_ingest_read_ms']} ms")
     return 0
 
 
@@ -621,7 +621,7 @@ def _cmd_roi(args: argparse.Namespace) -> int:
 
 
 def _cmd_integrate(args: argparse.Namespace) -> int:
-    """Auto-detects installed IDEs/agents or idempotently injects `cortical-wiki` MCP config with `.bak` backup."""
+    """Auto-detects installed IDEs/agents or idempotently injects `cortical-mcp` (or `--wiki` `cortical-wiki`) config with `.bak` backup."""
     proj = Path(args.project).resolve() if args.project else None
     if args.list or not args.target:
         items = detect_integrations(project_root=proj)
@@ -641,6 +641,7 @@ def _cmd_integrate(args: argparse.Namespace) -> int:
             args.target,
             scope=scope,
             server_name=args.server_name,
+            wiki_server=bool(getattr(args, "wiki", False)),
             project_root=proj,
             db_path=args.db,
             dry_run=bool(args.dry_run),
@@ -910,7 +911,8 @@ def build_parser() -> argparse.ArgumentParser:
     scope_grp.add_argument("--project", action="store_true", help="Write project-local config (default)")
     scope_grp.add_argument("--global", dest="global_scope", action="store_true", help="Write global user config")
     itg.add_argument("--list", action="store_true", help="List auto-detected IDE/agent integrations")
-    itg.add_argument("--server-name", default="cortical-wiki", help="MCP server key name (default: cortical-wiki)")
+    itg.add_argument("--server-name", default="cortical-mcp", help="MCP server key name (default: cortical-mcp)")
+    itg.add_argument("--wiki", action="store_true", help="Register the 5-tool cortical-wiki RAG server instead of core cortical-mcp")
     itg.add_argument("--project-dir", dest="project", default=None, help="Override project root directory")
     itg.add_argument("--db", default=None, help="Override SQLite DB path")
     itg.add_argument("--dry-run", action="store_true", help="Preview unified JSON diff without writing")

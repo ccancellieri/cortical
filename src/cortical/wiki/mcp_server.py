@@ -23,6 +23,13 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "wiki_search",
         "description": "Search indexed knowledge documents using SQLite FTS5 BM25 scoped by `principal_id`.",
+        "annotations": {
+            "title": "Search Multi-Tenant Wiki Knowledge",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -33,10 +40,23 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["query"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"results": {"type": "array", "items": {"type": "object"}}},
+            "required": ["results"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "wiki_navigate",
         "description": "Navigate registered knowledge files and Merkle hashes scoped by `principal_id`.",
+        "annotations": {
+            "title": "Navigate Merkle Knowledge Tree",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -46,10 +66,22 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "search_path": {"type": "string", "default": ""},
             },
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"files": {"type": "array", "items": {"type": "object"}}},
+            "additionalProperties": True,
+        },
     },
     {
         "name": "wiki_crawl_delta",
         "description": "Run deterministic Merkle-tree delta crawl (or full re-index) on registered roots.",
+        "annotations": {
+            "title": "Run Deterministic Merkle Delta Crawl",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -58,10 +90,26 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "full_reindex": {"type": "boolean", "default": False},
             },
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "added": {"type": "integer"},
+                "updated": {"type": "integer"},
+                "unchanged": {"type": "integer"},
+            },
+            "additionalProperties": True,
+        },
     },
     {
         "name": "wiki_record_episode",
         "description": "Record an episodic memory entry scoped by `principal_id`.",
+        "annotations": {
+            "title": "Record Episodic Memory",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -73,10 +121,22 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["title", "summary"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"episode_id": {"type": "string"}, "title": {"type": "string"}},
+            "additionalProperties": True,
+        },
     },
     {
         "name": "wiki_verify_citation",
         "description": "Verify a claim or quote against indexed documents accessible to `principal_id`.",
+        "annotations": {
+            "title": "Verify Grounded Wiki Citation",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -86,6 +146,11 @@ WIKI_TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "threshold": {"type": "number", "default": 0.45},
             },
             "required": ["claim"],
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"verified": {"type": "boolean"}, "score": {"type": "number"}},
+            "additionalProperties": True,
         },
     },
 ]
@@ -149,7 +214,7 @@ class WikiMCPServer:
                     "jsonrpc": "2.0",
                     "id": rid,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-06-18",
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "cortical-wiki", "version": "0.3.0"},
                     },
@@ -159,10 +224,15 @@ class WikiMCPServer:
             if method == "tools/call":
                 p = req.get("params") or {}
                 out = self._dispatch_tool(str(p.get("name") or ""), dict(p.get("arguments") or {}))
+                structured = out if isinstance(out, dict) else {"result": out}
                 return {
                     "jsonrpc": "2.0",
                     "id": rid,
-                    "result": {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]},
+                    "result": {
+                        "content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}],
+                        "structuredContent": structured,
+                        "isError": False,
+                    },
                 }
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
         except Exception as exc:  # noqa: BLE001

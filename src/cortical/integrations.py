@@ -110,16 +110,18 @@ def _build_mcp_entry(
     python_exe: str,
     src_dir: Path,
     db_path: Path,
+    module_name: str = "cortical.mcp_server",
 ) -> dict[str, Any]:
     env = {
         "PYTHONPATH": str(src_dir.resolve()),
         "CORTICAL_VAULT_DB": str(db_path.resolve()),
     }
+    args = ["-m", module_name] + (["--db", str(db_path.resolve())] if module_name == "cortical.wiki.mcp_server" else [])
     t = target.strip().lower()
     if t == "opencode":
         return {
             "type": "local",
-            "command": [python_exe, "-m", "cortical.mcp_server"],
+            "command": [python_exe, *args],
             "environment": env,
             "enabled": True,
         }
@@ -127,13 +129,13 @@ def _build_mcp_entry(
         return {
             "command": {
                 "path": python_exe,
-                "args": ["-m", "cortical.mcp_server"],
+                "args": args,
                 "env": env,
             }
         }
     entry: dict[str, Any] = {
         "command": python_exe,
-        "args": ["-m", "cortical.mcp_server"],
+        "args": args,
         "env": env,
     }
     if t == "vscode":
@@ -158,7 +160,8 @@ def integrate_target(
     target: str,
     *,
     scope: str = "project",
-    server_name: str = "cortical-wiki",
+    server_name: str = "cortical-mcp",
+    wiki_server: bool = False,
     project_root: Optional[Path] = None,
     home_dir: Optional[Path] = None,
     repo_root: Optional[Path] = None,
@@ -183,6 +186,8 @@ def integrate_target(
     eff_db = Path(db_path).expanduser().resolve() if db_path else resolve_default_db(None, start_dir=proj).resolve()
     py_exe = resolve_python_executable(code_root)
     src_dir = code_root / "src"
+    module_name = "cortical.wiki.mcp_server" if wiki_server else "cortical.mcp_server"
+    eff_server = "cortical-wiki" if (wiki_server and server_name == "cortical-mcp") else server_name
 
     old_text = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
     if old_text.strip():
@@ -198,7 +203,11 @@ def integrate_target(
     updated = copy.deepcopy(existing)
     container_key = _container_key_for_target(target)
     container = dict(updated.get(container_key) or {})
-    container[server_name] = _build_mcp_entry(target, python_exe=py_exe, src_dir=src_dir, db_path=eff_db)
+    if not wiki_server and eff_server == "cortical-mcp":
+        legacy = container.get("cortical-wiki")
+        if isinstance(legacy, dict) and "cortical.mcp_server" in json.dumps(legacy):
+            container.pop("cortical-wiki", None)
+    container[eff_server] = _build_mcp_entry(target, python_exe=py_exe, src_dir=src_dir, db_path=eff_db, module_name=module_name)
     updated[container_key] = container
     new_text = json.dumps(updated, indent=2, ensure_ascii=False) + "\n"
 
@@ -225,7 +234,7 @@ def integrate_target(
         "ok": True,
         "target": target.lower(),
         "scope": eff_scope,
-        "server_name": server_name,
+        "server_name": eff_server,
         "path": str(cfg_path),
         "backup_path": backup_path,
         "changed": changed,

@@ -1,6 +1,6 @@
 # ADR-011: MCP 2026 Tool Annotations, Output Schemas, 7-Tool Contract & Registry Metadata Standard
 
-- **Status:** Proposed
+- **Status:** Accepted (Implemented in v0.3.0; resolves #32, #33, #34, #35, #37, #39)
 - **Date:** 2026-11-23
 - **GitHub Issue:** #37
 

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ccancellieri/cortical",
+  "title": "Cortical MCP — Privacy Vault, TOON Compression & Local Control Plane",
+  "description": "Zero-server, zero-dependency Python 3.10+ stdlib MCP server providing a fail_closed Privacy Vault, deterministic lossless TOON compression, hardware preflight, zero-token ROI reporting, and cross-harness handoff.",
+  "version": "0.3.0",
+  "repository": {
+    "url": "https://github.com/ccancellieri/cortical",
+    "source": "github"
+  },
+  "websiteUrl": "https://ccancellieri.github.io/cortical/",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "cortical-agent",
+      "version": "0.3.0",
+      "runtimeHint": "python3",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:9122/mcp"
+    }
+  ]
+}

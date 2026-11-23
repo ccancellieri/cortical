@@ -1,8 +1,9 @@
-"""Lean 5-tool MCP Server (`stdio`) exposing Cortical Privacy Vault, TOON Compressor, Doctor & Local Offload."""
+"""Lean 7-tool MCP Server (`stdio` default, optional `--transport streamable-http`) for Cortical Control Plane."""
 
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import os
 import sys
@@ -22,6 +23,13 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "cortical_vault_read",
         "description": "Read a Vault item by `alias` OR all items matching a `task_tag` at 3+1 depth (`light`, `medium`, `high`, `max`; blocks max_security from cloud).",
+        "annotations": {
+            "title": "Read Sanitized Privacy Vault Context",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -31,10 +39,34 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": [],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "alias": {"type": "string"},
+                "tier": {"type": "string"},
+                "resolved_policy": {"type": "string"},
+                "profile": {"type": "string"},
+                "format_used": {"type": "string"},
+                "tokens_est": {"type": "integer"},
+                "text": {"type": "string"},
+                "task_tag": {"type": "string"},
+                "count": {"type": "integer"},
+                "documents": {"type": "array", "items": {"type": "object"}},
+            },
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_ingest_private",
         "description": "Ingest a local file or text into Privacy Vault with dynamic `auto` | `fail_closed` | `fail_open` classification.",
+        "annotations": {
+            "title": "Ingest & Sanitize Private Context",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -46,10 +78,32 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["path_or_text"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "alias": {"type": "string"},
+                "uri": {"type": "string"},
+                "resolved_policy": {"type": "string"},
+                "profile": {"type": "string"},
+                "local_only": {"type": "boolean"},
+                "entity_count": {"type": "integer"},
+                "tokens_est": {"type": "integer"},
+                "saving_pct": {"type": "number"},
+            },
+            "required": ["alias", "uri", "resolved_policy", "local_only"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_compress",
         "description": "Deterministically compress JSON (to lossless TOON with compact fallback), XML, or verbose logs.",
+        "annotations": {
+            "title": "Deterministic Lossless TOON Compression",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -58,15 +112,52 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["text"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "compressed": {"type": "string"},
+                "format_used": {"type": "string"},
+                "raw_tokens_est": {"type": "integer"},
+                "compressed_tokens_est": {"type": "integer"},
+                "saving_pct": {"type": "number"},
+            },
+            "required": ["compressed", "format_used"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_doctor_status",
         "description": "Inspect machine hardware tier (incl. 4GB VRAM Hybrid & 16GB Unified 27B), installed local models, and composed OSS tools.",
+        "annotations": {
+            "title": "Hardware Preflight & Tool Diagnostics",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "hardware": {"type": "object"},
+                "models": {"type": "object"},
+                "composers": {"type": "object"},
+                "routing": {"type": "object"},
+            },
+            "required": ["hardware", "models", "composers", "routing"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_local_offload",
         "description": "Delegate summarization/analysis/review to configured local Ollama/Unsloth model (0 cloud tokens).",
+        "annotations": {
+            "title": "Zero-Cloud-Token Local LLM Offload",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -76,10 +167,28 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["prompt"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "completed_locally": {"type": "boolean"},
+                "model_used": {"type": "string"},
+                "elapsed_sec": {"type": "number"},
+                "response": {"type": "string"},
+            },
+            "required": ["completed_locally", "model_used", "response"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_roi_report",
         "description": "Compute local vs cloud token usage, USD savings, and remaining cloud budget (0 cloud tokens).",
+        "annotations": {
+            "title": "Zero-Token ROI & Cloud Budget Report",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -87,10 +196,31 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "include_local_summary": {"type": "boolean", "default": False},
             },
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "markdown": {"type": "string"},
+                "local_note": {"type": "string"},
+                "effective_mode": {"type": "string"},
+                "enforce_cloud_budget": {"type": "boolean"},
+                "cloud_remaining_tokens": {"type": "integer"},
+                "cloud_token_threshold": {"type": "integer"},
+                "handoff_recommended": {"type": "boolean"},
+            },
+            "required": ["markdown", "effective_mode", "cloud_remaining_tokens"],
+            "additionalProperties": True,
+        },
     },
     {
         "name": "cortical_handoff",
         "description": "Save or load shared working context (goal, modified files, decisions, next_step) across Antigravity, pi, OpenCode, Claude Code & Codex.",
+        "annotations": {
+            "title": "Cross-Harness Working Context Handoff",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -103,12 +233,22 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             },
             "required": ["action"],
         },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "saved": {"type": "boolean"},
+                "found": {"type": "boolean"},
+                "path": {"type": "string"},
+                "handoff": {"type": ["object", "null"]},
+            },
+            "additionalProperties": True,
+        },
     },
 ]
 
 
 class CorticalMCPServer:
-    """Thin 5-tool JSON-RPC 2.0 MCP server + native `resources` & `prompts`."""
+    """Lean 7-tool JSON-RPC 2.0 MCP server + native `resources`, `prompts` & `completions`."""
 
     def __init__(self, vault_db: Path | str | None = None) -> None:
         self.vault = PrivacyVault(vault_db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB)
@@ -261,7 +401,7 @@ class CorticalMCPServer:
         try:
             if method == "initialize":
                 result: Any = {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "completions": {}},
                     "serverInfo": {"name": "cortical-mcp", "version": "0.3.0"},
                 }
@@ -271,7 +411,12 @@ class CorticalMCPServer:
                 tname = str(params.get("name") or "")
                 targs = params.get("arguments") or {}
                 out = self._dispatch_tool(tname, targs)
-                result = {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=2)}], "isError": False}
+                structured = out if isinstance(out, dict) else {"result": out}
+                result = {
+                    "content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False, indent=2)}],
+                    "structuredContent": structured,
+                    "isError": False,
+                }
             elif method == "resources/list":
                 res = self.vault.list_resources(include_local_only=False)
                 res.append({"uri": "cortical://brain", "name": "cortical-brain", "description": "Factorized 3+1 Local Brain (concepts, tasks, skills)", "mimeType": "application/json"})
@@ -314,11 +459,88 @@ class CorticalMCPServer:
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(exc)}}
 
 
+def create_streamable_http_server(
+    mcp_server: CorticalMCPServer,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 9122,
+) -> http.server.ThreadingHTTPServer:
+    """Creates an opt-in stdlib Streamable HTTP JSON-RPC server (`/mcp`, `/health`)."""
+
+    class _MCPHttpHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+        def _send_json(self, status: int, payload: Any) -> None:
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            if self.path.split("?", 1)[0] in {"/health", "/mcp", "/"}:
+                self._send_json(200, {"ok": True, "name": "cortical-mcp", "version": "0.3.0", "transport": "streamable-http"})
+                return
+            self._send_json(404, {"error": "Not found"})
+
+        def do_POST(self) -> None:
+            if self.path.split("?", 1)[0] not in {"/mcp", "/"}:
+                self._send_json(404, {"error": "Not found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode("utf-8")
+                req = json.loads(body) if body.strip() else {}
+            except Exception:  # noqa: BLE001
+                self._send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+                return
+
+            if isinstance(req, list):
+                resps = [r for r in (mcp_server.handle_request(item) for item in req if isinstance(item, dict)) if r is not None]
+                if not resps:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                self._send_json(200, resps)
+                return
+
+            if not isinstance(req, dict):
+                self._send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
+                return
+            resp = mcp_server.handle_request(req)
+            if resp is None:
+                self.send_response(202)
+                self.end_headers()
+                return
+            self._send_json(200, resp)
+
+    return http.server.ThreadingHTTPServer((host, port), _MCPHttpHandler)
+
+
+def serve_streamable_http(mcp_server: CorticalMCPServer, host: str = "127.0.0.1", port: int = 9122) -> None:
+    """Runs the opt-in foreground Streamable HTTP MCP server until interrupted."""
+    httpd = create_streamable_http_server(mcp_server, host=host, port=port)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Cortical Lean MCP Server (stdio)")
+    parser = argparse.ArgumentParser(description="Cortical Lean 7-Tool MCP Server (stdio or streamable-http)")
     parser.add_argument("--vault-db", default=None, help="Path to Cortical Privacy Vault SQLite DB")
+    parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=9122)
     args, _ = parser.parse_known_args(argv)
     server = CorticalMCPServer(vault_db=args.vault_db)
+    if args.transport == "streamable-http":
+        serve_streamable_http(server, host=args.host, port=args.port)
+        return 0
     for raw_line in sys.stdin:
         ln = raw_line.strip()
         if not ln:

@@ -43,20 +43,27 @@ class TestCorticalIntegrations(unittest.TestCase):
 
             cursor_cfg = proj / ".cursor" / "mcp.json"
             cursor_cfg.parent.mkdir(parents=True)
-            original = {"mcpServers": {"other-tool": {"command": "echo", "args": ["hi"]}}, "customKey": 42}
+            original = {
+                "mcpServers": {
+                    "other-tool": {"command": "echo", "args": ["hi"]},
+                    "cortical-wiki": {"command": "python3", "args": ["-m", "cortical.mcp_server"]},
+                },
+                "customKey": 42,
+            }
             cursor_cfg.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
 
             # 1. Dry-run shows diff without touching disk
             dry = integrate_target("cursor", scope="project", project_root=proj, home_dir=home, dry_run=True)
             self.assertTrue(dry["ok"])
             self.assertTrue(dry["changed"])
-            self.assertIn("cortical-wiki", dry["diff"])
+            self.assertIn("cortical-mcp", dry["diff"])
             self.assertFalse(cursor_cfg.with_name("mcp.json.bak").exists())
 
-            # 2. Apply creates .bak and preserves existing keys
+            # 2. Apply creates .bak, preserves existing keys, and cleans legacy cortical-wiki pointing to mcp_server
             applied = integrate_target("cursor", scope="project", project_root=proj, home_dir=home, dry_run=False)
             self.assertTrue(applied["ok"])
             self.assertTrue(applied["changed"])
+            self.assertEqual(applied["server_name"], "cortical-mcp")
             bak = Path(applied["backup_path"])
             self.assertTrue(bak.is_file())
             self.assertEqual(json.loads(bak.read_text(encoding="utf-8")), original)
@@ -64,8 +71,9 @@ class TestCorticalIntegrations(unittest.TestCase):
             merged = json.loads(cursor_cfg.read_text(encoding="utf-8"))
             self.assertEqual(merged["customKey"], 42)
             self.assertIn("other-tool", merged["mcpServers"])
-            self.assertIn("cortical-wiki", merged["mcpServers"])
-            cw = merged["mcpServers"]["cortical-wiki"]
+            self.assertNotIn("cortical-wiki", merged["mcpServers"])
+            self.assertIn("cortical-mcp", merged["mcpServers"])
+            cw = merged["mcpServers"]["cortical-mcp"]
             self.assertEqual(cw["args"], ["-m", "cortical.mcp_server"])
             self.assertTrue(cw["env"]["CORTICAL_VAULT_DB"].endswith(".cortical/wiki.db"))
 
@@ -83,15 +91,29 @@ class TestCorticalIntegrations(unittest.TestCase):
 
             r_vs = integrate_target("vscode", scope="project", project_root=proj, home_dir=home)
             vs_data = json.loads(Path(r_vs["path"]).read_text(encoding="utf-8"))
-            self.assertEqual(vs_data["servers"]["cortical-wiki"]["type"], "stdio")
+            self.assertEqual(vs_data["servers"]["cortical-mcp"]["type"], "stdio")
 
             r_oc = integrate_target("opencode", scope="project", project_root=proj, home_dir=home)
             oc_data = json.loads(Path(r_oc["path"]).read_text(encoding="utf-8"))
-            self.assertEqual(oc_data["mcp"]["cortical-wiki"]["type"], "local")
+            self.assertEqual(oc_data["mcp"]["cortical-mcp"]["type"], "local")
+
+            r_oc_wiki = integrate_target("opencode", scope="project", wiki_server=True, project_root=proj, home_dir=home)
+            oc_wiki_data = json.loads(Path(r_oc_wiki["path"]).read_text(encoding="utf-8"))
+            self.assertIn("cortical.wiki.mcp_server", oc_wiki_data["mcp"]["cortical-wiki"]["command"])
 
             r_zed = integrate_target("zed", scope="project", project_root=proj, home_dir=home)
             zed_data = json.loads(Path(r_zed["path"]).read_text(encoding="utf-8"))
-            self.assertIn("path", zed_data["context_servers"]["cortical-wiki"]["command"])
+            self.assertIn("path", zed_data["context_servers"]["cortical-mcp"]["command"])
+
+            # Verify repo-root opencode.json, server.json, and glama.json manifests
+            repo_root = Path(__file__).resolve().parents[1]
+            root_oc = json.loads((repo_root / "opencode.json").read_text(encoding="utf-8"))
+            self.assertEqual(root_oc["mcp"]["cortical-mcp"]["type"], "local")
+            srv_json = json.loads((repo_root / "server.json").read_text(encoding="utf-8"))
+            self.assertEqual(srv_json["version"], "0.3.0")
+            glama = json.loads((repo_root / "glama.json").read_text(encoding="utf-8"))
+            self.assertEqual(glama["version"], "0.3.0")
+            self.assertEqual(len(glama["tools"]), 7)
 
     def test_mcp_stdio_initialize_ping_and_doctor_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

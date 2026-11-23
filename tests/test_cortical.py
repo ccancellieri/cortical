@@ -861,6 +861,66 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
             cfg = read_workspace_config(proj / ".cortical")
             self.assertEqual(cfg["db_path"], ".cortical/wiki.db")
 
+    def test_21_mcp_2026_annotations_output_schema_and_streamable_http(self) -> None:
+        import threading
+        import urllib.request
+        from cortical.mcp_server import TOOLS_SCHEMA, create_streamable_http_server
+        from cortical.wiki.mcp_server import WIKI_TOOLS_SCHEMA
+
+        self.assertEqual(len(TOOLS_SCHEMA), 7)
+        self.assertEqual(len(WIKI_TOOLS_SCHEMA), 5)
+        for schema in (*TOOLS_SCHEMA, *WIKI_TOOLS_SCHEMA):
+            ann = schema.get("annotations") or {}
+            for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                self.assertIn(hint, ann)
+                self.assertIsInstance(ann[hint], bool)
+            out_s = schema.get("outputSchema") or {}
+            self.assertEqual(out_s.get("type"), "object")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = CorticalMCPServer(vault_db=Path(tmp) / "vault.db")
+            call_r = srv.handle_request({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "cortical_compress", "arguments": {"text": json.dumps([{"a": 1, "b": 2}, {"a": 3, "b": 4}, {"a": 5, "b": 6}, {"a": 7, "b": 8}])}},
+            })
+            self.assertIsInstance(call_r["result"]["structuredContent"], dict)
+            self.assertIn("compressed", call_r["result"]["structuredContent"])
+
+            httpd = create_streamable_http_server(srv, host="127.0.0.1", port=0)
+            port = httpd.server_address[1]
+            th = threading.Thread(target=httpd.serve_forever, daemon=True)
+            th.start()
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                    h_data = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(h_data["transport"], "streamable-http")
+
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/mcp",
+                    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    self.assertEqual(resp.status, 200)
+                    t_data = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(len(t_data["result"]["tools"]), 7)
+
+                notif_req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/mcp",
+                    data=json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(notif_req, timeout=3.0) as resp:
+                    self.assertEqual(resp.status, 202)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,7 +53,7 @@ def run_comparative_benchmark() -> dict[str, Any]:
 
     ctx_27b_16g = compute_dynamic_num_ctx(32768, "qwen3.8:27b-q4_xxs", ram_available_gb=11.0, unified_memory=True, model_ram_gb=8.1)
 
-    # 4. Lean 5-tool MCP handshake & vault ingest/read latency
+    # 4. Lean 7-tool MCP handshake & vault ingest/read latency
     with tempfile.TemporaryDirectory() as tmp:
         srv = CorticalMCPServer(vault_db=Path(tmp) / "vault.db")
         t0 = time.perf_counter()
