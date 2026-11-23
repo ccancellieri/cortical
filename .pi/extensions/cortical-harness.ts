@@ -77,6 +77,30 @@ export default function corticalHarness(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("reconcile", {
+    description: "Check SSOT drift across models, LiteLLM router, services & harnesses (--dry-run)",
+    handler: async (_args, ctx) => {
+      const res = invokeCorticalJSON(["reconcile", "--dry-run", "--json"]);
+      ctx.ui?.notify?.(`in_sync=${String(res.in_sync)} drift=${String(res.drift_count)}`, res.in_sync ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("handoff", {
+    description: "Read active cross-harness Cortical handoff snapshot (~/Documents/Cortical/brain/handoff.json)",
+    handler: async (_args, ctx) => {
+      const { pythonBin, pythonPath } = resolveCorticalRuntime();
+      const out = execFileSync(
+        pythonBin,
+        [
+          "-c",
+          "import json; from cortical.mcp_server import CorticalMCPServer; print(json.dumps(CorticalMCPServer()._dispatch_tool('cortical_handoff', {'action': 'load'}), indent=2))",
+        ],
+        { encoding: "utf-8", env: { ...process.env, PYTHONPATH: pythonPath }, timeout: 10000 }
+      );
+      ctx.ui?.notify?.(out.slice(0, 1200), "info");
+    },
+  });
+
   // Channel 3: Intercept local file attachments on prompts before dispatch to remote LLMs
   pi.on("before_agent_start", async (event, ctx) => {
     const prompt = String((event as { prompt?: string }).prompt || "");
@@ -86,19 +110,23 @@ export default function corticalHarness(pi: ExtensionAPI) {
 
     if (attachedPaths.length === 0) return;
 
-    const cliArgs = ["intercept", "--harness", "pi", "--prompt", prompt];
-    for (const f of attachedPaths) cliArgs.push("--file", f);
+    try {
+      const cliArgs = ["intercept", "--harness", "pi", "--prompt", prompt];
+      for (const f of attachedPaths) cliArgs.push("--file", f);
 
-    const res = invokeCorticalJSON(cliArgs);
-    if (res.requires_approval && ctx.ui?.confirm) {
-      const aliases = ((res.vault_aliases as string[]) || []).join(", ");
-      const ok = await ctx.ui.confirm("Cortical Privacy Vault", `Send sanitized context for @private:${aliases}?`);
-      if (!ok) {
-        return { cancel: true };
+      const res = invokeCorticalJSON(cliArgs);
+      if (res.requires_approval && ctx.ui?.confirm) {
+        const aliases = ((res.vault_aliases as string[]) || []).join(", ");
+        const ok = await ctx.ui.confirm("Cortical Privacy Vault", `Send sanitized context for @private:${aliases}?`);
+        if (!ok) {
+          return { cancel: true };
+        }
       }
-    }
-    if (typeof res.proposed_remote_prompt === "string" && res.proposed_remote_prompt.trim()) {
-      return { prompt: res.proposed_remote_prompt };
+      if (typeof res.proposed_remote_prompt === "string" && res.proposed_remote_prompt.trim()) {
+        return { prompt: res.proposed_remote_prompt };
+      }
+    } catch (err) {
+      ctx.ui?.notify?.(`Cortical intercept warning: ${String(err).slice(0, 180)}`, "warning");
     }
   });
 }

@@ -9,12 +9,12 @@
 - **Live Documentation & Browser Configurator:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/) · [`settings.html`](https://ccancellieri.github.io/cortical/settings.html)
 - **Platforms:** `macOS` (Apple Silicon Metal), `Linux` (CUDA / Vulkan / CPU), `Windows` (MSVC / NVIDIA / WMIC-PowerShell)
 - **Zero External Runtime Dependencies:** `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only)
-- **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` or HTTP router integration
-- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; redesigned architecture (`~4.2K` Python LOC across 6 packages) reduces codebase surface by **~86.9%** while composing best-of-breed OSS tools.
+- **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` (`--transport streamable-http`), opt-in `--serve` dashboard, or HTTP router integration
+- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; modular v0.3.0 architecture spans **7 Python subpackages** (`hardware`, `harnesses`, `composers`, `privacy`, `compression`, `analytics`, `wiki` + CLI/control-plane modules) composing best-of-breed OSS tools.
 
 ---
 
-## Core Architecture (6 Packages + Lean 5-Tool MCP)
+## Core Architecture (7 Subpackages + Lean 7-Tool MCP)
 
 Cortical composes best-of-breed OSS tools (`Serena` LSP, `RTK` shell compressor, `PinchTab` / `Playwright` accessibility browser, `context-mode` output sandbox, optional `LiteLLM` / `OmniRoute` / `claude-code-router`) and handles the four gaps OSS leaves open:
 
@@ -32,10 +32,10 @@ Cortical composes best-of-breed OSS tools (`Serena` LSP, `RTK` shell compressor,
    - **Channel 3 (`cortical intercept`):** Deterministic pre-send attachment interception strictly on 100%-verified harnesses (`pi`, `claude-code`, `opencode`, `openclaw`, `codex`, `dsh`).
 4. **Deterministic Lossless Compression (`src/cortical/compression/`):**
    - Native pure-Python lossless `TOON` encoder/decoder with deterministic round-trip fidelity, ANSI/log compaction, XML/YAML whitespace normalization, and an automatic `>= 10%` saving guard vs compact JSON.
-5. **Lean 5-Tool MCP Server (`src/cortical/mcp_server.py`):**
-   - Minimal surface (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`) + native MCP `resources` & `prompts`.
+5. **Lean 7-Tool MCP Server (`src/cortical/mcp_server.py`):**
+   - Minimal surface (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`, `cortical_roi_report`, `cortical_handoff`) with MCP `annotations`, `outputSchema`, `structuredContent`, native `resources`, `prompts` & `completions`, plus opt-in 5-tool `cortical-wiki` RAG MCP (`src/cortical/wiki/mcp_server.py`).
 6. **Zero-Token Analytics, Auto-Tuner & Comparative Benchmark (`src/cortical/analytics/`):**
-   - Offline ROI reporting (`cortical roi`), local Auto-Tuner (`cortical tune`), static zero-server dashboard (`cortical dashboard`), and reproducible comparative benchmarks (`cortical bench --compare`).
+   - Offline ROI reporting (`cortical roi`), local Auto-Tuner (`cortical tune`), static zero-server dashboard (`cortical dashboard`), Wiki audit explorer (`cortical wiki-dashboard`), and reproducible comparative benchmarks (`cortical bench --compare`).
 
 ---
 
@@ -49,7 +49,7 @@ Measured offline with `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --c
 | **Privacy Sanitizer Precision** | Naive Title-Case false positives | `100.0%` technical prose preserved | **`100%` PII masked · `policy=fail_closed`** |
 | **Tier 1A Hybrid (`16 GB + 4 GB VRAM`)** | Static defaults / OOM risk | `qwen2.5:3b` (VRAM) + `qwen3.5:9b-q3_k_xl` | **Swap-free hybrid fit** |
 | **Tier 1B Unified (`16 GB` + `27B 4-bit XXS`)** | `4096` silent Ollama clipping | `qwen3.8:27b-q4_xxs` (`8.1 GB`) @ `32,768` ctx | **Variable quant deep reasoner** |
-| **Lean MCP Tool Surface** | Heavy server + 12+ tools | `5` tools + native Resources & Prompts | **`~1.1–1.9 ms` ingest+read handshake** |
+| **Lean MCP Tool Surface** | Heavy server + 12+ tools | `7` tools + native Resources & Prompts | **`~1–4 ms` ingest+read handshake** |
 
 ---
 
@@ -96,30 +96,44 @@ See [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) for all 8 harnesses (`antigra
 
 ---
 
-## Daily CLI Commands & Verification
+## Daily CLI Commands & Verification (25 Subcommands)
 
 ```bash
-# One-shot cross-platform setup: creates ~/Documents/Cortical, links detected harnesses & opens static UI
+# Zero-friction workspace init, IDE MCP integration & one-shot setup
+PYTHONPATH=src .venv/bin/python -m cortical.cli init -y
+PYTHONPATH=src .venv/bin/python -m cortical.cli integrate --list
+PYTHONPATH=src .venv/bin/python -m cortical.cli integrate cursor --dry-run
 PYTHONPATH=src .venv/bin/python -m cortical.cli setup
+
+# Drift reconciliation, dashboard apply bundles, composed tools & optional HTTP router
+PYTHONPATH=src .venv/bin/python -m cortical.cli reconcile --dry-run --json
+PYTHONPATH=src .venv/bin/python -m cortical.cli apply --from-clipboard --dry-run
+PYTHONPATH=src .venv/bin/python -m cortical.cli tools status
+PYTHONPATH=src .venv/bin/python -m cortical.cli router status
 
 # Process queued local NER / vision (e.g. qwen2.5vl:3b) anonymization jobs (zero open ports)
 PYTHONPATH=src .venv/bin/python -m cortical.cli watch
 
-# Or export static UI manually (`html/settings.html`) & manage Privacy Vault via CLI
+# Static dashboards (settings, help, wiki-dashboard) & Privacy Vault / Sanitized Crawl
 PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html --open
+PYTHONPATH=src .venv/bin/python -m cortical.cli cortical --open
+PYTHONPATH=src .venv/bin/python -m cortical.cli wiki-dashboard --open
 PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./brief.pdf --alias client_brief --policy auto --profile medium
+PYTHONPATH=src .venv/bin/python -m cortical.cli crawl ./docs --sanitize --dry-run
+PYTHONPATH=src .venv/bin/python -m cortical.cli sanitize ./docs --recursive --output-dir ./docs_sanitized
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault list
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault show client_brief --local-ok
 PYTHONPATH=src .venv/bin/python -m cortical.cli vault update client_brief --custom-term "Client Name" --profile medium
+PYTHONPATH=src .venv/bin/python -m cortical.cli intercept --harness pi --prompt "Check @brief.pdf" --file ./brief.pdf
 
-# Lossless TOON / XML / YAML / log compression
+# Lossless TOON / XML / YAML / log compression, Streamable HTTP MCP & Chrome helper
 PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json
+PYTHONPATH=src .venv/bin/python -m cortical.cli serve-mcp cortical --port 9122 --dry-run
+PYTHONPATH=src .venv/bin/python -m cortical.cli browser status
 
-# Run local Auto-Tuner & ROI report (0 cloud tokens)
+# Run local Auto-Tuner, ROI report, offline benchmark & full unit test suite
 PYTHONPATH=src .venv/bin/python -m cortical.cli tune --apply
 PYTHONPATH=src .venv/bin/python -m cortical.cli roi
-
-# Run offline benchmark & full unit test suite
 PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q
 ```

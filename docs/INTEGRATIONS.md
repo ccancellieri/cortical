@@ -33,7 +33,7 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli sync --rollback <backup_id>
 
 ---
 
-## 2. Standard 5-Tool MCP Server Setup (`stdio` JSON-RPC 2.0)
+## 2. Standard 7-Tool MCP Server Setup (`stdio` JSON-RPC 2.0)
 
 Use `python3 -m cortical.mcp_server` (or installed `cortical-mcp` script).
 
@@ -79,16 +79,19 @@ CORTICAL_VAULT_DB = "/path/to/cortical/.cortical_data/vault.db"
 
 ---
 
-## 3. Lean 5-Tool MCP Surface + Native Resources & Prompts
+## 3. Lean 7-Tool MCP Surface + Native Resources & Prompts (Plus Opt-In 5-Tool `cortical-wiki`)
 
 | MCP Tool / Surface | Purpose |
 | --- | --- |
-| `cortical_vault_read` | Read sanitized, compressed `@private:<alias>` or `cortical://private/<alias>` item (`blocks max_security`) |
+| `cortical_vault_read` | Read sanitized, compressed `@private:<alias>` / `task_tag` item (`blocks max_security`) |
 | `cortical_ingest_private` | Ingest file/text with `auto` \| `fail_closed` \| `fail_open` classification & metadata stripping |
 | `cortical_compress` | Deterministic lossless TOON / XML / YAML / log compression (`>= 10%` guard vs compact JSON) |
 | `cortical_doctor_status` | Hardware tier, GPU/VRAM, composed OSS tools & model recommendations |
 | `cortical_local_offload` | Delegate prompt/task offline to local LLM runner (records SQLite telemetry at `$0` cloud cost) |
-| Native `resources` & `prompts` | `@`-autocomplete `cortical://private/<alias>`, plus `/cortical-private` & `/cortical-local` prompts |
+| `cortical_roi_report` | Zero-cloud-token local vs cloud token usage, USD savings & remaining cloud budget |
+| `cortical_handoff` | Save/load shared working context across `antigravity`, `pi`, `opencode`, `claude-code`, `codex` |
+| Native `resources` & `prompts` | `@`-autocomplete `cortical://private/<alias>`, `cortical://brain`, `/cortical-private` & `/cortical-local` |
+| Opt-in `cortical-wiki` (`--wiki`) | `wiki_search`, `wiki_navigate`, `wiki_crawl_delta`, `wiki_record_episode`, `wiki_verify_citation` |
 
 ---
 

@@ -1,43 +1,31 @@
-# AGENTS.md — Regole Architetturali, Standard di Codice & Criteri di Review di Cortical
+# AGENTS.md — Cortical Architectural Rules, Code Standards & Zero-Drift Review Contract
 
-> **Golden Rule del Progetto:** Una contribuzione deve valere più del tempo che serve per revisionarla.
-
----
-
-## 1. Principi Guida & Mandato di Revisione (Reviewer Mandate)
-- **Mandato del Reviewer:** Non limitarsi a catturare bug ovvi di sintassi. Verificare che il codice sia corretto per questa specifica codebase, a questa scala operativa e per gli obiettivi del business.
-- **Falsa Sicurezza:** Mai saltare o sbrigare una review solo perché il codice generato dall'AI "sembra pulito e ben formattato".
-- **Zero-Drift:** Questo file definisce contemporaneamente **come l'agente scrive il codice** e **come il reviewer verifica la PR**. Nessuna divergenza tra istruzioni di authoring e criteri di review.
-- **Pair Programming:** Favorire sempre il pair programming supervisionato tra sviluppatore e agente.
+> **Golden Rule:** A contribution must be worth more than the time required to review it.
 
 ---
 
-## 2. Metriche di Complessità Obbligatorie per le Funzioni
-Ogni funzione aggiunta o modificata deve rispettare le seguenti soglie:
-1. **Cyclomatic Complexity < 10:** Massimo 10 percorsi di esecuzione lineare (evitare cascate di `if`/`elif`, loop nidificati e operatori logici sovrapposti).
-2. **Cognitive Complexity < 15:** Il codice deve essere immediatamente comprensibile per una mente umana. Nessun trucco sintattico opaco.
-3. **Lines of Code (LOC) < 20–50 righe:** Rispettare il *Single Responsibility Principle* (SRP). Se una funzione supera 50 righe, estrarre sotto-funzioni pure e testabili.
+## 1. Reviewer Mandate & Zero-Drift Contract
+- **Reviewer Mandate:** Never rubber-stamp code because it looks clean. Verify correctness for Cortical's zero-server, stdlib-only architecture (`dependencies = []`), target hardware tiers, and fail-closed privacy guarantees.
+- **Zero-Drift:** This file defines both **how agents write code** (in Antigravity, `pi`, OpenCode, Codex, Claude Code, and `dsh`) and **how reviewers verify PRs**. Detailed local-loop guardrails also live in [docs/LOCAL_AGENT_HANDOFF.md](./docs/LOCAL_AGENT_HANDOFF.md) and [docs/adr/README.md](./docs/adr/README.md).
 
----
+## 2. Mandatory Function Complexity Thresholds
+1. **Cyclomatic Complexity < 10:** Avoid nested `if`/`elif` chains and deep loops.
+2. **Cognitive Complexity < 15:** Keep control flow immediately clear to human and local-LLM reviewers.
+3. **Function Size 20–50 LOC:** Respect Single Responsibility; extract pure helpers when functions grow past 50 lines.
 
-## 3. Contratti di Pull Request & Vincoli del Diff (Diff Cap)
-- **Diff Compatto:** Massimo 150–250 righe di diff effettivo per PR.
-- **File Toccati:** Massimo 3–5 file per PR.
-- **Nessuna Modifica Non Correlata:** Un solo intento logico per PR. Mai mescolare fix, refactoring estetici e nuove feature.
-- **Regola della Decomposizione:** Se una PR supera la soglia ragionevole, forzare la discussione per suddividerla in 2 o 3 PR indipendenti.
-- **Titolo PR:** Iniziare sempre con un verbo all'imperativo (es. `feat: add...`, `fix: isolate...`), lunghezza massima 65 caratteri.
-- **Linked Issue Assessment:** Verificare esplicitamente che la modifica soddisfi esattamente ciò che il ticket o l'utente ha richiesto, senza generare debito di manutenzione per domini non familiari.
+## 3. Pull Request Contract & Diff Cap
+- **Compact Diff:** `<= 150–250` lines of effective diff and `<= 3–5` files per atomic PR.
+- **Single Intent:** Never mix bug fixes, aesthetic refactors, and unrelated features; start PR titles with an imperative verb (`feat:`, `fix:`, `docs:`).
+- **Issue Alignment:** Explicitly verify the change resolves the linked GitHub Issue (`docs/adr/` + `gh issue view`).
 
----
+## 4. Tech Stack & Invariants (Cortical v0.3.0)
+- **Runtime:** Python 3.10+ stdlib ONLY (`dependencies = []` in `pyproject.toml`), SQLite WAL thread-safe storage, Zero-Server default (`stdio` MCP + static `docs/settings.html`; `--transport streamable-http` and `--serve` strictly opt-in).
+- **7 Subpackages (`src/cortical/`):** `hardware`, `harnesses`, `composers`, `privacy`, `compression`, `analytics`, `wiki` (+ `cli.py`, `mcp_server.py`, `apply.py`, `reconcile.py`, `integrations.py`, `workspace.py`, `config.py`).
+- **MCP Surface:** Lean 7-tool `cortical-mcp` (`annotations` + `outputSchema` + `structuredContent`, native `resources`/`prompts`/`completions`) + opt-in 5-tool `cortical-wiki` (`--wiki`).
+- **Privacy Vault:** Always enforce `fail_closed` on `max_security` items; never read raw `.cortical_data/` or `~/Documents/Cortical/vault/`.
+- **Single-Shot Verification:** Always run `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` and `PYTHONPATH=src .venv/bin/python -m cortical.cli reconcile --dry-run --json`.
 
-## 4. Stack Tecnologico & Vincoli di Sistema
-- **Backend:** Python 3.10+, standard library dove possibile, architettura SQLite WAL thread-safe (`CorticalWikiDB`).
-- **Sintesi Memoria:** 3+1 Livelli (L1 Light ~50t, L2 Medium ~250t, L3 High ~1000t, +1 Max integrale).
-- **Voce & Audio:** Isolamento Half-Duplex acustico (`is_tts_speaking_or_cooling_down`), audio ducking immediato e barge-in con wake-word. I caratteri accentati devono sempre essere formattati in UTF-8 nativo senza escaping numerico (`\u00...`).
-- **Test:** Esecuzione single-shot da ambiente virtuale locale `.venv`.
-
----
-
-## 5. Chrome Remote Debugging (`:9222`) & Portabilità `pi` + `OpenCode`
-- **Browser Debug Unificato:** Prima di invocare strumenti Chrome / `chrome-devtools` MCP (sia in Cortical che in Antigravity), verificare se `http://127.0.0.1:9222/json/version` è già attivo; in caso contrario avviare una nuova istanza isolata (`--remote-debugging-port=9222 --user-data-dir=~/.cortical_data/chrome_debug_profile`) tramite `cortical chrome-ensure` o `chrome_ensure_debug`. Se già attiva sulla porta `9222`, riusarla sempre senza lanciare duplicati.
-- **Standard Condivisi (Zero Nuove Dipendenze):** Le skill risiedono in `.agents/skills/` (scoperte nativamente sia da **`pi`** che da **`OpenCode`**). Gli strumenti Cortical + Grounding sono esposti tramite server MCP stdio (`cortical-wiki-mcp`, configurato in `.pi/mcp.json` e `opencode.json`).
+## 5. Cross-Harness Collaboration, Shared Skills & Chrome (`:9222`)
+- **Shared Skills (`.agents/skills/`):** Discovered natively by `pi`, `OpenCode`, `Codex`, `Claude Code`, and `Antigravity`. Read relevant `SKILL.md` files before editing.
+- **Local Offload & Cross-Harness Handoff:** Prefer `cortical_local_offload` (`qwen3.5:9b-q3_k_xl` / `qwen3.8:27b-iq2_xxs`) for boilerplate/drafting/reviews (`$0` cloud cost) and `cortical_handoff(action='save'|'load')` when switching between Antigravity, `pi`, OpenCode, Claude Code, and Codex.
+- **Chrome Remote Debugging (`:9222`):** Non-destructive `--autoConnect` + Task Tab Groups via `cortical browser status` / `chrome-devtools` MCP; never kill personal browser sessions.
