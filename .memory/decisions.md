@@ -263,3 +263,4 @@ python -m unittest discover -s tests -p "test_cortical.py"
   - `src/cortical/analytics/zero_server_ui.py` & `docs/settings.html`: Added **3 One-Click Interactive Browser Demo Presets** (Preset A: Tier 1A 4 GB VRAM Hybrid, Preset B: Tier 1B 16 GB Unified 27B @ `65,536` ctx, Preset C: Hybrid Remote Supervisor + `fail_closed` Privacy Vault), verified `node --check` exit `0` and `51/51` tests OK.
   - `README.md`: Added top-of-page **Try in 60 Seconds (Zero Dependencies)** and **10-Second Interactive Browser Demo** callouts with exact verified numbers.
   - `docs/UPSTREAM_PLAYBOOK.md` & `docs/LAUNCH_CONTENT.md`: Prepared 7 value-first upstream PR/issue contribution kits (zero auto-submission) and 3 verified-number LinkedIn launch posts (EN + IT variants) with visual proof specs.
+- **LinkedIn Cover Image Rule:** Always attach a freshly generated cover image to every LinkedIn post, keep it out of git (never commit), and delete it once the post is published.

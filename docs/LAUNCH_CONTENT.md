@@ -4,6 +4,7 @@ Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-2
 
 - **Repository:** `https://github.com/ccancellieri/cortical`
 - **10-Second Zero-Install Browser Demo:** `https://ccancellieri.github.io/cortical/settings.html`
+- **Cover Image Policy:** Always generate a dedicated cover image before publishing each LinkedIn post (keep it temporary/untracked, **never commit** it to git, and delete the temporary file once the post is published).
 
 ---
 
