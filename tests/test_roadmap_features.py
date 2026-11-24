@@ -244,6 +244,35 @@ class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
             self.assertIn("CORTICAL-MEMORY:START", mem_txt)
             self.assertNotIn("IT60X0542811101000000123456", mem_txt)
 
+    def test_mcp_local_offload_reads_file_paths_locally_and_blocks_vault_dirs(self) -> None:
+        from cortical.mcp_server import CorticalMCPServer
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src_f = root / "sample.py"
+            src_f.write_text("def hello():\n    return 'world'\n" * 40, encoding="utf-8")
+            vault_f = root / ".cortical_data" / "secret.txt"
+            vault_f.parent.mkdir(parents=True)
+            vault_f.write_text("TOP SECRET NEVER READ", encoding="utf-8")
+
+            mcp = CorticalMCPServer(vault_db=root / "vault.db")
+            captured: dict[str, str] = {}
+
+            def _fake_runner(prompt: str, **kw: object) -> str:
+                captured["prompt"] = prompt
+                captured["model"] = str(kw.get("model_override") or "")
+                return "Concise summary: hello() returns world."
+
+            with mock.patch("cortical.mcp_server.invoke_configured_runner", side_effect=_fake_runner):
+                out = mcp._dispatch_tool(
+                    "cortical_local_offload",
+                    {"role": "summarizer", "file_paths": [str(src_f), str(vault_f)], "prompt": "Summarize"},
+                )
+            self.assertTrue(out["completed_locally"])
+            self.assertEqual(out["files_read_locally"], [str(src_f)])
+            self.assertGreater(out["raw_file_tokens_saved_est"], 100)
+            self.assertNotIn("TOP SECRET NEVER READ", captured["prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()

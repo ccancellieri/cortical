@@ -167,6 +167,11 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "description": "Semantic model role (router, ner, fast_coder, daily_coder, reviewer, summarizer, deep_reasoner, orchestrator, vision)",
                 },
                 "model": {"type": "string", "description": "Optional explicit model ID or @role:<name> alias"},
+                "file_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional local file paths read directly from disk by the local LLM (0 cloud input tokens; private vault paths blocked).",
+                },
                 "vault_alias": {"type": "string", "description": "Optional vault alias (including max_security) processed strictly offline"},
             },
             "required": ["prompt"],
@@ -323,6 +328,18 @@ class CorticalMCPServer:
 
             cfg = load_cortical_config()
             prompt = str(args.get("prompt") or "")
+            files_read: list[str] = []
+            raw_file_chars = 0
+            for raw_fp in (args.get("file_paths") or [])[:8]:
+                fp = Path(str(raw_fp)).expanduser()
+                if not fp.is_file():
+                    continue
+                if ".cortical_data" in fp.parts or ("Documents" in fp.parts and "vault" in fp.parts):
+                    continue
+                txt = fp.read_text(encoding="utf-8", errors="replace")[:24000]
+                raw_file_chars += len(txt)
+                files_read.append(str(fp))
+                prompt = f"File ({fp.name}):\n{txt}\n\n" + prompt
             if args.get("vault_alias"):
                 item = self.vault.read_resource(str(args["vault_alias"]), allow_local_only=True)
                 prompt = f"Sanitized local context (@private:{item['alias']}):\n{item['text']}\n\nTask:\n{prompt}"
@@ -338,7 +355,14 @@ class CorticalMCPServer:
             )
             elapsed = round(_t.perf_counter() - t0, 2)
             export_roi_json(self.vault.db_path.parent, config=cfg)
-            return {"completed_locally": True, "model_used": used_model, "elapsed_sec": elapsed, "response": out}
+            return {
+                "completed_locally": True,
+                "model_used": used_model,
+                "files_read_locally": files_read,
+                "raw_file_tokens_saved_est": max(0, raw_file_chars // 4),
+                "elapsed_sec": elapsed,
+                "response": out,
+            }
         if name == "cortical_roi_report":
             from .analytics.roi import evaluate_routing_state, export_roi_json, format_roi_markdown
 

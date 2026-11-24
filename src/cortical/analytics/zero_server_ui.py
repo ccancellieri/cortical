@@ -141,7 +141,7 @@ def render_zero_server_settings_html(snapshot: dict[str, Any]) -> str:
     .cmd-item {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 12px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }}
     .cmd-item:hover, .cmd-item.selected {{ background: var(--accent-soft); border-color: rgba(56,189,248,0.35); }}
     .kbd {{ font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--muted); }}
-    .toasts {{ position: fixed; bottom: 88px; right: 18px; z-index: 95; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }}
+    .toasts {{ position: fixed; bottom: 132px; right: 18px; z-index: 95; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }}
     .toast {{ padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev); box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; gap: 8px; font-size: 13px; }}
     .toast.ok {{ border-color: var(--ok); }} .toast.err {{ border-color: var(--err); }} .toast.warn {{ border-color: var(--warn); }}
     .main {{ padding-bottom: 136px; }}
@@ -314,6 +314,7 @@ function renderAll() {{
 function fmtInlineMd(s) {{
   return esc(String(s || ''))
     .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+    .replace(/\\*([^*]+)\\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 }}
 
@@ -495,7 +496,7 @@ function renderOverview() {{
         <tbody>
           ${{(s.adrs||[]).map((a) => `
             <tr>
-              <td class="mono"><strong>${{esc(a.id)}}</strong></td>
+              <td class="mono" style="white-space:nowrap;"><strong>${{esc(a.id)}}</strong></td>
               <td>${{esc(a.title)}}<div class="hint">${{fmtInlineMd(a.summary)}}</div></td>
               <td><span class="pill ok">✓ ${{esc(a.status)}}</span></td>
               <td class="mono">${{esc(a.issue || '—')}}</td>
@@ -1078,15 +1079,19 @@ function renderVault() {{
     </div>
 
     <div class="grid-3" style="margin-bottom:16px;">
-      ${{(v.channels || []).map((ch) => `
+      ${{(v.channels || []).map((ch) => {{
+        const detailTxt = ch.id === 2
+          ? `Sanitized memory capped at <= ${{Math.round(liveShare * 100)}}% num_ctx (${{liveBudgetTok}} tok).`
+          : ch.detail;
+        return `
         <div class="kpi">
           <div style="display:flex;justify-content:space-between;align-items:center;">
             <strong>${{esc(ch.name)}}</strong>
             <span class="pill ok">✓ ${{esc(ch.status)}}</span>
           </div>
-          <div class="hint" style="margin-top:6px;">${{esc(ch.detail)}}</div>
-        </div>
-      `).join('')}}
+          <div class="hint" style="margin-top:6px;">${{esc(detailTxt)}}</div>
+        </div>`;
+      }}).join('')}}
     </div>
 
     <div class="card">

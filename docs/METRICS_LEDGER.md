@@ -64,3 +64,16 @@ gh api repos/ccancellieri/cortical --jq '{stars:.stargazers_count,forks:.forks_c
 gh api repos/ccancellieri/cortical/traffic/views --jq '{views:.count,uniques:.uniques}'
 gh api repos/ccancellieri/cortical/traffic/clones --jq '{clones:.count,uniques:.uniques}'
 ```
+
+---
+
+## 3. Empirical 4-Layer Composable Stack Benchmark (`scripts/stack_benchmark.py`, `#48`)
+
+Measured directly on `ccancellieri/cortical` (`2026-11-24`):
+
+| Layer | Baseline (Raw) | Optimized | Measured Saving |
+| --- | --- | --- | --- |
+| **1. Symbol Navigation (`Serena` AST read: `vault.py` -> `verify_audit_ledger`)** | `11,020` tok | `464` tok | **`-95.79%`** |
+| **2. Shell Compaction (`RTK` on `git log -n 30`)** | `1,854` tok | `902` tok | **`-51.35%`** *(note: `--stat` passes through)* |
+| **3. Structured Payload (`Cortical TOON` lossless)** | `745` pretty / `430` compact tok | `163` tok | **`-78.12%` / `-62.09%`** |
+| **4. Local File Offload (`cortical_local_offload(file_paths=...)`, `@role:fast_coder`)** | `4,352` raw file tok | `183` returned tok | **`-95.80%` cloud input** (`31.72s`, `$0` cloud) |

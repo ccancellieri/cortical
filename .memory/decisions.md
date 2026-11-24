@@ -286,3 +286,12 @@ python -m unittest discover -s tests -p "test_cortical.py"
 - **Dashboard UX/UI Polish (`src/cortical/analytics/zero_server_ui.py`):** Added inline Markdown rendering (`fmtInlineMd`) for the Overview ADR table and non-disorienting inline preset summary banners on Overview (zero `SyntaxWarning`, `node --check` exit `0`).
 - **Upstream Playbook & Ephemeral LinkedIn Cover Images:** Refined `docs/UPSTREAM_PLAYBOOK.md` with verified Official MCP Registry (`mcp-publisher`) vs `punkpeye/awesome-mcp-servers` paths; generated 3 bespoke 16:9 dark-navy LinkedIn cover images strictly inside the external artifact directory (untracked, never committed, ready to attach & delete after posting).
 - **Verified:** `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` -> **`54/54` OK** (`13.943s`), `cortical bench --compare` (`-78.12%`/`-62.09%` TOON, `4.26 ms` MCP handshake), `18,838` LOC (`dependencies = []`).
+
+---
+
+## Session 2026-11-24 (Evening — P2 UI Micro-Refinements, `file_paths` Local Offload for 3rd-Party Harnesses & Empirical 4-Layer Stack Benchmark)
+
+- **P2 UI Micro-Refinements (`zero_server_ui.py`):** Raised `.toasts` (`bottom: 132px`) above sticky dock, added `white-space: nowrap` on ADR ID column + italic `*...*` rendering in `fmtInlineMd`, and made Vault Channel 2 card dynamically display live `liveBudgetTok`.
+- **Structural Local-Offload Fix for 3rd-Party Cloud Harnesses (`mcp_server.py`, `harnesses/adapters.py`):** Upgraded `cortical_local_offload` with `file_paths: list[str]` (reading raw files locally from disk at `$0` cloud tokens while blocking `.cortical_data/` & `Documents/Cortical/vault/`) and updated shared harness rules to mandate local-first file offload before reading >150 LOC files into cloud context.
+- **Empirical 4-Layer Benchmark (`scripts/stack_benchmark.py`, `#48`):** Verified `-95.79%` symbol read (`11,020 -> 464` tok), `-51.35%` RTK `git log -n 30` (`1,854 -> 902` tok), `-78.12%`/`-62.09%` TOON (`745`/`430 -> 163` tok), and `-95.80%` cloud input via local `file_paths` offload (`4,352 -> 183` tok in `31.72s`).
+- **Verified:** `55/55` `unittest` PASS (`15.246s`), `docs/settings.html` & `html/settings.html` `node --check` exit `0`.
