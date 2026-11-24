@@ -1010,6 +1010,23 @@ def build_parser() -> argparse.ArgumentParser:
     prf.add_argument("--json", action="store_true")
     prf.set_defaults(func=_cmd_profile)
 
+    cur = sub.add_parser("curate", help="Self-curate zero-PII SKILL.md workflows from LocalBrain & verified sessions")
+    cur.add_argument("--skills-dir", default=None, help="Target skills directory (default: .agents/skills)")
+    cur.add_argument("--db", default=None)
+    cur.add_argument("--local-llm", action="store_true", help="Refine distilled procedures locally via @role:summarizer")
+    cur.add_argument("--dry-run", action="store_true")
+    cur.add_argument("--json", action="store_true")
+    cur.set_defaults(func=_cmd_curate)
+
+    ms = sub.add_parser("memory-sync", help="Bidirectional zero-PII sync between LocalBrain L1/L2 and MEMORY.md")
+    ms.add_argument("--direction", choices=["export", "import", "both"], default="export")
+    ms.add_argument("--out", default="MEMORY.md", help="Target Markdown memory file path")
+    ms.add_argument("--num-ctx", type=int, default=65536)
+    ms.add_argument("--db", default=None)
+    ms.add_argument("--dry-run", action="store_true")
+    ms.add_argument("--json", action="store_true")
+    ms.set_defaults(func=_cmd_memory_sync)
+
     wch = sub.add_parser("watch", help="Process queued uploads with local models (no ports)")
     wch.add_argument("--once", action="store_true")
     wch.add_argument("--interval", type=float, default=2.0)
@@ -1436,6 +1453,41 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         return 0
 
     return 1
+
+
+def _cmd_curate(args: argparse.Namespace) -> int:
+    from .privacy.curation import curate_skills_from_memory
+
+    res = curate_skills_from_memory(
+        vault_db=resolve_default_db(args.db) if args.db else None,
+        skills_dir=args.skills_dir,
+        use_local_llm=bool(args.local_llm),
+        dry_run=bool(args.dry_run),
+    )
+    if args.json:
+        _print_json(res)
+        return 0
+    mode = "DRY-RUN" if res["dry_run"] else res["action"].upper()
+    print(f"Cortical Skill Curation [{mode}]: {res['path']} (skills={res['skills_count']}, handoff={res['handoff_included']})")
+    return 0
+
+
+def _cmd_memory_sync(args: argparse.Namespace) -> int:
+    from .privacy.curation import sync_memory_markdown
+
+    res = sync_memory_markdown(
+        vault_db=resolve_default_db(args.db) if args.db else None,
+        memory_path=args.out,
+        direction=args.direction,
+        num_ctx=int(args.num_ctx or 65536),
+        dry_run=bool(args.dry_run),
+    )
+    if args.json:
+        _print_json(res)
+        return 0
+    mode = "DRY-RUN" if res["dry_run"] else res["action"].upper()
+    print(f"Cortical Memory Sync [{mode} · {res['direction']}]: {res['path']} (concepts={res['exported_concepts']}, imported={res['imported_notes']})")
+    return 0
 
 
 def _cmd_wiki_dashboard(args: argparse.Namespace) -> int:

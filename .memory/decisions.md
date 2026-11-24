@@ -275,3 +275,14 @@ python -m unittest discover -s tests -p "test_cortical.py"
   - `privacy/vault.py` & `cli.py`: `sync_from_disk` now falls back to configured `privacy.vision_model` & `resolve_role_model("ner", cfg)` for `vault_inbox` items; `cortical watch` reports `.error.json` counts and details on stderr.
   - `analytics/zero_server_ui.py`: fixed broken `onclick` quoting in `renderServiceDrawer()` via `data-copy`; made 8-Harness Matrix and Vault Context Budget Gauge dynamically recompute from `ST.draftCfg`; added neutral empty-ledger badge (`0 entries`), US phone redaction regex (`+1-555-0199`), partial profile diff cleanup, bottom-right toast positioning, sticky sidebar, and `.main` bottom padding for the sticky dock.
 - **Verified:** `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` -> **`53/53` OK** (`15.786s`), `docs/settings.html` & `html/settings.html` `node --check` exit `0`.
+
+---
+
+## Session 2026-11-24 (Self-Curation `#1`, Bidirectional `MEMORY.md` Sync `#3`, Dashboard Polish & Ephemeral LinkedIn Cover Kit)
+
+- **Implemented `#1` & `#3` (`src/cortical/privacy/curation.py`, `src/cortical/cli.py`, `tests/test_roadmap_features.py`):**
+  - `cortical curate` compiles zero-PII verified workflows from `LocalBrain` (`by_skill`) and `handoff.json` into `.agents/skills/cortical-self-curated/SKILL.md` (with optional `--local-llm` refinement via `@role:summarizer`).
+  - `cortical memory-sync` performs optional bidirectional zero-PII sync between `LocalBrain` L1/L2 (`by_concept`) and `MEMORY.md` (`<!-- CORTICAL-MEMORY:START/END -->`), excluding `max_security` items.
+- **Dashboard UX/UI Polish (`src/cortical/analytics/zero_server_ui.py`):** Added inline Markdown rendering (`fmtInlineMd`) for the Overview ADR table and non-disorienting inline preset summary banners on Overview (zero `SyntaxWarning`, `node --check` exit `0`).
+- **Upstream Playbook & Ephemeral LinkedIn Cover Images:** Refined `docs/UPSTREAM_PLAYBOOK.md` with verified Official MCP Registry (`mcp-publisher`) vs `punkpeye/awesome-mcp-servers` paths; generated 3 bespoke 16:9 dark-navy LinkedIn cover images strictly inside the external artifact directory (untracked, never committed, ready to attach & delete after posting).
+- **Verified:** `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` -> **`54/54` OK** (`13.943s`), `cortical bench --compare` (`-78.12%`/`-62.09%` TOON, `4.26 ms` MCP handshake), `18,838` LOC (`dependencies = []`).

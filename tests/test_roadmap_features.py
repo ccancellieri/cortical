@@ -214,6 +214,36 @@ class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
             item = v.read_resource("ocr_receipt", allow_local_only=False)
             self.assertIn("[EMAIL_1]", item["text"])
 
+    def test_self_curation_and_bidirectional_memory_sync(self) -> None:
+        from cortical.privacy.curation import curate_skills_from_memory, sync_memory_markdown
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_p = root / "vault.db"
+            v = PrivacyVault(db_p)
+            v.ingest("# Architecture\n1. Run doctor\n2. Sync harnesses\nContact alice@acme.example", alias="ops_guide", policy="auto", profile="medium")
+            v.ingest("Top secret salary ledger IT60X0542811101000000123456", alias="secret_ledger", policy="fail_closed", profile="max_security")
+
+            skills_dir = root / "skills"
+            cur = curate_skills_from_memory(vault_db=db_p, skills_dir=skills_dir, handoff_path=root / "none.json")
+            self.assertEqual(cur["action"], "create")
+            skill_txt = Path(cur["path"]).read_text(encoding="utf-8")
+            self.assertIn("name: cortical-self-curated", skill_txt)
+            self.assertIn("@role:summarizer", skill_txt)
+            self.assertNotIn("alice@acme.example", skill_txt)
+            self.assertNotIn("IT60X0542811101000000123456", skill_txt)
+
+            mem_p = root / "MEMORY.md"
+            mem_p.write_text("# My Notes\nPrefer stdlib-only solutions.\n", encoding="utf-8")
+            exp = sync_memory_markdown(vault_db=db_p, memory_path=mem_p, direction="both")
+            self.assertEqual(exp["action"], "update")
+            self.assertTrue(exp["imported_notes"])
+            self.assertGreaterEqual(exp["exported_concepts"], 1)
+            mem_txt = mem_p.read_text(encoding="utf-8")
+            self.assertIn("Prefer stdlib-only solutions.", mem_txt)
+            self.assertIn("CORTICAL-MEMORY:START", mem_txt)
+            self.assertNotIn("IT60X0542811101000000123456", mem_txt)
+
 
 if __name__ == "__main__":
     unittest.main()

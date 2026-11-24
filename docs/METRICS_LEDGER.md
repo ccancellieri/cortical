@@ -4,18 +4,18 @@ Single source of truth for **Cortical** (`https://github.com/ccancellieri/cortic
 
 ---
 
-## 1. Verified Baseline (`2026-11-24`, commit `fddde77`)
+## 1. Verified Baseline (`2026-11-24`, Updated Post-Sprint)
 
 ### A. Product, Stability & Token Economics KPIs
 
 | Metric | Verified Baseline (`2026-11-24`) | Target (30-Day) | Verification Command |
 | --- | --- | --- | --- |
 | **External Runtime Dependencies** | **`0`** (`dependencies = []`) | `0` (invariant) | `grep dependencies pyproject.toml` |
-| **Unit & Integration Tests** | **`51 / 51` PASS** (`16.973s`, `0` skips) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
-| **Codebase Size (`src/cortical/`)** | **`18,224` LOC** (incl. embedded zero-CDN HTML/CSS/JS UI & wiki store; down from `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
+| **Unit & Integration Tests** | **`54 / 54` PASS** (`13.943s`, `0` skips) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
+| **Codebase Size (`src/cortical/`)** | **`18,838` LOC** (incl. 10-role registry, self-curating skills, `MEMORY.md` sync, zero-CDN HTML/CSS/JS UI & wiki store; down from `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
 | **TOON Lossless Compression** | **`-78.12%` vs pretty JSON** · **`-62.09%` vs compact JSON** (`745`/`430` -> `163` tok) | `>= 60%` vs compact | `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare` |
 | **Privacy Sanitizer Precision** | **`100.0%` tech prose preserved** · `policy=fail_closed` · `pii_masked=True` | `100.0%` | `cortical bench --compare` |
-| **Lean 7-Tool MCP Handshake** | **`4.09 ms`** (`ingest+read`, `7` tools + `annotations` + `outputSchema`) | `< 10 ms` | `cortical bench --compare` |
+| **Lean 7-Tool MCP Handshake** | **`4.26 ms`** (`ingest+read`, `7` tools + `annotations` + `outputSchema` + 10 semantic `@role:*` slots) | `< 10 ms` | `cortical bench --compare` |
 | **Tier 1B 27B Auto-Context (`pi`)** | **`65,536` ctx** (`qwen3.8:27b-iq2_xxs`, `9.08 GiB` Metal VRAM, `timeout=600s`, `reasoning_effort=none`) | `0` timeouts / `0` truncations | `pi -p --no-session --model router/cortical-deep` + `ollama /api/ps` |
 | **Real-World `pi` Local Offload (`01a20890`)** | **`3,481,633` local tokens** (`3,452,912` in + `28,721` out, `$0` cloud cost) | `>= 80%` local offload | `~/.pi/agent/sessions/...01a20890...jsonl` |
 | **GitHub Issues Resolved** | **`47` closed / `10` open** (`57` total) | `>= 90%` core issues closed | `gh issue list --state all --limit 100` |

@@ -311,6 +311,12 @@ function renderAll() {{
   renderDirtyDock();
 }}
 
+function fmtInlineMd(s) {{
+  return esc(String(s || ''))
+    .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}}
+
 function applyDemoPreset(presetId) {{
   const hw = ST.snap.hardware || {{}};
   const c = ST.draftCfg;
@@ -331,7 +337,8 @@ function applyDemoPreset(presetId) {{
     c.orchestrator.provider = 'router';
     c.orchestrator.model = 'cortical-fast';
     c.orchestrator.api_key_env = '';
-    toast('ok', 'Loaded Preset A: Tier 1A Hybrid Laptop (16 GB RAM + 4 GB VRAM, swap-free 32K ctx)');
+    ST.activePresetNote = 'Preset A active: Tier 1A Hybrid Laptop (16 GB RAM + 4 GB VRAM · num_ctx=32,768 · @role:fast_coder)';
+    toast('ok', ST.activePresetNote);
   }} else if (presetId === 'tier_1b_unified') {{
     hw.total_ram_gb = 16.0;
     hw.free_ram_gb = 10.5;
@@ -351,7 +358,8 @@ function applyDemoPreset(presetId) {{
       ST.snap.orchestration.context_profile.auto_max_num_ctx = 65536;
       ST.snap.orchestration.context_profile.adaptive_timeout_sec = 600;
     }}
-    toast('ok', 'Loaded Preset B: Tier 1B Unified 16 GB (27B UD-IQ2_XXS @ 65,536 ctx, 600s timeout)');
+    ST.activePresetNote = 'Preset B active: Tier 1B Unified 16 GB (@role:deep_reasoner @ 65,536 ctx, 9.08 GiB Metal, 600s timeout)';
+    toast('ok', ST.activePresetNote);
   }} else if (presetId === 'hybrid_remote_guard') {{
     c.orchestrator.mode = 'remote';
     c.orchestrator.provider = 'gemini';
@@ -360,7 +368,8 @@ function applyDemoPreset(presetId) {{
     c.orchestrator.endpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/';
     c.orchestrator.local_first_delegation = true;
     c.orchestrator.strict_remote_privacy = true;
-    toast('ok', 'Loaded Preset C: Hybrid Remote Supervisor (GEMINI_API_KEY env only) + fail_closed Local Workers');
+    ST.activePresetNote = 'Preset C active: Hybrid Remote Supervisor (GEMINI_API_KEY env only) + Local-First Workers + fail_closed Guard';
+    toast('ok', ST.activePresetNote);
   }}
   ST.snap.hardware = hw;
   validateCfg();
@@ -417,25 +426,39 @@ function renderOverview() {{
         <span class="pill ok">100% Client-Side · 0 CDNs</span>
       </div>
       <div class="grid-3">
-        <div class="kpi">
-          <span class="pill info">Preset A · Tier 1A Hybrid</span>
-          <h3 style="margin:8px 0 4px;">16 GB RAM + 4 GB VRAM Laptop</h3>
-          <p class="hint"><code>qwen2.5:3b</code> in VRAM + <code>qwen3.5:9b-q3_k_xl</code> hybrid offload @ <code>32,768</code> ctx.</p>
-          <button class="btn sm" onclick="applyDemoPreset('tier_1a_hybrid'); setView('models')">▶ Load Tier 1A Preset</button>
+        <div class="kpi" style="display:flex;flex-direction:column;justify-content:space-between;gap:8px;">
+          <div>
+            <span class="pill info">Preset A · Tier 1A Hybrid</span>
+            <h3 style="margin:8px 0 4px;">16 GB RAM + 4 GB VRAM Laptop</h3>
+            <p class="hint"><code>@role:router</code> in VRAM + <code>@role:daily_coder</code> hybrid offload @ <code>32,768</code> ctx.</p>
+          </div>
+          <button class="btn sm" onclick="applyDemoPreset('tier_1a_hybrid')">▶ Load Tier 1A Preset</button>
         </div>
-        <div class="kpi">
-          <span class="pill ok">Preset B · Tier 1B Unified</span>
-          <h3 style="margin:8px 0 4px;">16 GB Apple Silicon + 27B XXS</h3>
-          <p class="hint"><code>qwen3.8:27b-iq2_xxs</code> @ <code>65,536</code> ctx (<code>9.08 GB</code> Metal) preventing <code>4096</code> clipping.</p>
-          <button class="btn sm primary" onclick="applyDemoPreset('tier_1b_unified'); setView('models')">▶ Load Tier 1B 27B Preset</button>
+        <div class="kpi" style="display:flex;flex-direction:column;justify-content:space-between;gap:8px;">
+          <div>
+            <span class="pill ok">Preset B · Tier 1B Unified</span>
+            <h3 style="margin:8px 0 4px;">16 GB Apple Silicon + 27B XXS</h3>
+            <p class="hint"><code>@role:deep_reasoner</code> @ <code>65,536</code> ctx (<code>9.08 GiB</code> Metal) preventing <code>4096</code> clipping.</p>
+          </div>
+          <button class="btn sm primary" onclick="applyDemoPreset('tier_1b_unified')">▶ Load Tier 1B 27B Preset</button>
         </div>
-        <div class="kpi">
-          <span class="pill warn">Preset C · Hybrid Remote Guard</span>
-          <h3 style="margin:8px 0 4px;">Remote Supervisor + fail_closed Vault</h3>
-          <p class="hint"><code>GEMINI_API_KEY</code> env-only remote orchestrator + local offload + <code>-78.12%</code> TOON savings.</p>
-          <button class="btn sm" onclick="applyDemoPreset('hybrid_remote_guard'); setView('vault')">▶ Load Hybrid Guard Preset</button>
+        <div class="kpi" style="display:flex;flex-direction:column;justify-content:space-between;gap:8px;">
+          <div>
+            <span class="pill warn">Preset C · Hybrid Remote Guard</span>
+            <h3 style="margin:8px 0 4px;">Remote Supervisor + fail_closed Vault</h3>
+            <p class="hint"><code>GEMINI_API_KEY</code> env-only remote orchestrator + local offload + <code>-78.12%</code> TOON savings.</p>
+          </div>
+          <button class="btn sm" onclick="applyDemoPreset('hybrid_remote_guard')">▶ Load Hybrid Guard Preset</button>
         </div>
       </div>
+      ${{ST.activePresetNote ? `
+        <div style="margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid var(--ok);background:rgba(52,211,153,0.08);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span class="hint" style="color:var(--text);">✓ ${{esc(ST.activePresetNote)}}</span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn sm" onclick="setView('models')">Inspect Models &amp; Roles →</button>
+            <button class="btn sm" onclick="setView('vault')">Inspect Privacy Vault →</button>
+          </div>
+        </div>` : ''}}
     </div>
 
     <div class="card">
@@ -473,7 +496,7 @@ function renderOverview() {{
           ${{(s.adrs||[]).map((a) => `
             <tr>
               <td class="mono"><strong>${{esc(a.id)}}</strong></td>
-              <td>${{esc(a.title)}}<div class="hint">${{esc(a.summary)}}</div></td>
+              <td>${{esc(a.title)}}<div class="hint">${{fmtInlineMd(a.summary)}}</div></td>
               <td><span class="pill ok">✓ ${{esc(a.status)}}</span></td>
               <td class="mono">${{esc(a.issue || '—')}}</td>
             </tr>

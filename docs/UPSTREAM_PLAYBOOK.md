@@ -6,11 +6,13 @@ Every upstream contribution below follows **ADR-012** (Value-First Contract): so
 
 ## Prioritized Upstream Action Queue (7 Prominent Repositories)
 
-### 1. `modelcontextprotocol/servers` & Glama (`#44` — Ready to Submit)
-- **Target:** `https://github.com/modelcontextprotocol/servers` (community registry PR) & `https://glama.ai/mcp/servers` (refresh `v0.3.0`)
-- **Maintainer Value:** Accurate `2025-12-11` registry manifest ([`server.json`](../server.json)) + [`glama.json`](../glama.json) exposing full MCP `2025-06-18` `annotations`, `outputSchema`, `structuredContent`, `stdio` + `streamable-http`, and `dependencies = []`.
-- **Ready-to-Use PR Summary:**
-  > Adds/refreshes `io.github.ccancellieri/cortical` (`v0.3.0`): Python 3.10+ stdlib-only (`dependencies = []`) MCP server providing a `fail_closed` Privacy Vault with SHA-256 audit ledger, lossless `TOON` compression (`-62.09%` vs compact JSON), and hardware-aware local offload (`4.09 ms` handshake).
+### 1. Official MCP Registry (`modelcontextprotocol/registry`), `punkpeye/awesome-mcp-servers` & Glama (`#44` — Ready to Submit)
+- **Targets:**
+  - **Official MCP Registry:** Publish `io.github.ccancellieri/cortical` via `mcp-publisher` CLI using GitHub namespace verification (`server.json` already uses `2025-12-11` schema).
+  - **Community Directories:** PR to `https://github.com/punkpeye/awesome-mcp-servers` and refresh `https://glama.ai/mcp/servers` (`glama.json`) + `https://mcpservers.org`.
+- **Maintainer Value:** Accurate `v0.3.0` metadata exposing MCP `2025-06-18` `annotations`, `outputSchema`, `structuredContent`, `stdio` + `streamable-http`, 10 semantic model roles (`@role:*`), and `dependencies = []`.
+- **Ready-to-Use PR Entry (`awesome-mcp-servers`):**
+  > - [ccancellieri/cortical](https://github.com/ccancellieri/cortical) — Zero-dependency Python 3.10+ stdlib (`dependencies = []`) cross-harness MCP control plane with `fail_closed` Privacy Vault + SHA-256 audit ledger, lossless `TOON` compression (`-62.09%` vs compact JSON), and role-abstracted local offload (`4.09 ms` handshake).
 
 ### 2. `earendil-works/pi` (`#47` — Hook Shipped in `src/cortical/harnesses/hooks.py`)
 - **Target:** `https://github.com/earendil-works/pi` (extensions / community packages)

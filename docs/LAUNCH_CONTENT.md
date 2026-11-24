@@ -1,6 +1,6 @@
 # Cortical Launch Content & Visual Proof Kit
 
-Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-24`, commit `fddde77`, `51/51` `unittest` passing, `dependencies = []`). See [`docs/METRICS_LEDGER.md`](./METRICS_LEDGER.md) for the exact verification commands.
+Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-24`, `54/54` `unittest` passing, `dependencies = []`). See [`docs/METRICS_LEDGER.md`](./METRICS_LEDGER.md) for the exact verification commands.
 
 - **Repository:** `https://github.com/ccancellieri/cortical`
 - **10-Second Zero-Install Browser Demo:** `https://ccancellieri.github.io/cortical/settings.html`
@@ -12,13 +12,14 @@ Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-2
 
 ### English Version
 Most AI agent tools ship a Node server, a Docker compose stack, and 40 dependencies just to sync config files.
-We took the opposite route with **Cortical**: `dependencies = []` (Python 3.10+ stdlib only), zero background servers, and **51/51** passing tests.
+We took the opposite route with **Cortical**: `dependencies = []` (Python 3.10+ stdlib only), zero background servers, and **54/54** passing tests.
 
 Instead of reinventing LSPs (`Serena`), shell compressors (`RTK`), or local inference (`Ollama`/`Unsloth`), Cortical acts as a declarative control plane across **8 coding harnesses** (`Antigravity`, `pi`, `OpenCode`, `OpenClaw`, `Codex`, `Claude Code`, `dsh`, `Unsloth Studio`):
+- **10 Reusable Semantic Model Roles** (`@role:router`, `@role:ner`, `@role:fast_coder`, `@role:daily_coder`, `@role:reviewer`, `@role:summarizer`, `@role:deep_reasoner`, `@role:orchestrator`, `@role:vision`, `@role:embedder`) — never hardcoding concrete model tags in prompts or scripts
 - Idempotent config sync with timestamped `--rollback <id>` (never overwrites your existing credentials)
-- Lean 7-tool `stdio` MCP server (`4.09 ms` ingest+read handshake) with 2026 tool `annotations` & `outputSchema`
-- Self-contained static browser configurator with **0 external CDNs** and **3 one-click interactive presets**
-- Compact modular architecture (`18,224` LOC including embedded HTML/CSS/JS UI & wiki store, down from `~31.8K` LOC in `legacy-v0.2`)
+- Lean 7-tool `stdio` MCP server (`4.26 ms` ingest+read handshake) with 2026 tool `annotations` & `outputSchema`
+- Self-curating `SKILL.md` workflows (`cortical curate`), bidirectional `MEMORY.md` sync (`cortical memory-sync`), and a zero-CDN browser configurator with **3 one-click interactive presets**
+- Compact modular architecture (`18,838` LOC including embedded HTML/CSS/JS UI & wiki store, down from `~31.8K` LOC in `legacy-v0.2`)
 
 Try it in 10 seconds in your browser (zero install):
 https://ccancellieri.github.io/cortical/settings.html
