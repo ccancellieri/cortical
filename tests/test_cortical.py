@@ -388,7 +388,7 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
                 self.assertEqual(init_r["result"]["serverInfo"]["name"], "cortical-mcp")
 
                 list_r = srv.handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-                self.assertEqual(len(list_r["result"]["tools"]), 7)
+                self.assertEqual(len(list_r["result"]["tools"]), 8)
 
                 h_save = srv.handle_request({
                     "jsonrpc": "2.0", "id": 11, "method": "tools/call",
@@ -420,7 +420,7 @@ class TestMCPConfigAnalyticsAndCLI(unittest.TestCase):
 
     def test_analytics_and_cli_smoke(self) -> None:
         bench = run_comparative_benchmark()
-        self.assertEqual(bench["lean_mcp"]["tool_count"], 7)
+        self.assertEqual(bench["lean_mcp"]["tool_count"], 8)
         self.assertEqual(bench["compression_before_vs_after"]["format_used"], "toon")
         self.assertGreater(bench["compression_before_vs_after"]["saving_vs_compact_pct"], 50.0)
 
@@ -867,7 +867,7 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
         from cortical.mcp_server import TOOLS_SCHEMA, create_streamable_http_server
         from cortical.wiki.mcp_server import WIKI_TOOLS_SCHEMA
 
-        self.assertEqual(len(TOOLS_SCHEMA), 7)
+        self.assertEqual(len(TOOLS_SCHEMA), 8)
         self.assertEqual(len(WIKI_TOOLS_SCHEMA), 5)
         for schema in (*TOOLS_SCHEMA, *WIKI_TOOLS_SCHEMA):
             ann = schema.get("annotations") or {}
@@ -907,7 +907,7 @@ class TestFileBackedZeroServerVault(unittest.TestCase):
                 with urllib.request.urlopen(req, timeout=3.0) as resp:
                     self.assertEqual(resp.status, 200)
                     t_data = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(len(t_data["result"]["tools"]), 7)
+                    self.assertEqual(len(t_data["result"]["tools"]), 8)
 
                 notif_req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/mcp",

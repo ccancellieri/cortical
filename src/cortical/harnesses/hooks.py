@@ -102,6 +102,12 @@ description: Execute task strictly offline via Cortical Local Offload (0 cloud t
 Run this task offline using `cortical_local_offload(prompt="$ARGUMENTS")` and return the concise local output.
 """
 
+_OPENCODE_NEXT_CMD = """---
+description: Elicit or synthesize the next continuation prompt via Cortical Prompt Studio (/next)
+---
+Call `cortical_next_prompt(seed="$ARGUMENTS", mode="browser")` (or `cortical next "$ARGUMENTS"`) to open the one-shot local browser questionnaire and return the synthesized continuation prompt.
+"""
+
 _DSH_CORDIS_HOOK_MJS = """// Cortical Channel-3 Cordis Privacy Hook for DeepSeek Harness (dsh)
 import { execFileSync } from "node:child_process";
 
@@ -165,6 +171,7 @@ def _hook_specs(home: Optional[Path] = None, os_name: Optional[str] = None) -> d
             (opencode_dir / "plugins" / "cortical-hook.mjs", _OPENCODE_HOOK_MJS, "OpenCode plugin hook for TOON compaction"),
             (opencode_dir / "commands" / "cortical-private.md", _OPENCODE_PRIVATE_CMD, "OpenCode /cortical-private slash command"),
             (opencode_dir / "commands" / "cortical-local.md", _OPENCODE_LOCAL_CMD, "OpenCode /cortical-local slash command"),
+            (opencode_dir / "commands" / "next.md", _OPENCODE_NEXT_CMD, "OpenCode /next Prompt Studio elicitor slash command"),
         ],
         "dsh": [
             (dsh_dir / "plugins" / "cortical-cordis-hook.mjs", _DSH_CORDIS_HOOK_MJS, "DeepSeek Harness Cordis pre-send privacy hook"),

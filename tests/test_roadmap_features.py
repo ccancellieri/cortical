@@ -73,11 +73,11 @@ class TestNativeHarnessHooks(unittest.TestCase):
             self.assertTrue(all(not pre[t]["installed"] for t in HOOK_TARGETS))
 
             dry = install_harness_hooks(home=home, os_name="macos", dry_run=True)
-            self.assertEqual(dry["changed_count"], 7)
+            self.assertEqual(dry["changed_count"], 8)
             self.assertTrue(all(not inspect_harness_hooks(home=home, os_name="macos")[t]["installed"] for t in HOOK_TARGETS))
 
             res = install_harness_hooks(home=home, os_name="macos", dry_run=False)
-            self.assertEqual(res["changed_count"], 7)
+            self.assertEqual(res["changed_count"], 8)
             post = inspect_harness_hooks(home=home, os_name="macos")
             self.assertTrue(all(post[t]["installed"] and post[t]["in_sync"] for t in HOOK_TARGETS))
 

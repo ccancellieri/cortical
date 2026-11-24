@@ -1104,6 +1104,26 @@ def build_parser() -> argparse.ArgumentParser:
     wdash.add_argument("--json", action="store_true")
     wdash.set_defaults(func=_cmd_wiki_dashboard)
 
+    nxt = sub.add_parser(
+        "next",
+        aliases=["prompt"],
+        help="Prompt Studio & Ephemeral Browser Elicitor: elicit choices or autonomously synthesize next prompt",
+    )
+    nxt.add_argument("seed", nargs="?", default="", help="Brief seed idea or request (omit with --resume)")
+    nxt.add_argument("--mode", choices=["browser", "tui", "auto", "auto_if_confident"], default="browser")
+    nxt.add_argument("--browser", choices=["default", "chrome"], default="default")
+    nxt.add_argument("--target", default=None, help="Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, ...)")
+    nxt.add_argument("--issue", type=int, default=None, help="Anchor on a specific GitHub Issue number")
+    nxt.add_argument("--resume", action="store_true", help="Auto-propose next logical step from last commit, open issues & loop_memory")
+    nxt.add_argument("--local-llm", action="store_true", help="Optionally enrich questions locally via @role:daily_coder")
+    nxt.add_argument("--timeout", type=float, default=240.0, help="Ephemeral browser session timeout in seconds")
+    nxt.add_argument("--no-open", action="store_true", help="Do not launch browser automatically (print one-time loopback URL)")
+    nxt.add_argument("--repo-root", default=".")
+    nxt.add_argument("--db", default=None)
+    nxt.add_argument("--out", default=None, help="Write synthesized Markdown prompt to file")
+    nxt.add_argument("--json", action="store_true")
+    nxt.set_defaults(func=_cmd_next)
+
     return p
 
 
@@ -1513,6 +1533,38 @@ def _cmd_wiki_dashboard(args: argparse.Namespace) -> int:
         return 0
     print(f"Exported Wiki Explorer & Privacy Audit dashboard -> {target}")
     return 0
+
+
+def _cmd_next(args: argparse.Namespace) -> int:
+    from .composers.prompt_studio import run_next_prompt_flow
+
+    def _announce(url: str, port: int, _tok: str) -> None:
+        if not args.json:
+            print(f"Ephemeral Prompt Studio bound on 127.0.0.1:{port} (auto-closes on submit): {url}", file=sys.stderr)
+
+    res = run_next_prompt_flow(
+        args.seed or "",
+        mode=args.mode,
+        preferred_browser=args.browser,
+        target=args.target,
+        focus_issue=args.issue,
+        resume=bool(args.resume) or not bool((args.seed or "").strip()),
+        timeout_sec=float(args.timeout or 240.0),
+        use_local_llm=bool(args.local_llm),
+        open_browser=not bool(args.no_open),
+        repo_root=Path(args.repo_root).resolve(),
+        vault_db=resolve_default_db(args.db) if args.db else None,
+        on_browser_ready=_announce,
+    )
+    if args.out:
+        out_p = Path(args.out).expanduser()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(res["prompt"].rstrip() + "\n", encoding="utf-8")
+    if args.json:
+        _print_json(res)
+        return 0 if res.get("ok", True) else 1
+    print(res["prompt"])
+    return 0 if res.get("ok", True) else 1
 
 
 def main(argv: Optional[list[str]] = None) -> int:

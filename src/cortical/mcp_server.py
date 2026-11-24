@@ -1,4 +1,4 @@
-"""Lean 7-tool MCP Server (`stdio` default, optional `--transport streamable-http`) for Cortical Control Plane."""
+"""Lean 8-tool MCP Server (`stdio` default, optional `--transport streamable-http`) for Cortical Control Plane."""
 
 from __future__ import annotations
 
@@ -253,6 +253,44 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             "additionalProperties": True,
         },
     },
+    {
+        "name": "cortical_next_prompt",
+        "description": "Harvest repo/issue/ADR state + loop_memory, run 5-Trigger confidence gate or open one-shot ephemeral loopback browser questionnaire, and synthesize a high-precision continuation prompt.",
+        "annotations": {
+            "title": "Prompt Studio & Ephemeral Browser Elicitor (cortical next)",
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seed": {"type": "string", "description": "Short rough idea, seed request, or empty when resume=true"},
+                "mode": {"type": "string", "enum": ["browser", "tui", "auto", "auto_if_confident"], "default": "auto"},
+                "target": {"type": "string", "description": "Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, antigravity, opencode, dsh)"},
+                "issue": {"type": "integer", "description": "Optional GitHub Issue number to anchor on"},
+                "resume": {"type": "boolean", "default": False},
+                "browser": {"type": "string", "enum": ["default", "chrome"], "default": "default"},
+                "timeout_sec": {"type": "number", "default": 180},
+            },
+            "required": [],
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "mode_used": {"type": "string"},
+                "escalated": {"type": "boolean"},
+                "target": {"type": "string"},
+                "prompt": {"type": "string"},
+                "confidence_gate": {"type": "object"},
+                "prompt_audit_path": {"type": "string"},
+            },
+            "required": ["ok", "mode_used", "prompt", "confidence_gate"],
+            "additionalProperties": True,
+        },
+    },
 ]
 
 
@@ -433,6 +471,24 @@ class CorticalMCPServer:
             if h_path.is_file():
                 return {"found": True, "handoff": json.loads(h_path.read_text(encoding="utf-8"))}
             return {"found": False, "handoff": None, "brain_snapshot": self.vault.brain.get_snapshot(include_local_only=False)}
+        if name == "cortical_next_prompt":
+            from .composers.prompt_studio import run_next_prompt_flow
+
+            cfg = load_cortical_config()
+            req_mode = str(args.get("mode") or "auto")
+            return run_next_prompt_flow(
+                str(args.get("seed") or ""),
+                mode=req_mode,
+                preferred_browser=str(args.get("browser") or "default"),
+                target=args.get("target"),
+                focus_issue=int(args["issue"]) if args.get("issue") is not None else None,
+                resume=bool(args.get("resume", False)),
+                timeout_sec=float(args.get("timeout_sec") or 180.0),
+                open_browser=(req_mode == "browser"),
+                vault_db=self.vault.db_path,
+                data_dir=self.vault.db_path.parent,
+                config=cfg,
+            )
         raise ValueError(f"Unknown tool: {name}")
 
     def _private_prompt_text(self, alias: str) -> str:
@@ -508,6 +564,7 @@ class CorticalMCPServer:
                     "prompts": [
                         {"name": "cortical-private", "description": "Inject sanitized @private:<alias> context (omit alias to list available items)", "arguments": [{"name": "alias", "description": "Vault alias (autocompleted)", "required": False}]},
                         {"name": "cortical-local", "description": "Run task offline on local Ollama/Unsloth model", "arguments": [{"name": "prompt", "required": True}]},
+                        {"name": "cortical-next-prompt", "description": "Synthesize or elicit the next high-precision continuation prompt (Prompt Studio)", "arguments": [{"name": "seed", "description": "Seed idea or empty to resume", "required": False}, {"name": "target", "description": "Target profile (pi, argon, neon, hybrid, general)", "required": False}]},
                     ]
                 }
             elif method == "prompts/get":
@@ -517,6 +574,19 @@ class CorticalMCPServer:
                     txt = self._private_prompt_text(str(pargs.get("alias") or ""))
                 elif pname == "cortical-local":
                     txt = f"Delegate to `cortical_local_offload` locally: {pargs.get('prompt', '')}"
+                elif pname == "cortical-next-prompt":
+                    from .composers.prompt_studio import run_next_prompt_flow
+
+                    flow = run_next_prompt_flow(
+                        str(pargs.get("seed") or ""),
+                        mode="auto",
+                        target=pargs.get("target"),
+                        resume=not bool(str(pargs.get("seed") or "").strip()),
+                        open_browser=False,
+                        vault_db=self.vault.db_path,
+                        data_dir=self.vault.db_path.parent,
+                    )
+                    txt = flow["prompt"]
                 else:
                     raise ValueError(f"Unknown prompt: {pname}")
                 result = {"messages": [{"role": "user", "content": {"type": "text", "text": txt}}]}

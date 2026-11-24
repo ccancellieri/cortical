@@ -185,6 +185,7 @@ def render_zero_server_settings_html(snapshot: dict[str, Any]) -> str:
         <button class="nav-btn" data-view="harnesses" onclick="setView('harnesses')">🔌 Services &amp; Harnesses</button>
         <button class="nav-btn" data-view="models" onclick="setView('models')">🧠 Models &amp; Hardware Tuner</button>
         <button class="nav-btn" data-view="vault" onclick="setView('vault')">🛡️ Memory &amp; Privacy Vault</button>
+        <button class="nav-btn" data-view="prompt-studio" onclick="setView('prompt-studio')">✨ Prompt Studio (cortical next)</button>
         <button class="nav-btn" data-view="settings" onclick="setView('settings')">⚙️ Settings &amp; Config Composer</button>
         <button class="nav-btn" data-view="reports" onclick="setView('reports')">📊 Usage, ROI &amp; Reports</button>
       </nav>
@@ -233,6 +234,15 @@ const ST = {{
   pendingModels: [],
   planHarnesses: [],
   privacySampleText: '',
+  promptStudio: {{
+    seed: 'Implement and verify the next priority slice with zero external dependencies',
+    target: 'general',
+    execStrat: 'targeted_tdd',
+    guards: ['toon_serena', 'fail_closed_vault', 'local_offload'],
+    safety: 'dry_run_backup',
+    note: '',
+    directives: '',
+  }},
   lastFocus: null,
   cmdOpen: false,
   cmdQuery: '',
@@ -306,6 +316,7 @@ function renderAll() {{
   else if (ST.view === 'harnesses') m.innerHTML = renderHarnesses();
   else if (ST.view === 'models') m.innerHTML = renderModels();
   else if (ST.view === 'vault') m.innerHTML = renderVault();
+  else if (ST.view === 'prompt-studio') m.innerHTML = renderPromptStudio();
   else if (ST.view === 'settings') m.innerHTML = renderSettings();
   else if (ST.view === 'reports') m.innerHTML = renderReports();
   renderDirtyDock();
@@ -1698,6 +1709,155 @@ function exportAuditMarkdown() {{
   toast('ok', 'Exported cortical-audit-report.md');
 }}
 
+function buildStudioPromptText() {{
+  const ps = ST.promptStudio;
+  const profiles = {{
+    pi: ['Local-First Autonomous Coding Worker (`pi` + `@role:deep_reasoner` / `@role:daily_coder`)', '100% Local Air-Gapped'],
+    argon: ['Principal Coordinator & Architecture Orchestrator (`Argon` · `@role:orchestrator`)', '100% Local Air-Gapped'],
+    neon: ['End-to-End UX Researcher & QA Engineer (`Neon` · `@role:reviewer`)', '100% Local Air-Gapped'],
+    hybrid: ['Hybrid Remote Supervisor + Local-First Workers (`fail_closed` Boundary)', 'fail_closed (Zero Raw PII / max_security Blocked)'],
+    general: ['Autonomous Principal Software Engineer (Unified 8-Harness Contract)', 'fail_closed (Zero Raw PII / max_security Blocked)'],
+  }};
+  const [roleHdr, priv] = profiles[ps.target] || profiles.general;
+  const sanSeed = sanitizeClientSide(ps.seed, ST.draftCfg?.privacy?.custom_terms || []).text;
+  const sanDir = sanitizeClientSide(ps.directives, ST.draftCfg?.privacy?.custom_terms || []).text;
+  const sanNote = sanitizeClientSide(ps.note, ST.draftCfg?.privacy?.custom_terms || []).text;
+  const stratMap = {{
+    targeted_tdd: 'Targeted slice + regression tests + single-shot unittest verification',
+    adr_plan_first: 'ADR & GitHub Issue decomposition first before implementation code',
+    minimal_patch: 'Minimal surgical patch on existing symbols only',
+  }};
+  const safeMap = {{
+    dry_run_backup: 'Preview harness/file mutations with --dry-run & preserve rollback snapshot',
+    isolated_tempdir: 'Validate strictly inside isolated tempfile sandboxes first',
+    commit_and_push: 'Commit verified changes & push once full unittest suite is green',
+  }};
+  const adrs = (ST.snap.adrs || []).slice(-4).map((a) => a.id + ':' + a.title.slice(0, 48)).join(' | ');
+  return [
+    `# Role & Execution Target: ${{roleHdr}}`,
+    `- **Target Profile:** \\`${{ps.target}}\\``,
+    `- **Privacy & Egress Posture:** \\`${{priv}}\\``,
+    ``,
+    `## 1. Primary Objective`,
+    sanSeed,
+    ``,
+    `## 2. Elicited Architectural & Execution Decisions`,
+    `- **Execution Depth:** ${{stratMap[ps.execStrat] || ps.execStrat}}${{sanNote ? ' *(Note: ' + sanNote + ')*' : ''}}`,
+    `- **Token & Privacy Guardrails:** ${{ps.guards.join(', ') || 'toon_serena'}}`,
+    `- **Workspace Mutation Safety:** ${{safeMap[ps.safety] || ps.safety}}`,
+    ...(sanDir ? [``, `## 3. Additional User Directives`, sanDir] : []),
+    ``,
+    `## 4. Snapshot Context (Zero-CDN Browser Studio)`,
+    `- **Hardware Tier:** \\`${{ST.snap.hardware?.classification?.tier || 'tier_1b'}}\\` (\\`num_ctx=${{ST.snap.hardware?.dynamic_num_ctx || 65536}}\\`)`,
+    `- **Recent ADRs:** ${{adrs || 'ADR-001..ADR-017'}}`,
+    ``,
+    `## 5. Mandatory Acceptance Gate`,
+    `- Preserve \\`dependencies = []\\` in \\`pyproject.toml\\` (Python 3.10+ stdlib only) and zero persistent daemons.`,
+    `- Reference \\`@role:*\\` model slots instead of hardcoded model tags.`,
+    `- Verify in one shot via \\`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q\\`.`,
+  ].join('\\n');
+}}
+
+function toggleStudioGuard(g) {{
+  const cur = ST.promptStudio.guards || [];
+  ST.promptStudio.guards = cur.includes(g) ? cur.filter((x) => x !== g) : cur.concat([g]);
+  renderAll();
+}}
+
+function renderPromptStudio() {{
+  const ps = ST.promptStudio;
+  const promptTxt = buildStudioPromptText();
+  const cliCmd = `cortical next "${{(ps.seed || '').replace(/"/g, '\\\\"')}}" --target ${{ps.target}} --mode browser`;
+  return `
+    <div class="page-head">
+      <div>
+        <h1>✨ Prompt Studio &amp; Ephemeral Browser Elicitor (<code>cortical next</code>)</h1>
+        <p>Compose privacy-safe, role-targeted continuation prompts right in the browser, or launch <code>cortical next</code> on <code>127.0.0.1:0</code> across all 8 harnesses.</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <span class="pill ok">⚡ Zero-LLM Stdlib Ready</span>
+        <button class="btn" onclick="copyText('cortical next --resume --mode auto', 'cortical next --resume')">🤖 Copy Autonomous CLI</button>
+        <button class="btn primary" data-cmd="${{esc(cliCmd)}}" onclick="copyText(this.dataset.cmd, 'cortical next CLI')">🚀 Copy Live Browser Elicitor CLI</button>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <div class="card">
+          <div class="card-head">
+            <h2>1. Seed Intent &amp; Target Execution Persona</h2>
+            <span class="pill violet">ADR-017 · 8 Harnesses</span>
+          </div>
+          <div class="field">
+            <label for="ps-seed">Seed Request / Rough Idea</label>
+            <input id="ps-seed" class="input" value="${{esc(ps.seed)}}" oninput="ST.promptStudio.seed=this.value;document.getElementById('ps-out').value=buildStudioPromptText()" />
+            <div class="hint">Client-side PII redaction automatically masks emails, IBANs, phones &amp; API secrets before export.</div>
+          </div>
+          <div class="field">
+            <label for="ps-target">Target Execution Profile</label>
+            <select id="ps-target" class="select" onchange="ST.promptStudio.target=this.value;renderAll()">
+              <option value="general" ${{ps.target==='general'?'selected':''}}>General Coding Harness (All 8 Harnesses)</option>
+              <option value="pi" ${{ps.target==='pi'?'selected':''}}>Local Worker (pi · @role:deep_reasoner / @role:daily_coder)</option>
+              <option value="argon" ${{ps.target==='argon'?'selected':''}}>Coordinator (Argon · @role:orchestrator)</option>
+              <option value="neon" ${{ps.target==='neon'?'selected':''}}>QA &amp; UX Persona (Neon · @role:reviewer)</option>
+              <option value="hybrid" ${{ps.target==='hybrid'?'selected':''}}>Hybrid (Remote Supervisor + Local Workers · fail_closed)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>2. Clarifying Architecture &amp; Safety Choices</h2></div>
+          <div class="field">
+            <label for="ps-strat">Q1. Execution Depth &amp; Verification Cadence</label>
+            <select id="ps-strat" class="select" onchange="ST.promptStudio.execStrat=this.value;renderAll()">
+              <option value="targeted_tdd" ${{ps.execStrat==='targeted_tdd'?'selected':''}}>(Recommended) Targeted slice + regression tests + single-shot unittest</option>
+              <option value="adr_plan_first" ${{ps.execStrat==='adr_plan_first'?'selected':''}}>ADR &amp; GitHub Issue decomposition first</option>
+              <option value="minimal_patch" ${{ps.execStrat==='minimal_patch'?'selected':''}}>Minimal surgical patch on existing symbols</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ps-note">Custom Note / Comment on Execution</label>
+            <input id="ps-note" class="input" placeholder="Optional inline note..." value="${{esc(ps.note)}}" oninput="ST.promptStudio.note=this.value;document.getElementById('ps-out').value=buildStudioPromptText()" />
+          </div>
+          <div class="field">
+            <label>Q2. Token-Saving &amp; Privacy Firewall Guardrails</label>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;">
+              <label><input type="checkbox" ${{ps.guards.includes('toon_serena')?'checked':''}} onchange="toggleStudioGuard('toon_serena')" /> TOON + Serena LSP</label>
+              <label><input type="checkbox" ${{ps.guards.includes('fail_closed_vault')?'checked':''}} onchange="toggleStudioGuard('fail_closed_vault')" /> fail_closed Vault</label>
+              <label><input type="checkbox" ${{ps.guards.includes('local_offload')?'checked':''}} onchange="toggleStudioGuard('local_offload')" /> Local Offload (@role:*)</label>
+            </div>
+          </div>
+          <div class="field">
+            <label for="ps-safe">Q3. Workspace Mutation Safety</label>
+            <select id="ps-safe" class="select" onchange="ST.promptStudio.safety=this.value;renderAll()">
+              <option value="dry_run_backup" ${{ps.safety==='dry_run_backup'?'selected':''}}>(Recommended) Preview with --dry-run &amp; rollback backup</option>
+              <option value="isolated_tempdir" ${{ps.safety==='isolated_tempdir'?'selected':''}}>Isolated tempfile sandbox validation first</option>
+              <option value="commit_and_push" ${{ps.safety==='commit_and_push'?'selected':''}}>Commit &amp; push once test suite is 100% green</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ps-dir">Additional Global Directives</label>
+            <textarea id="ps-dir" class="textarea" rows="3" placeholder="Specific files, constraints, or 'Avoid ...' rules..." oninput="ST.promptStudio.directives=this.value;document.getElementById('ps-out').value=buildStudioPromptText()">${{esc(ps.directives)}}</textarea>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="card-head">
+            <h2>⚡ Live Synthesized Continuation Prompt</h2>
+            <span class="pill ok">🛡️ fail_closed Sanitized</span>
+          </div>
+          <textarea id="ps-out" class="textarea" rows="24">${{esc(promptTxt)}}</textarea>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+            <button class="btn primary" onclick="copyText(document.getElementById('ps-out').value, 'synthesized prompt')">📋 Copy Synthesized Prompt</button>
+            <button class="btn" onclick="downloadFile('cortical-next-prompt.md', document.getElementById('ps-out').value + '\\n', 'text/markdown')">⬇️ Download .md</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}}
+
 // =========================================================================
 // LOCAL FOLDER BRIDGE & COMMAND PALETTE (Cmd/Ctrl + K)
 // =========================================================================
@@ -1759,6 +1919,7 @@ function cmdItems() {{
     {{ label: 'View: Services & 8 Harnesses', g: 'Nav', run: () => setView('harnesses') }},
     {{ label: 'View: Models & Hardware Tuner', g: 'Nav', run: () => setView('models') }},
     {{ label: 'View: Memory & Privacy Vault', g: 'Nav', run: () => setView('vault') }},
+    {{ label: 'View: Prompt Studio (cortical next)', g: 'Nav', run: () => setView('prompt-studio') }},
     {{ label: 'View: Settings & Config Composer', g: 'Nav', run: () => setView('settings') }},
     {{ label: 'View: Usage, ROI & Reports', g: 'Nav', run: () => setView('reports') }},
     {{ label: 'CLI: Copy cortical sync --dry-run', g: 'CLI', run: () => copyText('cortical sync --dry-run', 'sync --dry-run') }},

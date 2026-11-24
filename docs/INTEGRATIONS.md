@@ -46,7 +46,7 @@ Cortical is **runner-neutral**—Tier-1 features (Privacy Vault MD/DOCX/XLSX/PPT
 
 ---
 
-## 2. Standard 7-Tool MCP Server Setup (`stdio` JSON-RPC 2.0)
+## 2. Standard 8-Tool MCP Server Setup (`stdio` JSON-RPC 2.0)
 
 Use `python3 -m cortical.mcp_server` (or installed `cortical-mcp` script).
 
@@ -92,7 +92,7 @@ CORTICAL_VAULT_DB = "/path/to/cortical/.cortical_data/vault.db"
 
 ---
 
-## 3. Lean 7-Tool MCP Surface + Native Resources & Prompts (Plus Opt-In 5-Tool `cortical-wiki`)
+## 3. Lean 8-Tool MCP Surface + Native Resources & Prompts (Plus Opt-In 5-Tool `cortical-wiki`)
 
 | MCP Tool / Surface | Purpose |
 | --- | --- |
@@ -103,7 +103,8 @@ CORTICAL_VAULT_DB = "/path/to/cortical/.cortical_data/vault.db"
 | `cortical_local_offload` | Delegate prompt/task offline to local LLM runner (records SQLite telemetry at `$0` cloud cost) |
 | `cortical_roi_report` | Zero-cloud-token local vs cloud token usage, USD savings & remaining cloud budget |
 | `cortical_handoff` | Save/load shared working context across `antigravity`, `pi`, `opencode`, `claude-code`, `codex` |
-| Native `resources` & `prompts` | `@`-autocomplete `cortical://private/<alias>`, `cortical://brain`, `/cortical-private` & `/cortical-local` |
+| `cortical_next_prompt` | Harvest repo/issue/ADR state + `loop_memory`, run 5-Trigger gate or one-shot `127.0.0.1:0` browser elicitor (`cortical next`), and synthesize continuation prompt |
+| Native `resources` & `prompts` | `@`-autocomplete `cortical://private/<alias>`, `cortical://brain`, `/cortical-private`, `/cortical-local` & `/cortical-next-prompt` |
 | Opt-in `cortical-wiki` (`--wiki`) | `wiki_search`, `wiki_navigate`, `wiki_crawl_delta`, `wiki_record_episode`, `wiki_verify_citation` |
 
 ---

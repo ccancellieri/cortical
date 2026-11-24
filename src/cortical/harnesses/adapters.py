@@ -181,6 +181,7 @@ def _build_shared_rules_md(
         "- **Force Local LLM (`/local`):** Whenever the user starts a message with `/local` (or when `routing.mode == 'full_local'`), execute the request strictly via `cortical_local_offload(role='daily_coder')` on `cortical-mcp` and return the local output.",
         "- **Context Handoff & Low-Token Switch:** Use `cortical_handoff(action='save'|'load')` to share active task context across harnesses; when cloud budget drops below threshold, save handoff and invite the user to continue locally via `pi`, `opencode`, or `unsloth start claude`.",
         "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
+        "- **Interactive Next-Prompt Elicitor (`/next` / `cortical-next`):** When the user types `/next <seed>` or asks to build/refine the next continuation prompt, invoke `cortical_next_prompt(seed=..., mode='browser')` (or `mode='auto'` for high-confidence coordinator loops, or CLI `cortical next \"<seed>\"`) to open the one-shot loopback browser questionnaire and execute or return the synthesized prompt.",
         "- **Dashboard (`/cortical-dashboard`):** Launch `cortical cortical --open` in Chrome to configure per-machine role mappings/frameworks and upload task files or directories.",
     ]
     if is_remote:
@@ -529,6 +530,7 @@ def plan_sync(
             "cortical_streamable_http": "http://127.0.0.1:9122/mcp",
             "launch_serena_cmd": "cortical serve-mcp serena --port 9121",
             "launch_cortical_cmd": "cortical serve-mcp cortical --port 9122",
+            "next_prompt_elicitor_cmd": "cortical next --resume --mode browser",
             "supported_cli_wrappers": ["unsloth start pi", "unsloth start opencode", "unsloth start claude", "unsloth start dsh"],
             "orchestrator": {k: v for k, v in orch.items() if k != "context_profile"},
             "context_profile": orch.get("context_profile"),

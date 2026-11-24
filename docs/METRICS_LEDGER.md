@@ -11,12 +11,12 @@ Single source of truth for **Cortical** (`https://github.com/ccancellieri/cortic
 | Metric | Verified Baseline (`2026-11-24`) | Target (30-Day) | Verification Command |
 | --- | --- | --- | --- |
 | **External Runtime Dependencies** | **`0`** (`dependencies = []`) | `0` (invariant) | `grep dependencies pyproject.toml` |
-| **Unit & Integration Tests** | **`57 / 57` PASS** (`0` failures, `0` skips, `2,678` test LOC) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
-| **Codebase Size (`src/cortical/`)** | **`19,086` total LOC** (**`15,048` Core Python/CLI/Wiki** + **`4,038` embedded zero-CDN HTML/CSS/JS SPA templates**; `-40.0%` vs `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
+| **Unit & Integration Tests** | **`60 / 60` PASS** (`0` failures, `0` skips, `2,997` test LOC) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
+| **Codebase Size (`src/cortical/`)** | **`20,799` total LOC** (**`16,600` Core Python/CLI/Prompt Studio/Wiki** + **`4,199` embedded zero-CDN HTML/CSS/JS SPA templates**; `-34.6%` vs `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
 | **Zero-LLM Privacy Vault Independence** | **`100%` offline stdlib** (MD/DOCX/XLSX/PPTX/PDF + SHA-256 ledger verified on unreachable runner port `:9`) + **7 local runners** (`ollama`, `unsloth`, `lm_studio`, `llama_cpp`, `mlx_lm`, `vllm`, `openai_compatible`) | `100%` Tier-1 zero-LLM | `unittest` `test_zero_runner_privacy_vault_and_toon_operate_100pct_offline` |
 | **TOON Lossless Compression** | **`-78.12%` vs pretty JSON** · **`-62.09%` vs compact JSON** (`745`/`430` -> `163` tok) | `>= 60%` vs compact | `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare` |
 | **Privacy Sanitizer Precision** | **`100.0%` tech prose preserved** · `policy=fail_closed` · `pii_masked=True` | `100.0%` | `cortical bench --compare` |
-| **Lean 7-Tool MCP Handshake** | **`4.26–4.74 ms`** (`ingest+read`, `7` core tools + opt-in `5`-tool `cortical-wiki` + 10 semantic `@role:*` slots) | `< 10 ms` | `cortical bench --compare` |
+| **Lean 8-Tool MCP Handshake** | **`4.26–4.74 ms`** (`ingest+read`, `8` core tools incl. `cortical_next_prompt` + opt-in `5`-tool `cortical-wiki` + 10 semantic `@role:*` slots) | `< 10 ms` | `cortical bench --compare` |
 | **Tier 1B 27B Auto-Context (`pi`)** | **`65,536` ctx** (`@role:deep_reasoner`, `9.08 GiB` Metal VRAM, `timeout=600s`, `reasoning_effort=none`) | `0` timeouts / `0` truncations | `pi -p --no-session --model router/cortical-deep` + `ollama /api/ps` |
 | **Real-World `pi` Local Offload (`01a20890`)** | **`3,481,633` local tokens** (`3,452,912` in + `28,721` out, `$0` cloud cost) | `>= 80%` local offload | `~/.pi/agent/sessions/...01a20890...jsonl` |
 | **GitHub Issues Resolved** | **`49` closed / `10` open** (`59` total) | `>= 90%` core issues closed | `gh issue list --state all --limit 100` |

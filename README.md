@@ -12,7 +12,7 @@
 - **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` (`--transport streamable-http`), opt-in `--serve` dashboard, or HTTP router integration
 - **Zero-LLM Privacy Vault (Works Without Any Local Model):** Deterministic PII + secret + custom-term masking, `.docx`/`.xlsx`/`.pptx`/selectable `.pdf` XML metadata stripping, `fail_closed` cloud egress guard, and cryptographic **SHA-256** audit ledger run **100% in Python stdlib**—no Ollama or local LLM required.
 - **Multi-Runner Local & Hybrid Orchestration (7 Runners + 10 `@role:*` Slots):** Supports **`Ollama` (`:11434`)**, **`Unsloth Studio` (`:8888/v1`)**, **`LM Studio` (`:1234/v1`)**, **`llama.cpp` (`:8080/v1`)**, **`Apple MLX` (`:8080/v1`)**, **`vLLM` (`:8000/v1`)**, and custom **`openai_compatible`** endpoints through 10 semantic `@role:*` model abstractions (never hardcode model tags).
-- **Codebase Breakdown (`wc -l` Verifiable):** Pre-redesign monolith (`~31.8K` LOC) archived in `legacy-v0.2` / `v0.2.0-legacy`; modular `v0.3.0` spans **7 Python subpackages** totaling **`19,086` LOC** (**`15,048` LOC Core Python + CLI + Merkle Wiki** and **`4,038` LOC embedded zero-CDN HTML/CSS/JS SPA templates**), verified by **`57/57` passing `unittest` tests** (`2,678` test LOC).
+- **Codebase Breakdown (`wc -l` Verifiable):** Pre-redesign monolith (`~31.8K` LOC) archived in `legacy-v0.2` / `v0.2.0-legacy`; modular `v0.3.0` spans **7 Python subpackages** totaling **`20,799` LOC** (**`16,600` LOC Core Python + CLI + Prompt Studio + Merkle Wiki** and **`4,199` LOC embedded zero-CDN HTML/CSS/JS SPA templates**), verified by **`60/60` passing `unittest` tests** (`2,997` test LOC).
 
 ---
 
@@ -22,7 +22,7 @@
 git clone https://github.com/ccancellieri/cortical.git && cd cortical
 python3 -m venv .venv && .venv/bin/pip install --no-deps -e .
 
-# 1. Benchmark lossless TOON (-78.12%), Zero-LLM Privacy Vault & 7-tool MCP
+# 1. Benchmark lossless TOON (-78.12%), Zero-LLM Privacy Vault & 8-tool MCP
 PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
 
 # 2. Inspect hardware tier, Tier-1 Zero-LLM Stdlib & detected local runners
@@ -52,7 +52,7 @@ Prefer zero install? Open **[`https://ccancellieri.github.io/cortical/`](https:/
 
 ---
 
-## Core Architecture (7 Subpackages + Lean 7-Tool MCP)
+## Core Architecture (7 Subpackages + Lean 8-Tool MCP)
 
 Cortical composes best-of-breed OSS tools (`Serena` LSP, `RTK` shell compressor, `PinchTab` / `Playwright` accessibility browser, `context-mode` output sandbox, optional `LiteLLM` / `OmniRoute` / `claude-code-router`) and handles the four gaps OSS leaves open:
 
@@ -70,8 +70,9 @@ Cortical composes best-of-breed OSS tools (`Serena` LSP, `RTK` shell compressor,
    - **Channel 3 (`cortical intercept`):** Deterministic pre-send attachment interception strictly on 100%-verified harnesses (`pi`, `claude-code`, `opencode`, `openclaw`, `codex`, `dsh`).
 4. **Deterministic Lossless Compression (`src/cortical/compression/`):**
    - Native pure-Python lossless `TOON` encoder/decoder with deterministic round-trip fidelity, ANSI/log compaction, XML/YAML whitespace normalization, and an automatic `>= 10%` saving guard vs compact JSON.
-5. **Lean 7-Tool MCP Server (`src/cortical/mcp_server.py`):**
-   - Minimal surface (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`, `cortical_roi_report`, `cortical_handoff`) with MCP `annotations`, `outputSchema`, `structuredContent`, native `resources`, `prompts` & `completions`, plus opt-in 5-tool `cortical-wiki` RAG MCP (`src/cortical/wiki/mcp_server.py`).
+5. **Lean 8-Tool MCP Server (`src/cortical/mcp_server.py`) & Prompt Studio (`src/cortical/composers/prompt_studio.py`):**
+   - Minimal surface (`cortical_vault_read`, `cortical_ingest_private`, `cortical_compress`, `cortical_doctor_status`, `cortical_local_offload`, `cortical_roi_report`, `cortical_handoff`, `cortical_next_prompt`) with MCP `annotations`, `outputSchema`, `structuredContent`, native `resources`, `prompts` (`cortical-private`, `cortical-local`, `cortical-next-prompt`) & `completions`, plus opt-in 5-tool `cortical-wiki` RAG MCP (`src/cortical/wiki/mcp_server.py`).
+   - **Prompt Studio & Ephemeral Browser Elicitor (`cortical next` / `cortical prompt` — `ADR-017`):** One-shot `127.0.0.1:0` loopback questionnaire with 256-bit token auth, anti-DNS-rebinding `Host` guard, immediate socket teardown, persistent `.cortical_data/loop_memory.json` learning, and a deterministic **5-Trigger Confidence Gate** (`--mode auto`) across all 8 harnesses.
 6. **Zero-Token Analytics, Auto-Tuner & Comparative Benchmark (`src/cortical/analytics/`):**
    - Offline ROI reporting (`cortical roi`), local Auto-Tuner (`cortical tune`), static zero-server dashboard (`cortical dashboard`), Wiki audit explorer (`cortical wiki-dashboard`), and reproducible comparative benchmarks (`cortical bench --compare`).
 
@@ -87,7 +88,7 @@ Measured offline with `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --c
 | **Privacy Sanitizer Precision** | Naive Title-Case false positives | `100.0%` technical prose preserved | **`100%` PII masked · `policy=fail_closed`** |
 | **Tier 1A Hybrid (`16 GB + 4 GB VRAM`)** | Static defaults / OOM risk | `qwen2.5:3b` (VRAM) + `qwen3.5:9b-q3_k_xl` | **Swap-free hybrid fit** |
 | **Tier 1B Unified (`16 GB` + `27B 4-bit XXS`)** | `4096` silent Ollama clipping | `qwen3.8:27b-q4_xxs` (`8.1 GB`) @ `32,768` ctx | **Variable quant deep reasoner** |
-| **Lean MCP Tool Surface** | Heavy server + 12+ tools | `7` tools + native Resources & Prompts | **`~1–4 ms` ingest+read handshake** |
+| **Lean MCP Tool Surface** | Heavy server + 12+ tools | `8` tools + native Resources & Prompts | **`~1–4 ms` ingest+read handshake** |
 
 ---
 
@@ -168,6 +169,10 @@ PYTHONPATH=src .venv/bin/python -m cortical.cli intercept --harness pi --prompt 
 PYTHONPATH=src .venv/bin/python -m cortical.cli compress ./payload.json
 PYTHONPATH=src .venv/bin/python -m cortical.cli serve-mcp cortical --port 9122 --dry-run
 PYTHONPATH=src .venv/bin/python -m cortical.cli browser status
+
+# Interactive Prompt Studio & Autonomous Next-Prompt Elicitor (127.0.0.1:0 one-shot loopback, 0 persistent ports)
+PYTHONPATH=src .venv/bin/python -m cortical.cli next "Add multi-runner health metrics" --target pi
+PYTHONPATH=src .venv/bin/python -m cortical.cli next --resume --mode auto
 
 # Run local Auto-Tuner, ROI report, offline benchmark & full unit test suite
 PYTHONPATH=src .venv/bin/python -m cortical.cli tune --apply
