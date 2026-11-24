@@ -316,12 +316,13 @@ def detect_entities_local_llm(
         raw_reply = llm_fn(prompt)
     else:
         from ..config import invoke_configured_runner
+        from ..roles import normalize_role_or_model
 
         raw_reply = invoke_configured_runner(
             prompt,
             system_prompt="You are a strict GDPR NER extractor. Output valid JSON only.",
             config=config,
-            model_override=model or "qwen2.5:1.5b",
+            model_override=normalize_role_or_model(model, config, default_role="ner"),
             max_tokens=300,
             timeout=12.0,
             role="privacy_ner",

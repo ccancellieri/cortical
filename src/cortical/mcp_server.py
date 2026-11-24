@@ -162,7 +162,11 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "prompt": {"type": "string"},
-                "model": {"type": "string"},
+                "role": {
+                    "type": "string",
+                    "description": "Semantic model role (router, ner, fast_coder, daily_coder, reviewer, summarizer, deep_reasoner, orchestrator, vision)",
+                },
+                "model": {"type": "string", "description": "Optional explicit model ID or @role:<name> alias"},
                 "vault_alias": {"type": "string", "description": "Optional vault alias (including max_security) processed strictly offline"},
             },
             "required": ["prompt"],
@@ -315,19 +319,22 @@ class CorticalMCPServer:
             import time as _t
             from .analytics.roi import export_roi_json
 
+            from .roles import normalize_role_or_model
+
             cfg = load_cortical_config()
             prompt = str(args.get("prompt") or "")
             if args.get("vault_alias"):
                 item = self.vault.read_resource(str(args["vault_alias"]), allow_local_only=True)
                 prompt = f"Sanitized local context (@private:{item['alias']}):\n{item['text']}\n\nTask:\n{prompt}"
-            used_model = str(args.get("model") or cfg.get("active_model") or (cfg.get("models_by_role") or {}).get("daily_coder") or "qwen3.5:9b-q3_k_xl")
+            role_or_model = str(args.get("model") or args.get("role") or "").strip()
+            used_model = normalize_role_or_model(role_or_model, cfg, default_role="daily_coder")
             t0 = _t.perf_counter()
             out = invoke_configured_runner(
                 prompt,
                 system_prompt="Reply concisely offline using only provided context.",
                 config=cfg,
-                model_override=args.get("model") or None,
-                role="mcp_local_offload",
+                model_override=used_model,
+                role=str(args.get("role") or "mcp_local_offload"),
             )
             elapsed = round(_t.perf_counter() - t0, 2)
             export_roi_json(self.vault.db_path.parent, config=cfg)

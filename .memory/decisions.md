@@ -264,3 +264,14 @@ python -m unittest discover -s tests -p "test_cortical.py"
   - `README.md`: Added top-of-page **Try in 60 Seconds (Zero Dependencies)** and **10-Second Interactive Browser Demo** callouts with exact verified numbers.
   - `docs/UPSTREAM_PLAYBOOK.md` & `docs/LAUNCH_CONTENT.md`: Prepared 7 value-first upstream PR/issue contribution kits (zero auto-submission) and 3 verified-number LinkedIn launch posts (EN + IT variants) with visual proof specs.
 - **LinkedIn Cover Image Rule:** Always attach a freshly generated cover image to every LinkedIn post, keep it out of git (never commit), and delete it once the post is published.
+
+---
+
+## Session 2026-11-24 (Role-Based Model Abstraction, UI English Alignment & Neon QA P0/P1 Fixes)
+
+- **Canonical 10-Role Model Abstraction (`src/cortical/roles.py`):** Introduced `MODEL_ROLES` (`router`, `ner`, `fast_coder`, `daily_coder`, `reviewer`, `summarizer`, `deep_reasoner`, `orchestrator`, `vision`, `embedder`), semantic aliases (`cortical-*`, `@role:<name>`), deterministic fallback chains, `resolve_role_model`, `resolve_all_roles`, and `normalize_role_or_model`. Wired across `config.py`, `mcp_server.py` (`cortical_local_offload(role=...)`), `composers/router.py`, `harnesses/adapters.py` (`_build_shared_rules_md` now uses `@role:` abstractions instead of concrete model tags), `privacy/{vault,sanitizer,brain}.py`, `snapshot.py`, and `zero_server_ui.py` (Reusable Model Role Registry UI).
+- **UI Language Alignment (`dashboard.py`, `docs/help.html`, `docs/settings.html`):** Aligned `help.html` and `settings.html` to default consistently to English (`'en'`) with zero mixed Italian strings in English views.
+- **Neon QA P0/P1 Fixes:**
+  - `privacy/vault.py` & `cli.py`: `sync_from_disk` now falls back to configured `privacy.vision_model` & `resolve_role_model("ner", cfg)` for `vault_inbox` items; `cortical watch` reports `.error.json` counts and details on stderr.
+  - `analytics/zero_server_ui.py`: fixed broken `onclick` quoting in `renderServiceDrawer()` via `data-copy`; made 8-Harness Matrix and Vault Context Budget Gauge dynamically recompute from `ST.draftCfg`; added neutral empty-ledger badge (`0 entries`), US phone redaction regex (`+1-555-0199`), partial profile diff cleanup, bottom-right toast positioning, sticky sidebar, and `.main` bottom padding for the sticky dock.
+- **Verified:** `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` -> **`53/53` OK** (`15.786s`), `docs/settings.html` & `html/settings.html` `node --check` exit `0`.

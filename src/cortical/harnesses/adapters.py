@@ -172,15 +172,16 @@ def _build_shared_rules_md(
     lines = [
         "# Cortical Unified Harness Contract",
         "",
-        f"- **Orchestrator:** {orch_desc}" + (f" · **Auth Env:** `{orch['api_key_env']}`" if orch.get("api_key_env") else " · **Posture:** Air-Gapped Local"),
-        f"- **Default Local Workers:** `{model_id}` · **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
+        f"- **Orchestrator (`@role:orchestrator`):** {orch_desc}" + (f" · **Auth Env:** `{orch['api_key_env']}`" if orch.get("api_key_env") else " · **Posture:** Air-Gapped Local"),
+        f"- **Model Roles (Abstracted — Never Hardcode Model Tags):** Use semantic roles via `cortical_local_offload(role=...)` or router aliases (`@role:router` / `cortical-router`, `@role:ner` / `cortical-ner`, `@role:fast_coder` / `cortical-fast`, `@role:daily_coder` / `cortical-coder`, `@role:reviewer` / `cortical-reviewer`, `@role:summarizer` / `cortical-summarizer`, `@role:deep_reasoner` / `cortical-deep`, `@role:vision` / `cortical-vision`).",
+        f"- **LLM Routing Mode:** `{r_mode}` (cloud fallback threshold: `{r_thresh:,}` tok)" + (f" · **Router:** `{router_url}`" if router_url else ""),
         f"- **Active Token-Savers:** {', '.join(f'`{t}`' for t in tools_active) if tools_active else '`serena`, `rtk`, `TOON`'}",
         "- **Code Navigation & Edits:** Prefer Serena LSP symbol tools (`get_symbols_overview`, `find_symbol`, `replace_symbol_body`) over reading full files.",
-        "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload` for `max_security` items).",
-        "- **Force Local LLM (`/local`):** Whenever the user starts a message with `/local` (or when `routing.mode == 'full_local'`), execute the request strictly via `cortical_local_offload` on `cortical-mcp` and return the local Ollama output.",
+        "- **3+1 Context & Local Offload:** Use `cortical_vault_read(alias, tier='light'|'medium'|'high'|'max')` (never read raw private files; use `cortical_local_offload(role='summarizer'|'reviewer'|'deep_reasoner', vault_alias=...)` for `max_security` items).",
+        "- **Force Local LLM (`/local`):** Whenever the user starts a message with `/local` (or when `routing.mode == 'full_local'`), execute the request strictly via `cortical_local_offload(role='daily_coder')` on `cortical-mcp` and return the local output.",
         "- **Context Handoff & Low-Token Switch:** Use `cortical_handoff(action='save'|'load')` to share active task context across harnesses; when cloud budget drops below threshold, save handoff and invite the user to continue locally via `pi`, `opencode`, or `unsloth start claude`.",
         "- **Privacy Vault:** Never read raw files inside `.cortical_data/` or `~/Documents/Cortical/vault/`; reference `@private:<alias>` or sanitized MCP resources.",
-        "- **Dashboard (`/cortical-dashboard`):** Launch `cortical cortical --open` in Chrome to configure per-machine models/frameworks and upload task files or directories.",
+        "- **Dashboard (`/cortical-dashboard`):** Launch `cortical cortical --open` in Chrome to configure per-machine role mappings/frameworks and upload task files or directories.",
     ]
     if is_remote:
         lines.extend([
@@ -195,14 +196,10 @@ def _build_shared_rules_md(
 
 
 def _model_ctx_for_harness(model_id: str, hw: dict[str, Any], rec_by_role: dict[str, Any], orch: dict[str, Any]) -> int:
-    """Computes hardware-ceiling `num_ctx` for a specific local model or alias."""
-    alias_map = {
-        "cortical-deep": (rec_by_role.get("deep_reasoner") or {}).get("model_id") or "qwen3.8:27b-iq2_xxs",
-        "cortical-orchestrator": (rec_by_role.get("orchestrator") or {}).get("model_id") or "qwen3.8:27b-iq2_xxs",
-        "cortical-fast": (rec_by_role.get("daily_coder") or {}).get("model_id") or "qwen3.5:9b-q3_k_xl",
-        "local-default": (rec_by_role.get("daily_coder") or {}).get("model_id") or "qwen3.5:9b-q3_k_xl",
-    }
-    eff_mid = alias_map.get(model_id, model_id)
+    """Computes hardware-ceiling `num_ctx` for a specific local model or semantic role alias."""
+    from ..roles import normalize_role_or_model
+
+    eff_mid = normalize_role_or_model(model_id, rec_models={"recommended_by_role": rec_by_role})
     if orch.get("context_strategy") == "fixed" and model_id in {orch.get("model"), "cortical-deep", "cortical-orchestrator"}:
         return int(orch.get("effective_num_ctx") or 65536)
     base_ctx = DEFAULT_MODEL_CONTEXT_WINDOWS.get(eff_mid, 32768)

@@ -136,9 +136,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "models_by_role": {
         "router": "qwen2.5:1.5b",
         "ner": "qwen2.5:1.5b",
+        "fast_coder": "qwen3.5:9b-q3_k_xl",
         "daily_coder": "qwen3.5:9b-q3_k_xl",
+        "reviewer": "qwen3.5:9b-q3_k_xl",
+        "summarizer": "qwen2.5:1.5b",
         "deep_reasoner": "qwen3.8:27b-iq2_xxs",
         "orchestrator": "qwen3.8:27b-iq2_xxs",
+        "vision": "",
+        "embedder": "nomic-embed-text",
     },
     "runners": {
         "ollama": {
@@ -468,10 +473,13 @@ def invoke_configured_runner(
 ) -> str:
     """Invokes the configured local runner (`ollama`, `unsloth`, `llama_cpp`, `mlx_lm`, `openai_compatible`, custom)."""
     cfg = config or load_cortical_config()
+    from .roles import normalize_role_or_model
+
     r_name = str(runner_name or cfg.get("active_runner") or "ollama").strip()
     r_cfg = dict((cfg.get("runners") or {}).get(r_name) or {})
     r_type = str(r_cfg.get("type") or r_name).lower()
-    model = str(model_override or cfg.get("active_model") or r_cfg.get("default_model") or "qwen3.5:9b-q3_k_xl")
+    raw_model = str(model_override or cfg.get("active_model") or r_cfg.get("default_model") or "").strip()
+    model = normalize_role_or_model(raw_model, cfg, default_role="daily_coder")
     t0 = time.perf_counter()
 
     if r_name.lower() in _CUSTOM_RUNNERS:

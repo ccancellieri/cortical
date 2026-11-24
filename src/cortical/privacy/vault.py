@@ -314,16 +314,20 @@ class PrivacyVault:
                     try:
                         terms = meta.get("custom_terms")
                         keep = meta.get("keep_terms")
-                        cfg_m = {"privacy": {}}
+                        from ..roles import resolve_role_model
+
+                        cfg_m: dict[str, Any] = {"privacy": {}}
                         try:
                             from ..config import load_cortical_config
                             cfg_m = load_cortical_config()
                         except Exception:  # noqa: BLE001
                             pass
+                        eff_ner = meta.get("ner_model") or resolve_role_model("ner", cfg_m) or None
+                        eff_vis = meta.get("vision_model") or (cfg_m.get("privacy") or {}).get("vision_model") or None
                         ing_res = self.ingest(
                             f,
-                            model=meta.get("ner_model") or None,
-                            vision_model=meta.get("vision_model") or None,
+                            model=eff_ner,
+                            vision_model=eff_vis,
                             keep_terms=list(keep) if isinstance(keep, list) else None,
                             config=cfg_m,
                             alias=meta.get("alias") or None,

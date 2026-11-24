@@ -163,6 +163,56 @@ class TestDualMetalAndMultiHarnessTelemetry(unittest.TestCase):
 
         snap = build_dashboard_snapshot(public_docs=True)
         self.assertTrue(snap["vault"]["audit_ledger"]["ok"])
+        self.assertIn("roles", snap["models"])
+        self.assertGreaterEqual(len(snap["models"]["roles"]), 10)
+
+
+class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
+    def test_role_registry_aliases_fallbacks_and_shared_rules(self) -> None:
+        from cortical.harnesses.adapters import _build_shared_rules_md
+        from cortical.roles import MODEL_ROLES, normalize_role_or_model, resolve_all_roles, resolve_role_model
+
+        self.assertEqual(len(MODEL_ROLES), 10)
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["models_by_role"]["reviewer"] = "custom-reviewer:14b"
+        cfg["models_by_role"]["summarizer"] = ""
+        cfg["models_by_role"]["fast_coder"] = "custom-fast:4b"
+        cfg["privacy"]["vision_model"] = "custom-ocr:latest"
+
+        self.assertEqual(resolve_role_model("reviewer", cfg), "custom-reviewer:14b")
+        self.assertEqual(resolve_role_model("cortical-reviewer", cfg), "custom-reviewer:14b")
+        self.assertEqual(resolve_role_model("@role:summarizer", cfg), "custom-fast:4b")  # fallback chain
+        self.assertEqual(resolve_role_model("vision", cfg), "custom-ocr:latest")
+        self.assertEqual(normalize_role_or_model("explicit-model:7b", cfg), "explicit-model:7b")
+        self.assertEqual(len(resolve_all_roles(cfg)), 10)
+
+        rules = _build_shared_rules_md("", "custom-fast:4b", "http://127.0.0.1:4000/v1", {"serena": True})
+        self.assertIn("@role:orchestrator", rules)
+        self.assertIn("cortical_local_offload(role=", rules)
+        self.assertNotIn("qwen3.5:9b-q3_k_xl", rules)
+
+    def test_watch_sync_from_disk_uses_config_vision_model_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_p = root / "vault.db"
+            cfg_p = root / "cortical.config.json"
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
+            cfg["privacy"]["vision_model"] = "minicpm-ocr:latest"
+            cfg_p.write_text(json.dumps(cfg), encoding="utf-8")
+
+            v = PrivacyVault(db_p)
+            v.inbox_dir.mkdir(parents=True, exist_ok=True)
+            img = v.inbox_dir / "receipt.png"
+            img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            (v.inbox_dir / "receipt.png.meta.json").write_text(json.dumps({"alias": "ocr_receipt", "policy": "fail_closed", "profile": "medium"}), encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"CORTICAL_CONFIG_PATH": str(cfg_p)}), \
+                 mock.patch("cortical.privacy.sanitizer.ocr_image_local", return_value="Invoice for alice@acme.example EUR 100") as mocked_ocr:
+                res = v.sync_from_disk(process_inbox=True)
+            self.assertEqual(res["inbox_processed"], 1)
+            self.assertEqual(mocked_ocr.call_args.kwargs.get("model"), "minicpm-ocr:latest")
+            item = v.read_resource("ocr_receipt", allow_local_only=False)
+            self.assertIn("[EMAIL_1]", item["text"])
 
 
 if __name__ == "__main__":

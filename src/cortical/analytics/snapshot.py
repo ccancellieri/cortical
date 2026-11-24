@@ -22,6 +22,7 @@ from ..hardware.context_window import compute_dynamic_num_ctx
 from ..hardware.models import list_all_models, recommend_models_for_hardware
 from ..hardware.probe import classify_hardware_tier
 from ..harnesses.adapters import ALL_HARNESSES, get_harness_presend_matrix, plan_sync, resolve_user_paths
+from ..roles import resolve_all_roles, resolve_role_model
 
 HARNESS_INSTALL_RECIPES: dict[str, dict[str, str]] = {
     "antigravity": {
@@ -482,6 +483,7 @@ def build_dashboard_snapshot(
         },
         "models": {
             "catalog": catalog,
+            "roles": resolve_all_roles(cfg, rec_models=rec),
             "recommended_by_role": rec.get("recommended_by_role") or {},
             "installed": list(hw_data.get("installed_ollama_models") or []),
         },

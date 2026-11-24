@@ -534,11 +534,18 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     try:
         while True:
             res = vault.sync_from_disk(process_inbox=True)
-            if res["inbox_processed"] or res["imported"] or res["deleted"]:
+            err_files = sorted(vault.inbox_dir.glob("*.error.json")) if vault.inbox_dir.is_dir() else []
+            if res["inbox_processed"] or res["imported"] or res["deleted"] or err_files:
                 from .analytics.roi import export_roi_json
 
                 export_roi_json(vault.db_path.parent)
-                print(f"  processed={res['inbox_processed']} imported={res['imported']} deleted={res['deleted']}")
+                print(f"  processed={res['inbox_processed']} imported={res['imported']} deleted={res['deleted']} errors={len(err_files)}")
+                for ef in err_files:
+                    try:
+                        ed = json.loads(ef.read_text(encoding="utf-8"))
+                        print(f"  [ERROR] {ed.get('file', ef.name)}: {ed.get('error', 'unknown error')}", file=sys.stderr)
+                    except Exception:  # noqa: BLE001
+                        print(f"  [ERROR] {ef.name}", file=sys.stderr)
             if args.once:
                 return 0
             _t.sleep(args.interval)

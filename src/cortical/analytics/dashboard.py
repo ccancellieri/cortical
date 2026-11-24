@@ -272,7 +272,7 @@ _SETTINGS_TEMPLATE = r"""<!DOCTYPE html>
       }
     };
 
-    let LANG = localStorage.getItem('cortical_lang') || ((navigator.language || '').toLowerCase().startsWith('it') ? 'it' : 'en');
+    let LANG = localStorage.getItem('cortical_lang') || 'en';
     let TAB = localStorage.getItem('cortical_setup_done') ? 'vault' : 'setup';
     let SETUP_SEL = null;
     let FOLDER_WARN = '';
@@ -1638,7 +1638,7 @@ def render_static_help_html(public_docs: bool = False) -> str:
     </div>
   </div>
   <script>
-    let LANG = localStorage.getItem('cortical_lang') || ((navigator.language || '').toLowerCase().startsWith('it') ? 'it' : 'en');
+    let LANG = localStorage.getItem('cortical_lang') || 'en';
     function applyL() {{
       document.getElementById('c-en').style.display = LANG === 'en' ? 'block' : 'none';
       document.getElementById('c-it').style.display = LANG === 'it' ? 'block' : 'none';

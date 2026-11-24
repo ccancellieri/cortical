@@ -111,14 +111,9 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: O
     hw_eff = hw or {"total_ram_gb": 16.0, "free_ram_gb": 10.0, "unified_memory": True, "vram_gb": 11.2, "memory_pressure_level": 1}
     orch = resolve_orchestrator_spec(cfg, hw=hw_eff)
 
-    by_role = cfg.get("models_by_role") or {}
-    priv = cfg.get("privacy") or {}
-    candidates = [
-        by_role.get("daily_coder") or "qwen3.5:9b-q3_k_xl",
-        by_role.get("deep_reasoner") or "qwen3.8:27b-iq2_xxs",
-        by_role.get("router") or "qwen2.5:1.5b",
-        priv.get("vision_model") or "",
-    ]
+    from ..roles import MODEL_ROLES, resolve_role_model
+
+    candidates = [resolve_role_model(r, cfg) for r in ("daily_coder", "deep_reasoner", "router", "fast_coder", "reviewer", "summarizer", "ner", "vision")]
     models = [m for m in dict.fromkeys(candidates) if m]
 
     def _ctx_and_timeout(mid: str) -> tuple[int, int]:
@@ -139,10 +134,14 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: O
         dyn_ctx, t_sec = _ctx_and_timeout(m)
         lines.extend(_ollama_model_yaml(m, m, ollama_base, dyn_ctx, t_sec))
 
-    daily = str(by_role.get("daily_coder") or cfg.get("active_model") or (models[0] if models else "qwen3.5:9b-q3_k_xl"))
-    deep = str(by_role.get("deep_reasoner") or by_role.get("architect") or "qwen3.8:27b-iq2_xxs")
-    vision = str(priv.get("vision_model") or "minicpm-ocr:latest")
-    for alias, target_m in [("local-default", daily), ("cortical-fast", daily), ("cortical-deep", deep), ("cortical-vision", vision)]:
+    daily = resolve_role_model("daily_coder", cfg)
+    deep = resolve_role_model("deep_reasoner", cfg)
+    role_aliases: list[tuple[str, str]] = [("local-default", daily)]
+    for rkey, meta in MODEL_ROLES.items():
+        if rkey in {"orchestrator", "embedder"}:
+            continue
+        role_aliases.append((str(meta["alias"]), resolve_role_model(rkey, cfg)))
+    for alias, target_m in role_aliases:
         t_ctx, t_sec = _ctx_and_timeout(target_m)
         lines.extend(_ollama_model_yaml(alias, target_m, ollama_base, t_ctx, t_sec))
 

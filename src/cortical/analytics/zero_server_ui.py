@@ -141,9 +141,13 @@ def render_zero_server_settings_html(snapshot: dict[str, Any]) -> str:
     .cmd-item {{ display: flex; justify-content: space-between; align-items: center; padding: 9px 12px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }}
     .cmd-item:hover, .cmd-item.selected {{ background: var(--accent-soft); border-color: rgba(56,189,248,0.35); }}
     .kbd {{ font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--muted); }}
-    .toasts {{ position: fixed; top: 68px; right: 18px; z-index: 95; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }}
+    .toasts {{ position: fixed; bottom: 88px; right: 18px; z-index: 95; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }}
     .toast {{ padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-elev); box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: flex; gap: 8px; font-size: 13px; }}
     .toast.ok {{ border-color: var(--ok); }} .toast.err {{ border-color: var(--err); }} .toast.warn {{ border-color: var(--warn); }}
+    .main {{ padding-bottom: 136px; }}
+    .sidebar {{ position: sticky; top: 54px; align-self: start; max-height: calc(100vh - 54px); overflow-y: auto; }}
+    .kpi, .mono {{ overflow-wrap: anywhere; word-break: break-word; }}
+    .pill {{ max-width: 100%; }}
 
     @media (max-width: 980px) {{
       .shell {{ grid-template-columns: 1fr; }}
@@ -608,7 +612,7 @@ function renderServiceDrawer() {{
         <div>
           <strong>OS-Aware Install / Verify Recipe (${{esc(ST.targetOs)}})</strong>
           <pre class="code-pre" style="margin-top:6px;">${{esc(recipe)}}</pre>
-          <button class="btn sm" style="margin-top:6px;" onclick="copyText(${{JSON.stringify(recipe)}}, 'install recipe')">📋 Copy Recipe</button>
+          <button class="btn sm" style="margin-top:6px;" data-copy="${{esc(recipe)}}" onclick="copyText(this.dataset.copy, 'install recipe')">📋 Copy Recipe</button>
         </div>
         <div>
           <strong>Idempotent Config Diff Preview (${{kind === 'harness' && (item.planned_changes||[]).length ? 'Live plan_sync dry-run' : 'Template'}})</strong>
@@ -616,8 +620,8 @@ function renderServiceDrawer() {{
         </div>
         ${{kind === 'harness' ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn sm" onclick="copyText(${{JSON.stringify(syncDry)}}, 'dry-run')">📋 Copy Dry-Run</button>
-          <button class="btn sm primary" onclick="copyText(${{JSON.stringify(syncApply)}}, 'sync apply')">📋 Copy Sync Apply</button>
+          <button class="btn sm" data-copy="${{esc(syncDry)}}" onclick="copyText(this.dataset.copy, 'dry-run')">📋 Copy Dry-Run</button>
+          <button class="btn sm primary" data-copy="${{esc(syncApply)}}" onclick="copyText(this.dataset.copy, 'sync apply')">📋 Copy Sync Apply</button>
           <button class="btn sm" onclick="togglePlanHarness('${{esc(item.id)}}')">${{ST.planHarnesses.includes(item.id) ? '✓ In Apply Plan (remove)' : '＋ Add to Apply Plan'}}</button>
         </div>` : ''}}
         <div>
@@ -627,7 +631,7 @@ function renderServiceDrawer() {{
               <li><div>${{esc(s.label)}}</div>
                 <div style="display:flex;gap:6px;align-items:flex-start;margin-top:4px;">
                   <pre class="code-pre" style="flex:1;">${{esc(s.cmd)}}</pre>
-                  <button class="btn sm" aria-label="Copy step command" onclick="copyText(${{JSON.stringify(s.cmd)}}, 'step')">📋</button>
+                  <button class="btn sm" aria-label="Copy step command" data-copy="${{esc(s.cmd)}}" onclick="copyText(this.dataset.copy, 'step')">📋</button>
                 </div></li>`).join('')}}
           </ol>
         </div>
@@ -814,16 +818,24 @@ function renderOrchestrationCard() {{
             <tr><th>Harness</th><th>Binding</th><th>Effective <code>num_ctx</code></th><th>Timeout</th><th>Delegation</th><th>Privacy Guard</th><th>Targets</th></tr>
           </thead>
           <tbody>
-            ${{matrix.map((row) => `
+            ${{matrix.map((row) => {{
+              const liveBind = (isRemote ? 'Remote (' : 'Local (') + (o.provider || 'router') + ')';
+              const liveModel = o.model || row.orchestrator_model || 'cortical-deep';
+              const liveDeleg = o.local_first_delegation !== false ? 'local_first_offload' : 'direct';
+              const liveGuard = !isRemote
+                ? 'Air-Gapped Local Only (zero cloud egress)'
+                : (row.privacy_guard.includes('verified pre-send') ? 'fail_closed + verified pre-send hook + MCP vault block' : 'fail_closed MCP & sync guard');
+              return `
               <tr>
                 <td><strong>${{esc(row.harness)}}</strong></td>
-                <td class="mono" style="font-size:12px;">${{esc(row.orchestrator_binding)}} · ${{esc(row.orchestrator_model)}}</td>
-                <td class="mono">${{row.num_ctx}}</td>
-                <td class="mono">${{row.timeout_sec}}s</td>
-                <td><span class="pill info">${{esc(row.delegation)}}</span></td>
-                <td><span class="pill ${{isRemote ? 'warn' : 'ok'}}">${{esc(row.privacy_guard)}}</span></td>
+                <td class="mono" style="font-size:12px;">${{esc(liveBind)}} · ${{esc(liveModel)}}</td>
+                <td class="mono">${{effCtx}}</td>
+                <td class="mono">${{effTimeout}}s</td>
+                <td><span class="pill info">${{esc(liveDeleg)}}</span></td>
+                <td><span class="pill ${{isRemote ? 'warn' : 'ok'}}">${{esc(liveGuard)}}</span></td>
                 <td class="hint mono" style="font-size:11px;">${{esc(row.target_files)}}</td>
-              </tr>`).join('')}}
+              </tr>`;
+            }}).join('')}}
           </tbody>
         </table>
       </div>
@@ -891,26 +903,26 @@ function renderModels() {{
       </div>
     </div>
 
-    <div class="grid-3" style="margin-bottom:16px;">
-      ${{[
-        ['Fast / Triage / NER & Vision', 'router', '1–3 GB · Ultra-fast routing, JSON NER & OCR'],
-        ['Balanced Daily Coder', 'daily_coder', '5–6 GB · Variable-quant 9B up to 131K ctx'],
-        ['Deep Reasoner / Orchestrator', 'deep_reasoner', '7–8.5 GB · 27B Unsloth XXS on 16GB Unified'],
-      ].map(([title, key, desc]) => {{
-        const mid = roles[key] || '';
-        const meta = cat.find((m) => m.model_id === mid) || {{ memory_gb: '?', quantization: 'custom', native_ctx: 32768 }};
-        return `
-          <div class="card" style="margin-bottom:0;">
-            <div class="hint">${{title}}</div>
-            <div class="mono" style="font-size:14px;font-weight:700;margin:4px 0;color:var(--accent);">${{esc(mid || 'Unassigned')}}</div>
-            <div class="hint">${{desc}}</div>
-            <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;">
-              <span class="pill info">${{meta.memory_gb}} GB</span>
-              <span class="pill ok">${{esc(meta.quantization)}}</span>
-              <span class="pill violet">${{meta.native_ctx}} ctx</span>
-            </div>
-          </div>`;
-      }}).join('')}}
+    <div class="card">
+      <div class="card-head">
+        <h2>🎭 Reusable Model Role Registry (Abstracted Across All 8 Harnesses)</h2>
+        <span class="pill info">10 Semantic Roles · Never Hardcode Model Tags</span>
+      </div>
+      <div class="grid-3">
+        ${{Object.values(ST.snap.models?.roles || {{}}).map((rm) => {{
+          const curVal = (rm.role === 'vision' ? (cfg.privacy?.vision_model || rm.model_id) : (roles[rm.role] || rm.model_id)) || '';
+          const targetPath = rm.role === 'vision' ? 'privacy.vision_model' : ('models_by_role.' + rm.role);
+          return `
+            <div class="kpi">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+                <strong>${{esc(rm.label)}}</strong>
+                <span class="pill violet mono">@role:${{esc(rm.role)}}</span>
+              </div>
+              <div class="hint" style="margin:4px 0 8px;">Alias: <code>${{esc(rm.alias)}}</code> · ${{esc(rm.description)}}</div>
+              <input class="input mono" value="${{esc(curVal)}}" oninput="setCfg('${{targetPath}}', this.value)" aria-label="${{esc(rm.label)}} model" />
+            </div>`;
+        }}).join('')}}
+      </div>
     </div>
 
     <div class="card">
@@ -996,14 +1008,21 @@ function renderVault() {{
   const v = ST.snap.vault || {{}};
   const aliases = v.aliases || [];
   const audit = v.audit_ledger || {{ ok: true, total_entries: 0, blocked_egress_count: 0, head_hash: '' }};
-  const pct = Number(v.memory_budget_pct || 0);
+  const liveShare = Number(ST.draftCfg.compression?.max_context_share ?? ((v.max_context_share_pct || 15) / 100));
+  const liveCtx = Number(ST.snap.hardware?.dynamic_num_ctx || 65536);
+  const liveBudgetTok = Math.max(256, Math.round(liveCtx * liveShare));
+  const usedTok = Number(v.memory_used_tokens || 0);
+  const pct = Math.round(Math.min(100, (usedTok / Math.max(1, liveBudgetTok)) * 100) * 10) / 10;
   const barColor = pct > 90 ? 'var(--err)' : (pct > 70 ? 'var(--warn)' : 'var(--ok)');
+  const auditEntries = Number(audit.total_entries || 0);
+  const auditPillCls = audit.ok === false ? 'err' : (auditEntries > 0 ? 'ok' : 'info');
+  const auditPillTxt = audit.ok === false ? ('⚠ Tamper at seq #' + audit.broken_at_seq) : (auditEntries > 0 ? '✓ Hash Chain Verified' : '○ Empty / Ready (0 entries)');
 
   return `
     <div class="page-head">
       <div>
         <h1>🛡️ Memory &amp; Dynamic Privacy Vault</h1>
-        <p>Inspect sanitized <code>@private:&lt;alias&gt;</code> entries, monitor the <code>&le; 15% num_ctx</code> memory budget, and audit 3-channel egress protection.</p>
+        <p>Inspect sanitized <code>@private:&lt;alias&gt;</code> entries, monitor the <code>&le; ${{Math.round(liveShare * 100)}}% num_ctx</code> memory budget, and audit 3-channel egress protection.</p>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn" onclick="copyText('cortical vault audit --verify', 'cortical vault audit --verify')">🔐 Verify Audit Ledger</button>
@@ -1015,18 +1034,18 @@ function renderVault() {{
     <div class="card">
       <div class="card-head">
         <h2>🔐 Cryptographic SHA-256 Privacy &amp; Fail-Closed Egress Audit Ledger</h2>
-        <span class="pill ${{audit.ok !== false ? 'ok' : 'err'}}">${{audit.ok !== false ? '✓ Hash Chain Verified' : ('⚠ Tamper at seq #' + audit.broken_at_seq)}}</span>
+        <span class="pill ${{auditPillCls}}">${{auditPillTxt}}</span>
       </div>
       <div class="hint">
-        Entries: <strong>${{audit.total_entries || 0}}</strong> · Blocked Remote Egress Events: <strong>${{audit.blocked_egress_count || 0}}</strong> ·
+        Entries: <strong>${{auditEntries}}</strong> · Blocked Remote Egress Events: <strong>${{audit.blocked_egress_count || 0}}</strong> ·
         Head Hash: <code class="mono">${{esc(String(audit.head_hash || '').slice(0, 16) || 'genesis')}}</code> · Never stores raw PII.
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <h2>Context Budget Gauge (&le; ${{v.max_context_share_pct || 15}}% num_ctx)</h2>
-        <span class="pill ${{pct > 90 ? 'err' : (pct > 70 ? 'warn' : 'ok')}}">${{v.memory_used_tokens || 0}} / ${{v.memory_budget_tokens || 4096}} tokens (${{pct}}%)</span>
+        <h2>Context Budget Gauge (&le; ${{Math.round(liveShare * 100)}}% of ${{liveCtx.toLocaleString()}} num_ctx)</h2>
+        <span class="pill ${{pct > 90 ? 'err' : (pct > 70 ? 'warn' : 'ok')}}">${{usedTok}} / ${{liveBudgetTok}} tokens (${{pct}}%)</span>
       </div>
       <div class="bar-track"><div class="bar-seg" style="width:${{Math.min(100, pct)}}%;background:${{barColor}};"></div></div>
       <div class="hint" style="margin-top:8px;">
@@ -1390,7 +1409,7 @@ function renderPrivacySample() {{
   txt = txt.replace(/\\b[A-Z]{{2}}\\d{{2}}[A-Z0-9]{{11,30}}\\b/g, () => tok('IBAN'));
   txt = txt.replace(/\\b[A-Z]{{6}}\\d{{2}}[A-Z]\\d{{2}}[A-Z]\\d{{3}}[A-Z]\\b/g, () => tok('TAX_ID'));
   txt = txt.replace(/\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{{2,}}\\b/g, () => tok('EMAIL'));
-  txt = txt.replace(/(?<!\\w)(?:\\+?\\d{{1,3}}[\\s.-]?)?(?:\\(?\\d{{2,4}}\\)?[\\s.-]?)\\d{{3,4}}[\\s.-]?\\d{{3,4}}(?!\\w)/g, () => tok('PHONE'));
+  txt = txt.replace(/(?<!\\w)(?:\\+?\\d{{1,3}}[\\s.-]?)?(?:\\(?\\d{{2,4}}\\)?[\\s.-]?)?\\d{{3,4}}[\\s.-]\\d{{3,4}}(?!\\w)/g, () => tok('PHONE'));
   txt = txt.replace(/\\b(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){{3}}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\b/g, () => tok('IP'));
   out.innerHTML = esc(txt).replace(/(\\[[A-Z0-9_]+_\\d+\\])/g, '<span class="pill ok" style="padding:1px 5px;font-size:11px;">$1</span>');
   if (cmdEl) {{
@@ -1423,7 +1442,7 @@ function comparePortableProfile() {{
     const peer = JSON.parse(raw);
     const peerPatch = peer.config_patch || peer || {{}};
     const cur = ST.draftCfg || {{}};
-    const keys = Array.from(new Set([...Object.keys(cur), ...Object.keys(peerPatch)])).sort();
+    const keys = Object.keys(peerPatch).sort();
     const diffs = [];
     for (const k of keys) {{
       if (JSON.stringify(cur[k]) !== JSON.stringify(peerPatch[k])) {{

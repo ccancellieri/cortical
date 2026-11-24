@@ -127,12 +127,13 @@ class LocalBrain:
                     raw = llm_fn(prompt)
                 else:
                     from ..config import invoke_configured_runner
+                    from ..roles import normalize_role_or_model
 
                     raw = invoke_configured_runner(
                         prompt,
                         system_prompt="Return compact valid JSON only.",
                         config=config,
-                        model_override=model or "qwen2.5:1.5b",
+                        model_override=normalize_role_or_model(model, config, default_role="summarizer"),
                         max_tokens=260,
                         timeout=12.0,
                         role="brain_distill",
