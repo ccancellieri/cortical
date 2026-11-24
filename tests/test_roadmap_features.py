@@ -376,7 +376,7 @@ class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            paths = resolve_user_paths(os_name="macos", home_dir=root)
+            paths = resolve_user_paths(os_name="macos", home=root)
             changes = plan_sync(
                 cfg_lm,
                 {"os": "macos", "total_ram_gb": 16.0, "free_ram_gb": 10.0, "unified_memory": True, "vram_gb": 11.2, "binaries": {}},
@@ -402,8 +402,7 @@ class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
             self.assertIn("LM Studio", off["response"])
 
             buf = io.StringIO()
-            with mock.patch("cortical.harnesses.adapters.resolve_user_paths", return_value=paths), \
-                 mock.patch("cortical.harnesses.adapters._backup_root", return_value=root / "backups"), \
+            with mock.patch("pathlib.Path.home", return_value=root), \
                  mock.patch("sys.stdout", buf):
                 rc = cli_main(["sync", "--harness", "antigravity", "--repo-root", str(root), "--db", str(root / "vault.db")])
             self.assertEqual(rc, 0)

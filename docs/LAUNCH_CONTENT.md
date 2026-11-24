@@ -1,45 +1,47 @@
 # Cortical Launch Content & Visual Proof Kit
 
-Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-24`, `54/54` `unittest` passing, `dependencies = []`). See [`docs/METRICS_LEDGER.md`](./METRICS_LEDGER.md) for the exact verification commands.
+Every metric below is directly verified from `ccancellieri/cortical` (`2026-11-24`, `57/57` `unittest` passing, `dependencies = []`). See [`docs/METRICS_LEDGER.md`](./METRICS_LEDGER.md) for the exact verification commands.
 
 - **Repository:** `https://github.com/ccancellieri/cortical`
-- **10-Second Zero-Install Browser Demo:** `https://ccancellieri.github.io/cortical/settings.html`
+- **Live Landing Page & 10-Second Browser Control Plane:** `https://ccancellieri.github.io/cortical/` · `https://ccancellieri.github.io/cortical/settings.html`
 - **Cover Image Policy:** Always generate a dedicated cover image before publishing each LinkedIn post (keep it temporary/untracked, **never commit** it to git, and delete the temporary file once the post is published).
 
 ---
 
-## Post 1 — The Engineering Craft Angle (Zero Dependencies, Zero Daemons, 8 Harnesses)
+## Post 1 — The Engineering Craft Angle (Zero Dependencies, Zero Daemons, 7 Runners, 8 Harnesses)
 
 ### English Version
 Most AI agent tools ship a Node server, a Docker compose stack, and 40 dependencies just to sync config files.
-We took the opposite route with **Cortical**: `dependencies = []` (Python 3.10+ stdlib only), zero background servers, and **54/54** passing tests.
+We took the opposite route with **Cortical**: `dependencies = []` (Python 3.10+ stdlib only), zero background servers, and **57/57** passing tests.
 
-Instead of reinventing LSPs (`Serena`), shell compressors (`RTK`), or local inference (`Ollama`/`Unsloth`), Cortical acts as a declarative control plane across **8 coding harnesses** (`Antigravity`, `pi`, `OpenCode`, `OpenClaw`, `Codex`, `Claude Code`, `dsh`, `Unsloth Studio`):
+Instead of reinventing LSPs (`Serena`), shell compressors (`RTK`), or locking into a single local inference daemon, Cortical acts as a declarative control plane across **8 coding harnesses** (`Antigravity`, `pi`, `OpenCode`, `OpenClaw`, `Codex`, `Claude Code`, `dsh`, `Unsloth Studio`) and **7 local runners** (`Ollama`, `Unsloth Studio`, `LM Studio`, `llama.cpp`, `MLX`, `vLLM`, `openai_compatible`):
+- **Zero-LLM Fail-Closed Privacy Vault (`Tier 1 Stdlib`):** Strips `.docx`/`.xlsx`/`.pptx`/`.pdf` metadata, masks PII/secrets (`100.0%` tech terms preserved), and logs a **SHA-256** audit chain with **zero local model required**
 - **10 Reusable Semantic Model Roles** (`@role:router`, `@role:ner`, `@role:fast_coder`, `@role:daily_coder`, `@role:reviewer`, `@role:summarizer`, `@role:deep_reasoner`, `@role:orchestrator`, `@role:vision`, `@role:embedder`) — never hardcoding concrete model tags in prompts or scripts
-- Idempotent config sync with timestamped `--rollback <id>` (never overwrites your existing credentials)
-- Lean 7-tool `stdio` MCP server (`4.26 ms` ingest+read handshake) with 2026 tool `annotations` & `outputSchema`
-- Self-curating `SKILL.md` workflows (`cortical curate`), bidirectional `MEMORY.md` sync (`cortical memory-sync`), and a zero-CDN browser configurator with **3 one-click interactive presets**
-- Compact modular architecture (`18,838` LOC including embedded HTML/CSS/JS UI & wiki store, down from `~31.8K` LOC in `legacy-v0.2`)
+- Safe `--dry-run` preview + timestamped `--rollback <id>` backups (never overwrites your existing credentials)
+- Lean 7-tool `stdio` MCP server (`~4.3 ms` ingest+read handshake) with 2026 tool `annotations` & `outputSchema`
+- Modular architecture (`19,086` total `src/cortical/` LOC = `15,048` Core Python/CLI/Wiki + `4,038` embedded zero-CDN HTML/CSS/JS SPA templates; `-40.0%` vs `~31.8K` LOC in `legacy-v0.2`)
 
 Try it in 10 seconds in your browser (zero install):
 https://ccancellieri.github.io/cortical/settings.html
 
-Or reproduce locally in 60 seconds:
+Or reproduce safely in 60 seconds (`--dry-run` touches 0 files):
 ```bash
 git clone https://github.com/ccancellieri/cortical.git && cd cortical
 python3 -m venv .venv && .venv/bin/pip install --no-deps -e .
 PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run
 ```
 
 ### Variante Italiana
 Molti tool per coding agent richiedono un server Node, Docker e decine di dipendenze solo per sincronizzare configurazioni.
-Con **Cortical** abbiamo scelto l'opposto: `dependencies = []` (solo stdlib Python 3.10+), zero server in background e **51/51** test verdi.
+Con **Cortical** abbiamo scelto l'opposto: `dependencies = []` (solo stdlib Python 3.10+), zero server in background, **Privacy Vault `fail_closed` che funziona al 100% anche senza LLM locale**, supporto per **7 runner locali** (`Ollama`, `Unsloth Studio`, `LM Studio`, `llama.cpp`, `MLX`, `vLLM`) e **57/57** test verdi.
 
-Cortical compone `Serena`, `RTK`, `Ollama` e `Unsloth` su **8 harness** (`Antigravity`, `pi`, `OpenCode`, `OpenClaw`, `Codex`, `Claude Code`, `dsh`, `Unsloth Studio`) con rollback atomico, MCP `stdio` da `4.09 ms` e una dashboard HTML statica senza CDN esterni.
+Cortical sincronizza **8 harness** (`Antigravity`, `pi`, `OpenCode`, `OpenClaw`, `Codex`, `Claude Code`, `dsh`, `Unsloth Studio`) con anteprima `--dry-run`, rollback atomico `--rollback <id>`, MCP `stdio` da `~4.3 ms` e dashboard HTML statica senza CDN esterni.
 Demo live in 10 secondi: https://ccancellieri.github.io/cortical/settings.html
 
 ### Suggested Visual Asset
-- Side-by-side screenshot of `docs/settings.html` showing the **3 One-Click Demo Presets** card + terminal output of `unittest` (`51 tests OK`) and `pyproject.toml` (`dependencies = []`).
+- Side-by-side screenshot of `docs/settings.html` showing the **3 One-Click Demo Presets** card + terminal output of `unittest` (`57 tests OK`) and `pyproject.toml` (`dependencies = []`).
 
 ---
 
