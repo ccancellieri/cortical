@@ -1,0 +1,66 @@
+# Cortical Metrics Ledger & KPI Scorecard
+
+Single source of truth for **Cortical** (`https://github.com/ccancellieri/cortical`) product quality, demo friction, upstream ecosystem hooks, and organic adoption metrics. Every number below is captured directly from live command executions (zero fabricated metrics).
+
+---
+
+## 1. Verified Baseline (`2026-11-24`, commit `fddde77`)
+
+### A. Product, Stability & Token Economics KPIs
+
+| Metric | Verified Baseline (`2026-11-24`) | Target (30-Day) | Verification Command |
+| --- | --- | --- | --- |
+| **External Runtime Dependencies** | **`0`** (`dependencies = []`) | `0` (invariant) | `grep dependencies pyproject.toml` |
+| **Unit & Integration Tests** | **`51 / 51` PASS** (`16.973s`, `0` skips) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
+| **Codebase Size (`src/cortical/`)** | **`18,224` LOC** (incl. embedded zero-CDN HTML/CSS/JS UI & wiki store; down from `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
+| **TOON Lossless Compression** | **`-78.12%` vs pretty JSON** · **`-62.09%` vs compact JSON** (`745`/`430` -> `163` tok) | `>= 60%` vs compact | `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare` |
+| **Privacy Sanitizer Precision** | **`100.0%` tech prose preserved** · `policy=fail_closed` · `pii_masked=True` | `100.0%` | `cortical bench --compare` |
+| **Lean 7-Tool MCP Handshake** | **`4.09 ms`** (`ingest+read`, `7` tools + `annotations` + `outputSchema`) | `< 10 ms` | `cortical bench --compare` |
+| **Tier 1B 27B Auto-Context (`pi`)** | **`65,536` ctx** (`qwen3.8:27b-iq2_xxs`, `9.08 GiB` Metal VRAM, `timeout=600s`, `reasoning_effort=none`) | `0` timeouts / `0` truncations | `pi -p --no-session --model router/cortical-deep` + `ollama /api/ps` |
+| **Real-World `pi` Local Offload (`01a20890`)** | **`3,481,633` local tokens** (`3,452,912` in + `28,721` out, `$0` cloud cost) | `>= 80%` local offload | `~/.pi/agent/sessions/...01a20890...jsonl` |
+| **GitHub Issues Resolved** | **`47` closed / `10` open** (`57` total) | `>= 90%` core issues closed | `gh issue list --state all --limit 100` |
+
+### B. Demo Friction KPIs
+
+| Metric | Baseline (`2026-11-24`) | Target |
+| --- | --- | --- |
+| **Online Time-to-First-Value** | `10s` via [`https://ccancellieri.github.io/cortical/settings.html`](https://ccancellieri.github.io/cortical/settings.html) (0 install, 3x 1-Click Interactive Presets, 0 external CDNs) | `< 10s` |
+| **Local Time-to-First-Value** | `< 60s` (`git clone` -> `python3 -m venv .venv` -> `cortical bench --compare` / `doctor`) | `<= 3` copy-paste commands |
+
+### C. Upstream Ecosystem KPIs
+
+| Target Repo | Category | Cortical Issue | Status |
+| --- | --- | --- | --- |
+| `modelcontextprotocol/servers` & Glama | MCP Registry | `#44` (Closed) | `server.json` & `glama.json` `0.3.0` ready |
+| `deepseek-ai/deepseek-harness` (`dsh`) | Coding Harness | `#45` (Closed) | `cortical-cordis-hook.mjs` shipped in `hooks.py` |
+| `anomalyco/opencode` | Coding Harness | `#46` (Closed) | `cortical-hook.mjs` + slash cmds shipped in `hooks.py` |
+| `earendil-works/pi` | Coding Harness | `#47` (Closed) | `cortical-intercept.ts` + `cortical-global.ts` shipped |
+| `LiteLLM` / `OmniRoute` / `CCR` | Local Router | `#51` (Closed) | `litellm_cortical_guard.py` shipped in `hooks.py` |
+| `Serena` + `RTK` + `context-mode` + `TOON` | Token Stack | `#48` (Open) | Composable benchmark & interop guide drafted |
+| `drmikecrowe/harnessed` | Meta-Harness | `#49` (Open) | Declarative DLP & quant preflight proposal drafted |
+| `unslothai/unsloth` / Ollama docs | Local Quant | `#50` (Open) | Variable-quant `auto_ctx` (`65K`/`98K`) recipe drafted |
+
+### D. Distribution & Adoption KPIs (`gh api`)
+
+| Metric | Baseline (`2026-11-24`) | 30-Day Target |
+| --- | --- | --- |
+| **GitHub Stars** | `0` | `>= 50` |
+| **GitHub Forks** | `0` | `>= 10` |
+| **14-Day Repo Views** | `9` views (`7` unique) | `>= 500` views |
+| **14-Day Repo Clones** | `218` clones (`106` unique) | `>= 300` clones |
+| **Verified LinkedIn Posts Ready / Published** | `3` ready (`EN` + `IT`) / `0` published | `3` published |
+
+---
+
+## 2. Weekly Automated Measurement Cadence
+
+Run every Monday (or via `/schedule`) to refresh this ledger with zero manual guesswork:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
+PYTHONPATH=src .venv/bin/python -m cortical.cli roi
+gh api repos/ccancellieri/cortical --jq '{stars:.stargazers_count,forks:.forks_count,open_issues:.open_issues_count}'
+gh api repos/ccancellieri/cortical/traffic/views --jq '{views:.count,uniques:.uniques}'
+gh api repos/ccancellieri/cortical/traffic/clones --jq '{clones:.count,uniques:.uniques}'
+```

@@ -307,6 +307,62 @@ function renderAll() {{
   renderDirtyDock();
 }}
 
+function applyDemoPreset(presetId) {{
+  const hw = ST.snap.hardware || {{}};
+  const c = ST.draftCfg;
+  if (!c.orchestrator) c.orchestrator = {{}};
+  if (!c.models_by_role) c.models_by_role = {{}};
+  if (presetId === 'tier_1a_hybrid') {{
+    hw.total_ram_gb = 16.0;
+    hw.free_ram_gb = 9.5;
+    hw.unified_memory = false;
+    hw.vram_gb = 4.0;
+    hw.gpu_name = 'Hybrid Laptop GPU (4 GB VRAM)';
+    hw.dynamic_num_ctx = 32768;
+    hw.classification = {{ tier: 'tier_1a_hybrid_4gb', label: 'Tier 1A · Hybrid 16 GB RAM + 4 GB VRAM' }};
+    c.models_by_role.router = 'qwen2.5:3b';
+    c.models_by_role.daily_coder = 'qwen3.5:9b-q3_k_xl';
+    c.models_by_role.deep_reasoner = 'qwen3.5:9b-q3_k_xl';
+    c.orchestrator.mode = 'local';
+    c.orchestrator.provider = 'router';
+    c.orchestrator.model = 'cortical-fast';
+    c.orchestrator.api_key_env = '';
+    toast('ok', 'Loaded Preset A: Tier 1A Hybrid Laptop (16 GB RAM + 4 GB VRAM, swap-free 32K ctx)');
+  }} else if (presetId === 'tier_1b_unified') {{
+    hw.total_ram_gb = 16.0;
+    hw.free_ram_gb = 10.5;
+    hw.unified_memory = true;
+    hw.vram_gb = 11.2;
+    hw.gpu_name = 'Apple Silicon Unified (16 GB)';
+    hw.dynamic_num_ctx = 65536;
+    hw.classification = {{ tier: 'tier_1b_unified_16_24', label: 'Tier 1B · Unified 16 GB (27B Variable-Quant)' }};
+    c.models_by_role.router = 'qwen2.5:1.5b';
+    c.models_by_role.daily_coder = 'qwen3.5:9b-q3_k_xl';
+    c.models_by_role.deep_reasoner = 'qwen3.8:27b-iq2_xxs';
+    c.orchestrator.mode = 'local';
+    c.orchestrator.provider = 'router';
+    c.orchestrator.model = 'cortical-deep';
+    c.orchestrator.api_key_env = '';
+    if (ST.snap.orchestration?.context_profile) {{
+      ST.snap.orchestration.context_profile.auto_max_num_ctx = 65536;
+      ST.snap.orchestration.context_profile.adaptive_timeout_sec = 600;
+    }}
+    toast('ok', 'Loaded Preset B: Tier 1B Unified 16 GB (27B UD-IQ2_XXS @ 65,536 ctx, 600s timeout)');
+  }} else if (presetId === 'hybrid_remote_guard') {{
+    c.orchestrator.mode = 'remote';
+    c.orchestrator.provider = 'gemini';
+    c.orchestrator.model = 'gemini-2.5-pro';
+    c.orchestrator.api_key_env = 'GEMINI_API_KEY';
+    c.orchestrator.endpoint = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+    c.orchestrator.local_first_delegation = true;
+    c.orchestrator.strict_remote_privacy = true;
+    toast('ok', 'Loaded Preset C: Hybrid Remote Supervisor (GEMINI_API_KEY env only) + fail_closed Local Workers');
+  }}
+  ST.snap.hardware = hw;
+  validateCfg();
+  renderAll();
+}}
+
 // =========================================================================
 // VIEW 1: OVERVIEW & QUICK SETUP
 // =========================================================================
@@ -349,6 +405,33 @@ function renderOverview() {{
       <div class="kpi"><div class="hint">Harnesses Linked</div><div class="kpi-val">${{linked}} / 8</div><div class="hint">${{driftList.length}} drift · ${{(s.backups||[]).length}} rollback snapshots</div></div>
       <div class="kpi"><div class="hint">Privacy Vault</div><div class="kpi-val">${{(v.aliases||[]).length}} Aliases</div><div class="hint">${{v.memory_budget_pct}}% of ≤${{v.max_context_share_pct}}% ctx budget</div></div>
       <div class="kpi"><div class="hint">TOON Compression</div><div class="kpi-val" style="color:var(--ok);">-${{toonSave}}%</div><div class="hint">vs compact JSON · 0 cloud tokens</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>⚡ 1-Click Interactive Browser Demo Presets (Zero Install)</h2>
+        <span class="pill ok">100% Client-Side · 0 CDNs</span>
+      </div>
+      <div class="grid-3">
+        <div class="kpi">
+          <span class="pill info">Preset A · Tier 1A Hybrid</span>
+          <h3 style="margin:8px 0 4px;">16 GB RAM + 4 GB VRAM Laptop</h3>
+          <p class="hint"><code>qwen2.5:3b</code> in VRAM + <code>qwen3.5:9b-q3_k_xl</code> hybrid offload @ <code>32,768</code> ctx.</p>
+          <button class="btn sm" onclick="applyDemoPreset('tier_1a_hybrid'); setView('models')">▶ Load Tier 1A Preset</button>
+        </div>
+        <div class="kpi">
+          <span class="pill ok">Preset B · Tier 1B Unified</span>
+          <h3 style="margin:8px 0 4px;">16 GB Apple Silicon + 27B XXS</h3>
+          <p class="hint"><code>qwen3.8:27b-iq2_xxs</code> @ <code>65,536</code> ctx (<code>9.08 GB</code> Metal) preventing <code>4096</code> clipping.</p>
+          <button class="btn sm primary" onclick="applyDemoPreset('tier_1b_unified'); setView('models')">▶ Load Tier 1B 27B Preset</button>
+        </div>
+        <div class="kpi">
+          <span class="pill warn">Preset C · Hybrid Remote Guard</span>
+          <h3 style="margin:8px 0 4px;">Remote Supervisor + fail_closed Vault</h3>
+          <p class="hint"><code>GEMINI_API_KEY</code> env-only remote orchestrator + local offload + <code>-78.12%</code> TOON savings.</p>
+          <button class="btn sm" onclick="applyDemoPreset('hybrid_remote_guard'); setView('vault')">▶ Load Hybrid Guard Preset</button>
+        </div>
+      </div>
     </div>
 
     <div class="card">

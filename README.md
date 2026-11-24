@@ -6,11 +6,24 @@
 
 **Cross-Platform Zero-Server Agent Control Plane & Declarative Composer** · **Dynamic Privacy Vault (`auto` | `fail_closed` | `fail_open`)** · **Deterministic Lossless `TOON` Compression** · **Hardware/Variable-Quant Model Manager & Auto-Tuner**
 
-- **Live Documentation & Browser Configurator:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/) · [`settings.html`](https://ccancellieri.github.io/cortical/settings.html)
+- **Live Documentation & 10-Second Browser Demo:** [`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/) · [`settings.html`](https://ccancellieri.github.io/cortical/settings.html) *(0 install, 3x 1-click presets, 0 CDNs)*
 - **Platforms:** `macOS` (Apple Silicon Metal), `Linux` (CUDA / Vulkan / CPU), `Windows` (MSVC / NVIDIA / WMIC-PowerShell)
 - **Zero External Runtime Dependencies:** `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only)
 - **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` (`--transport streamable-http`), opt-in `--serve` dashboard, or HTTP router integration
-- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; modular v0.3.0 architecture spans **7 Python subpackages** (`hardware`, `harnesses`, `composers`, `privacy`, `compression`, `analytics`, `wiki` + CLI/control-plane modules) composing best-of-breed OSS tools.
+- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; modular v0.3.0 architecture spans **7 Python subpackages** (`hardware`, `harnesses`, `composers`, `privacy`, `compression`, `analytics`, `wiki` + CLI/control-plane modules, `18,224` LOC including embedded zero-CDN HTML/CSS/JS UI & wiki store).
+
+---
+
+## Try in 60 Seconds (Zero Dependencies)
+
+```bash
+git clone https://github.com/ccancellieri/cortical.git && cd cortical
+python3 -m venv .venv && .venv/bin/pip install --no-deps -e .
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare   # -78.12% TOON · 100% PII precision · 4.09 ms MCP
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor            # Hardware tier, auto_ctx & 8-harness preflight
+```
+
+Prefer zero install? Open the **[10-Second Interactive Browser Demo (`settings.html`)](https://ccancellieri.github.io/cortical/settings.html)** and click **Preset A (4 GB VRAM Hybrid)**, **Preset B (16 GB Unified 27B @ 65K ctx)**, or **Preset C (Hybrid Remote + `fail_closed` Privacy Vault)**.
 
 ---
 

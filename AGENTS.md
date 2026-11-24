@@ -29,3 +29,5 @@
 - **Shared Skills (`.agents/skills/`):** Discovered natively by `pi`, `OpenCode`, `Codex`, `Claude Code`, and `Antigravity`. Read relevant `SKILL.md` files before editing.
 - **Local Offload & Cross-Harness Handoff:** Prefer `cortical_local_offload` (`qwen3.5:9b-q3_k_xl` / `qwen3.8:27b-iq2_xxs`) for boilerplate/drafting/reviews (`$0` cloud cost) and `cortical_handoff(action='save'|'load')` when switching between Antigravity, `pi`, OpenCode, Claude Code, and Codex.
 - **Chrome Remote Debugging (`:9222`):** Non-destructive `--autoConnect` + Task Tab Groups via `cortical browser status` / `chrome-devtools` MCP; never kill personal browser sessions.
+
+- **Local Harness Hygiene (`pi` / `opencode` / `dsh`):** Never overwrite official `server.json` or `glama.json` registry schemas with ad-hoc fields, never leave scratch issue-comment files in `.github/`, and prefer batched commands (`cortical doctor --json`, `cortical reconcile --dry-run --json`) over repetitive `bash` loops.

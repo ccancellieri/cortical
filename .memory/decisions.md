@@ -252,3 +252,14 @@ python -m unittest discover -s tests -p "test_cortical.py"
 - **Feature 3 (`#42`, `#25`) — Portable Zero-Secret Profile Bundles (`src/cortical/profile.py`, `cli.py`, `zero_server_ui.py`):** Added `cortical-profile/v1` (`cortical profile <export|diff|import>`) scrubbing raw secret patterns (`sk-`, `AIza`, `ghp_`, etc.) and raw/resolved `$HOME` prefixes -> `~`, routing imports safely through `cortical-plan/v1`, plus offline Profile Export & Diff UI in Settings.
 - **Feature 4 (`#43`) — Dual Metal/VRAM Working-Set Preflight & Multi-Harness Telemetry (`src/cortical/hardware/context_window.py`, `src/cortical/analytics/roi.py`):** Exposed `gguf_arena_overhead_gb` & `zero_copy_safe` in `compute_hardware_context_profile` and added `collect_multi_harness_local_runs()` with `(mtime_ns, size)` caching aggregating local LLM usage across `claude-code`, `codex`, `opencode`, and `dsh` alongside `pi` and `agent_runs`.
 - **Verified (`tests/test_roadmap_features.py`):** `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` -> **`51/51` OK** (`14.665s`), `bench --compare` (`78.12%` vs pretty / `62.09%` vs compact TOON), `docs/settings.html` & `html/settings.html` `node --check` exit `0`.
+
+---
+
+## Session 2026-11-24 (Morning — Phase 0 `pi` Audit, 1-Click Browser Demo Presets, Metrics Ledger, Upstream Playbook & Verified Launch Kit)
+
+- **Phase 0 (`pi --session 01a20890-2032-7222-9290-a615d597d1d0` Audit):** Verified `3,481,633` local tokens processed (`3,452,912` in + `28,721` out, `$0` cloud cost); confirmed the 4 `cortical-deep` / `27b` timeout & `stopReason=length` errors were resolved by `783449b`; added local harness hygiene guardrail in `AGENTS.md` to prevent manifest schema drift and `.github/` scratch clutter.
+- **Phase 1–4 Deliverables Committed:**
+  - `docs/METRICS_LEDGER.md`: Ground-truth KPI scorecard (`51/51` tests, `18,224` LOC, `dependencies = []`, `-78.12%` / `-62.09%` TOON, `4.09 ms` MCP handshake, `0` stars / `0` forks / `9` views / `218` clones / `47` closed / `10` open issues) + weekly automated CLI/API cadence.
+  - `src/cortical/analytics/zero_server_ui.py` & `docs/settings.html`: Added **3 One-Click Interactive Browser Demo Presets** (Preset A: Tier 1A 4 GB VRAM Hybrid, Preset B: Tier 1B 16 GB Unified 27B @ `65,536` ctx, Preset C: Hybrid Remote Supervisor + `fail_closed` Privacy Vault), verified `node --check` exit `0` and `51/51` tests OK.
+  - `README.md`: Added top-of-page **Try in 60 Seconds (Zero Dependencies)** and **10-Second Interactive Browser Demo** callouts with exact verified numbers.
+  - `docs/UPSTREAM_PLAYBOOK.md` & `docs/LAUNCH_CONTENT.md`: Prepared 7 value-first upstream PR/issue contribution kits (zero auto-submission) and 3 verified-number LinkedIn launch posts (EN + IT variants) with visual proof specs.
