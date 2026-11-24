@@ -20,6 +20,8 @@ _TRACKED_BINARIES = (
     "unsloth",
     "llama-server",
     "mlx_lm.server",
+    "lms",
+    "vllm",
     "uv",
     "serena",
     "rtk",

@@ -104,10 +104,26 @@ def _ollama_model_yaml(model_name: str, ollama_model: str, ollama_base: str, num
     ]
 
 
+def _openai_runner_model_yaml(model_name: str, target_model: str, v1_base: str, timeout_sec: int) -> list[str]:
+    """Formats one LiteLLM OpenAI-compatible local runner entry (`unsloth`, `lm_studio`, `llama_cpp`, `mlx_lm`, `vllm`)."""
+    return [
+        f"  - model_name: {model_name}",
+        "    litellm_params:",
+        f"      model: openai/{target_model}",
+        f"      api_base: {v1_base}",
+        "      api_key: local",
+        f"      timeout: {timeout_sec}",
+    ]
+
+
 def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: Optional[dict[str, Any]] = None) -> str:
     """Renders deterministic `litellm_config.yaml` mapping Cortical roles, dynamic num_ctx, timeouts & orchestrator."""
     cfg = config or load_cortical_config()
-    ollama_base = str((((cfg.get("runners") or {}).get("ollama") or {}).get("base_url")) or "http://127.0.0.1:11434").rstrip("/")
+    from ..config import resolve_active_runner_endpoint
+
+    r_name, r_type, _ = resolve_active_runner_endpoint(cfg, v1=False)
+    _, _, ollama_base = resolve_active_runner_endpoint(cfg, runner_name=r_name, v1=False)
+    _, _, runner_v1_base = resolve_active_runner_endpoint(cfg, runner_name=r_name, v1=True)
     hw_eff = hw or {"total_ram_gb": 16.0, "free_ram_gb": 10.0, "unified_memory": True, "vram_gb": 11.2, "memory_pressure_level": 1}
     orch = resolve_orchestrator_spec(cfg, hw=hw_eff)
 
@@ -129,10 +145,15 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: O
         )
         return dyn_ctx, compute_adaptive_timeout(mid, num_ctx=dyn_ctx, is_remote=False)
 
+    def _emit_local_entry(alias_name: str, target_m: str) -> list[str]:
+        dyn_ctx, t_sec = _ctx_and_timeout(target_m)
+        if r_type == "ollama":
+            return _ollama_model_yaml(alias_name, target_m, ollama_base, dyn_ctx, t_sec)
+        return _openai_runner_model_yaml(alias_name, target_m, runner_v1_base, t_sec)
+
     lines = ["model_list:"]
     for m in models:
-        dyn_ctx, t_sec = _ctx_and_timeout(m)
-        lines.extend(_ollama_model_yaml(m, m, ollama_base, dyn_ctx, t_sec))
+        lines.extend(_emit_local_entry(m, m))
 
     daily = resolve_role_model("daily_coder", cfg)
     deep = resolve_role_model("deep_reasoner", cfg)
@@ -142,8 +163,7 @@ def render_litellm_config_yaml(config: Optional[dict[str, Any]] = None, *, hw: O
             continue
         role_aliases.append((str(meta["alias"]), resolve_role_model(rkey, cfg)))
     for alias, target_m in role_aliases:
-        t_ctx, t_sec = _ctx_and_timeout(target_m)
-        lines.extend(_ollama_model_yaml(alias, target_m, ollama_base, t_ctx, t_sec))
+        lines.extend(_emit_local_entry(alias, target_m))
 
     fallbacks: list[str] = []
     if orch["is_remote"] and orch.get("api_key_env"):

@@ -273,6 +273,142 @@ class TestModelRoleAbstractionAndWatchFix(unittest.TestCase):
             self.assertGreater(out["raw_file_tokens_saved_est"], 100)
             self.assertNotIn("TOP SECRET NEVER READ", captured["prompt"])
 
+    def test_zero_runner_privacy_vault_and_toon_operate_100pct_offline(self) -> None:
+        import zipfile
+        from cortical.compression.engine import compress_structured
+        from cortical.config import DEFAULT_CONFIG
+        from cortical.privacy.sanitizer import FailClosedError
+        from cortical.privacy.vault import PrivacyVault
+
+        offline_cfg = copy.deepcopy(DEFAULT_CONFIG)
+        offline_cfg["active_runner"] = "lm_studio"
+        offline_cfg["runners"]["lm_studio"]["base_url"] = "http://127.0.0.1:9/v1"
+        offline_cfg["privacy"]["use_local_ner"] = False
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            md_f = root / "spec.md"
+            md_f.write_text(
+                "Architecture uses PostgreSQL and FastAPI. Contact: alice@acme.example, IBAN IT60X0542811101000000123456.",
+                encoding="utf-8",
+            )
+            docx_f = root / "contract.docx"
+            with zipfile.ZipFile(docx_f, "w") as zf:
+                zf.writestr("docProps/core.xml", "<cp:coreProperties><dc:creator>Hidden Author</dc:creator></cp:coreProperties>")
+                zf.writestr(
+                    "word/document.xml",
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    "<w:body><w:p><w:t>Secret client bob@acme.example on Kubernetes cluster</w:t></w:p></w:body></w:document>",
+                )
+            pdf_f = root / "invoice.pdf"
+            pdf_f.write_bytes(
+                b"%PDF-1.4\n1 0 obj << /Author (Secret Corp) >> endobj\n"
+                b"stream\nBT (Billing carol@acme.example PostgreSQL node) Tj ET\nendstream\n%%EOF"
+            )
+
+            vault = PrivacyVault(root / "vault.db")
+            r_md = vault.ingest(str(md_f), alias="spec_doc", policy="auto", profile="medium", config=offline_cfg)
+            r_docx = vault.ingest(str(docx_f), alias="secret_docx", policy="fail_closed", profile="max_security", config=offline_cfg)
+            r_pdf = vault.ingest(str(pdf_f), alias="inv_pdf", policy="auto", profile="medium", config=offline_cfg)
+
+            self.assertGreaterEqual(r_md["entity_count"], 2)
+            self.assertTrue(r_docx["local_only"])
+            self.assertGreaterEqual(r_pdf["entity_count"], 1)
+
+            safe_md = vault.read_resource("spec_doc", allow_local_only=False)
+            self.assertIn("PostgreSQL", safe_md["text"])
+            self.assertNotIn("alice@acme.example", safe_md["text"])
+
+            with self.assertRaises(FailClosedError):
+                vault.read_resource("secret_docx", allow_local_only=False, remote_egress=True)
+
+            audit = vault.verify_audit_ledger()
+            self.assertTrue(audit["ok"])
+            self.assertGreaterEqual(audit["blocked_egress_count"], 1)
+
+            payload = json.dumps([{"id": i, "service": "PostgreSQL", "status": "ok"} for i in range(12)], indent=2)
+            comp = compress_structured(payload)
+            self.assertEqual(comp["format_used"], "toon")
+            self.assertGreater(comp["saving_pct"], 30.0)
+
+    def test_multi_runner_ocr_sync_router_and_constructive_offline_diagnostics(self) -> None:
+        import io
+        from cortical.cli import main as cli_main
+        from cortical.composers.router import render_litellm_config_yaml
+        from cortical.config import DEFAULT_CONFIG, resolve_active_runner_endpoint
+        from cortical.harnesses.adapters import plan_sync, resolve_user_paths
+        from cortical.mcp_server import CorticalMCPServer
+        from cortical.privacy.sanitizer import ocr_image_local
+
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["active_runner"] = "unsloth"
+        r_name, r_type, v1_url = resolve_active_runner_endpoint(cfg, v1=True)
+        self.assertEqual((r_name, r_type, v1_url), ("unsloth", "openai_compatible", "http://127.0.0.1:8888/v1"))
+
+        captured_req: dict[str, str] = {}
+
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({"choices": [{"message": {"content": "Transcribed via Unsloth VLM"}}]}).encode("utf-8")
+
+        def _fake_urlopen(req, timeout=10):
+            captured_req["url"] = req.full_url
+            captured_req["body"] = req.data.decode("utf-8")
+            return _FakeResp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            ocr_txt = ocr_image_local(b"\x89PNG\r\n\x1a\nfake", model="qwen2.5vl:3b", config=cfg)
+        self.assertEqual(ocr_txt, "Transcribed via Unsloth VLM")
+        self.assertEqual(captured_req["url"], "http://127.0.0.1:8888/v1/chat/completions")
+        self.assertIn("image_url", captured_req["body"])
+
+        cfg_lm = copy.deepcopy(DEFAULT_CONFIG)
+        cfg_lm["active_runner"] = "lm_studio"
+        yaml_txt = render_litellm_config_yaml(cfg_lm)
+        self.assertIn("model: openai/", yaml_txt)
+        self.assertIn("api_base: http://127.0.0.1:1234/v1", yaml_txt)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = resolve_user_paths(os_name="macos", home_dir=root)
+            changes = plan_sync(
+                cfg_lm,
+                {"os": "macos", "total_ram_gb": 16.0, "free_ram_gb": 10.0, "unified_memory": True, "vram_gb": 11.2, "binaries": {}},
+                {"recommended_by_role": {"daily_coder": {"model_id": "local-coder", "recommended_num_ctx": 32768}}},
+                harnesses=["pi"],
+                user_paths=paths,
+                repo_root=root,
+                vault_db_path=root / "vault.db",
+            )
+            pi_mod = next(c for c in changes if c.path.name == "models.json")
+            self.assertIn("http://127.0.0.1:1234/v1", pi_mod.content)
+            self.assertIn('"lm_studio"', pi_mod.content)
+
+            dead_cfg = copy.deepcopy(DEFAULT_CONFIG)
+            dead_cfg["active_runner"] = "lm_studio"
+            dead_cfg["runners"]["lm_studio"]["base_url"] = "http://127.0.0.1:9/v1"
+            mcp = CorticalMCPServer(vault_db=root / "vault.db")
+            with mock.patch("cortical.mcp_server.load_cortical_config", return_value=dead_cfg):
+                off = mcp._dispatch_tool("cortical_local_offload", {"prompt": "ping"})
+            self.assertFalse(off["completed_locally"])
+            self.assertTrue(off["zero_llm_stdlib_active"])
+            self.assertIn("Tier-1 Zero-LLM Stdlib", off["response"])
+            self.assertIn("LM Studio", off["response"])
+
+            buf = io.StringIO()
+            with mock.patch("cortical.harnesses.adapters.resolve_user_paths", return_value=paths), \
+                 mock.patch("cortical.harnesses.adapters._backup_root", return_value=root / "backups"), \
+                 mock.patch("sys.stdout", buf):
+                rc = cli_main(["sync", "--harness", "antigravity", "--repo-root", str(root), "--db", str(root / "vault.db")])
+            self.assertEqual(rc, 0)
+            self.assertIn("Undo anytime: cortical sync --rollback", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

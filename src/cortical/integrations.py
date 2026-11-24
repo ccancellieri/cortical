@@ -323,8 +323,12 @@ def run_doctor_diagnostics(
     }
 
     local_runners = {
-        "ollama_api": _probe_http_ok("http://127.0.0.1:11434/api/tags"),
-        "litellm_router": _probe_http_ok("http://127.0.0.1:4000/v1/models"),
+        "ollama_api": _probe_http_ok("http://127.0.0.1:11434/api/tags", timeout=0.4),
+        "litellm_router": _probe_http_ok("http://127.0.0.1:4000/v1/models", timeout=0.4),
+        "unsloth_api": _probe_http_ok("http://127.0.0.1:8888/v1/models", timeout=0.35),
+        "lm_studio_api": _probe_http_ok("http://127.0.0.1:1234/v1/models", timeout=0.35),
+        "llama_cpp_mlx_api": _probe_http_ok("http://127.0.0.1:8080/v1/models", timeout=0.35),
+        "vllm_api": _probe_http_ok("http://127.0.0.1:8000/v1/models", timeout=0.35),
         "rtk_bin": bool(shutil.which("rtk")),
         "serena_bin": bool(shutil.which("serena")),
     }
@@ -333,6 +337,7 @@ def run_doctor_diagnostics(
     mcp_ping = ping_mcp_stdio() if ping_mcp else {"ok": True, "skipped": True}
 
     return {
+        "tier1_zero_llm_stdlib": True,
         "python": {
             "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "supported": sys.version_info >= (3, 10),

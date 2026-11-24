@@ -10,20 +10,45 @@
 - **Platforms:** `macOS` (Apple Silicon Metal), `Linux` (CUDA / Vulkan / CPU), `Windows` (MSVC / NVIDIA / WMIC-PowerShell)
 - **Zero External Runtime Dependencies:** `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only)
 - **Zero-Server by Default:** `stdio` MCP + file sync across **8 harnesses**, with optional on-demand foreground `serve-mcp` (`--transport streamable-http`), opt-in `--serve` dashboard, or HTTP router integration
-- **Legacy Archive:** Pre-redesign monolith (`~31.8K` LOC) preserved in git branch `legacy-v0.2` and tag `v0.2.0-legacy`; modular v0.3.0 architecture spans **7 Python subpackages** (`hardware`, `harnesses`, `composers`, `privacy`, `compression`, `analytics`, `wiki` + CLI/control-plane modules, `18,224` LOC including embedded zero-CDN HTML/CSS/JS UI & wiki store).
+- **Zero-LLM Privacy Vault (Works Without Any Local Model):** Deterministic PII + secret + custom-term masking, `.docx`/`.xlsx`/`.pptx`/selectable `.pdf` XML metadata stripping, `fail_closed` cloud egress guard, and cryptographic **SHA-256** audit ledger run **100% in Python stdlib**—no Ollama or local LLM required.
+- **Multi-Runner Local & Hybrid Orchestration (7 Runners + 10 `@role:*` Slots):** Supports **`Ollama` (`:11434`)**, **`Unsloth Studio` (`:8888/v1`)**, **`LM Studio` (`:1234/v1`)**, **`llama.cpp` (`:8080/v1`)**, **`Apple MLX` (`:8080/v1`)**, **`vLLM` (`:8000/v1`)**, and custom **`openai_compatible`** endpoints through 10 semantic `@role:*` model abstractions (never hardcode model tags).
+- **Codebase Breakdown (`wc -l` Verifiable):** Pre-redesign monolith (`~31.8K` LOC) archived in `legacy-v0.2` / `v0.2.0-legacy`; modular `v0.3.0` spans **7 Python subpackages** totaling **`19,086` LOC** (**`15,048` LOC Core Python + CLI + Merkle Wiki** and **`4,038` LOC embedded zero-CDN HTML/CSS/JS SPA templates**), verified by **`57/57` passing `unittest` tests** (`2,678` test LOC).
 
 ---
 
-## Try in 60 Seconds (Zero Dependencies)
+## Safe 60-Second Onboarding (Zero Dependencies, `--dry-run` First)
 
 ```bash
 git clone https://github.com/ccancellieri/cortical.git && cd cortical
 python3 -m venv .venv && .venv/bin/pip install --no-deps -e .
-PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare   # -78.12% TOON · 100% PII precision · 4.09 ms MCP
-PYTHONPATH=src .venv/bin/python -m cortical.cli doctor            # Hardware tier, auto_ctx & 8-harness preflight
+
+# 1. Benchmark lossless TOON (-78.12%), Zero-LLM Privacy Vault & 7-tool MCP
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
+
+# 2. Inspect hardware tier, Tier-1 Zero-LLM Stdlib & detected local runners
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
+
+# 3. Preview exact harness diffs FIRST (modifies 0 files)
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run
+
+# 4. Apply idempotently with timestamped backup (undo anytime via --rollback)
+PYTHONPATH=src .venv/bin/python -m cortical.cli sync
+# Undo anytime: PYTHONPATH=src .venv/bin/python -m cortical.cli sync --rollback <backup_id>
 ```
 
-Prefer zero install? Open the **[10-Second Interactive Browser Demo (`settings.html`)](https://ccancellieri.github.io/cortical/settings.html)** and click **Preset A (4 GB VRAM Hybrid)**, **Preset B (16 GB Unified 27B @ 65K ctx)**, or **Preset C (Hybrid Remote + `fail_closed` Privacy Vault)**.
+Prefer zero install? Open **[`https://ccancellieri.github.io/cortical/`](https://ccancellieri.github.io/cortical/)** or jump straight into the **[10-Second Interactive Control Plane (`settings.html`)](https://ccancellieri.github.io/cortical/settings.html)** and click **Preset A (4 GB VRAM Hybrid)**, **Preset B (16 GB Unified 27B @ 65K ctx)**, or **Preset C (Hybrid Remote + `fail_closed` Privacy Vault)**.
+
+---
+
+## Transparent 2-Tier Capability Matrix (`ADR-016`)
+
+| Capability | Execution Tier | Local Model Runner Needed? | Supported Formats / Runners |
+| --- | --- | --- | --- |
+| **Privacy Vault, Metadata Strip & SHA-256 Audit Ledger** | **⚡ Tier 1 · Zero-LLM Stdlib** | **No** | `.md`, `.txt`, `.json`, `.docx`, `.xlsx`, `.pptx`, selectable `.pdf` (`auto` \| `fail_closed` \| `fail_open`) |
+| **Lossless `TOON` Compression, `doctor` & 8-Harness `sync`** | **⚡ Tier 1 · Zero-LLM Stdlib** | **No** | `-78.12%` vs pretty / `-62.09%` vs compact JSON, `--dry-run` preview & `--rollback <id>` |
+| **Static 6-Domain Browser Control Plane (`settings.html`)** | **⚡ Tier 1 · Zero-LLM Stdlib** | **No** | Zero external CDNs, zero open ports, client-side PII masking preview & 1-click Presets A/B/C |
+| **Image / Scanned-PDF OCR (`cortical watch`) & `--ner`** | **🧠 Tier 2 · Local Runner** | Yes (`@role:vision` / `@role:ner`) | `Ollama`, `Unsloth Studio`, `LM Studio`, `llama.cpp`, `MLX`, `vLLM`, `openai_compatible` |
+| **Zero-Cloud-Token Code Offload (`cortical_local_offload`)** | **🧠 Tier 2 · Local Runner** | Yes (`@role:daily_coder` / `@role:reviewer`) | Direct `file_paths` local read (`-95.80%` cloud input tokens at `$0` cloud cost) |
 
 ---
 

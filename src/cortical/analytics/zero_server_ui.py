@@ -401,7 +401,7 @@ function renderOverview() {{
           <option value="linux" ${{ST.targetOs==='linux'?'selected':''}}>🐧 Linux</option>
           <option value="windows" ${{ST.targetOs==='windows'?'selected':''}}>🪟 Windows (PowerShell)</option>
         </select>
-        <button class="btn primary" onclick="copyText('cortical doctor && cortical sync --dry-run', 'doctor + dry-run')">📋 Copy Preflight Command</button>
+        <button class="btn primary" onclick="copyText('cortical bench --compare && cortical doctor && cortical sync --dry-run', '4-step safe preflight')">📋 Copy Safe Preflight (--dry-run)</button>
       </div>
     </div>
 
@@ -409,16 +409,19 @@ function renderOverview() {{
     <div class="card" style="border-color:var(--warn);background:rgba(251,191,36,0.06);">
       <div class="card-head" style="margin-bottom:6px;">
         <h2>⚡ Drift Alert — ${{driftList.length}} Installed Harness(es) Out of Sync</h2>
-        <button class="btn sm primary" onclick="copyText('cortical sync', 'cortical sync')">📋 Copy cortical sync</button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn sm" onclick="copyText('cortical sync --dry-run', 'sync --dry-run')">👁 Preview (--dry-run)</button>
+          <button class="btn sm primary" onclick="copyText('cortical sync', 'cortical sync (with backup)')">⟳ Apply with Backup</button>
+        </div>
       </div>
-      <div class="hint">Detected unlinked/drifted harnesses: <strong>${{driftList.map((d)=>esc(d.id)).join(', ')}}</strong>. Open <em>Services &amp; Harnesses</em> to inspect diffs and apply cleanly.</div>
+      <div class="hint">Detected unlinked/drifted harnesses: <strong>${{driftList.map((d)=>esc(d.id)).join(', ')}}</strong>. Preview first with <code>cortical sync --dry-run</code>; restore anytime via <code>cortical sync --rollback &lt;backup_id&gt;</code>.</div>
     </div>` : ''}}
 
     <div class="grid-4" style="margin-bottom:16px;">
       <div class="kpi"><div class="hint">Hardware Tier</div><div class="kpi-val">${{esc(s.hardware?.classification?.tier || 'tier_1b')}}</div><div class="hint">${{s.hardware?.total_ram_gb}} GB RAM · num_ctx ${{s.hardware?.dynamic_num_ctx}}</div></div>
       <div class="kpi"><div class="hint">Harnesses Linked</div><div class="kpi-val">${{linked}} / 8</div><div class="hint">${{driftList.length}} drift · ${{(s.backups||[]).length}} rollback snapshots</div></div>
-      <div class="kpi"><div class="hint">Privacy Vault</div><div class="kpi-val">${{(v.aliases||[]).length}} Aliases</div><div class="hint">${{v.memory_budget_pct}}% of ≤${{v.max_context_share_pct}}% ctx budget</div></div>
-      <div class="kpi"><div class="hint">TOON Compression</div><div class="kpi-val" style="color:var(--ok);">-${{toonSave}}%</div><div class="hint">vs compact JSON · 0 cloud tokens</div></div>
+      <div class="kpi"><div class="hint">Privacy Vault <span class="pill ok" style="padding:1px 6px;font-size:10px;">⚡ Zero-LLM (Stdlib)</span></div><div class="kpi-val">${{(v.aliases||[]).length}} Aliases</div><div class="hint">${{v.memory_budget_pct}}% of ≤${{v.max_context_share_pct}}% ctx budget</div></div>
+      <div class="kpi"><div class="hint">TOON Compression <span class="pill ok" style="padding:1px 6px;font-size:10px;">⚡ Zero-LLM (Stdlib)</span></div><div class="kpi-val" style="color:var(--ok);">-${{toonSave}}%</div><div class="hint">vs compact JSON · 0 cloud tokens</div></div>
     </div>
 
     <div class="card">
@@ -463,24 +466,39 @@ function renderOverview() {{
     </div>
 
     <div class="card">
-      <div class="card-head"><h2>🚀 Guided 3-Step Zero-Server Launchpad</h2></div>
+      <div class="card-head">
+        <h2>🚀 Guided Safe 4-Step Launchpad &amp; Capability Tiers</h2>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <span class="pill ok">⚡ Tier 1: Zero-LLM (Python Stdlib Only)</span>
+          <span class="pill info">🧠 Tier 2: Optional Local Runner (Ollama · Unsloth · LM Studio · llama.cpp · MLX · vLLM)</span>
+        </div>
+      </div>
       <div class="grid-3">
         <div class="kpi">
-          <span class="pill info">Step 1 · Hardware</span>
-          <h3 style="margin:8px 0 4px;">Inspect Tier &amp; Models</h3>
-          <p class="hint">Verify swap-free RAM/VRAM headroom and dynamic <code>num_ctx</code> without silent Ollama 4096 clipping.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <span class="pill info">Step 1 · Hardware</span>
+            <span class="pill ok" style="font-size:11px;">⚡ Zero-LLM (Stdlib)</span>
+          </div>
+          <h3 style="margin:8px 0 4px;">Benchmark &amp; Inspect Tier</h3>
+          <p class="hint">Run <code>cortical bench --compare &amp;&amp; cortical doctor</code> to verify RAM/VRAM headroom and dynamic <code>num_ctx</code>.</p>
           <button class="btn sm" onclick="setView('models')">Open Models &amp; Tuner →</button>
         </div>
         <div class="kpi">
-          <span class="pill ok">Step 2 · 8 Harnesses</span>
-          <h3 style="margin:8px 0 4px;">Link Harnesses &amp; OSS Tools</h3>
-          <p class="hint">Sync Antigravity, pi, Claude Code, Codex, OpenCode, OpenClaw, dsh &amp; Unsloth with timestamped rollback.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <span class="pill ok">Step 2 · Safe Sync</span>
+            <span class="pill ok" style="font-size:11px;">⚡ Zero-LLM (Stdlib)</span>
+          </div>
+          <h3 style="margin:8px 0 4px;">Preview (<code>--dry-run</code>) then Sync</h3>
+          <p class="hint">Preview diffs across 8 harnesses first via <code>cortical sync --dry-run</code>; apply with backup &amp; instant <code>--rollback &lt;id&gt;</code>.</p>
           <button class="btn sm primary" onclick="setView('harnesses')">Open Services &amp; Harnesses →</button>
         </div>
         <div class="kpi">
-          <span class="pill violet">Step 3 · Zero-PII</span>
-          <h3 style="margin:8px 0 4px;">Protect Private Docs</h3>
-          <p class="hint">Ingest files into <code>@private:&lt;alias&gt;</code> with 3-channel egress protection and offline <code>cortical watch</code>.</p>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <span class="pill violet">Step 3 · Zero-PII Vault</span>
+            <span class="pill ok" style="font-size:11px;">⚡ Zero-LLM (Stdlib)</span>
+          </div>
+          <h3 style="margin:8px 0 4px;">Protect Docs Without Any LLM</h3>
+          <p class="hint">Sanitize MD/DOCX/XLSX/PPTX/PDF + SHA-256 audit ledger in pure stdlib; optional <code>@role:vision</code> local runner for image OCR.</p>
           <button class="btn sm" onclick="setView('vault')">Open Privacy Vault →</button>
         </div>
       </div>
@@ -534,10 +552,10 @@ function renderHarnesses() {{
         <p>Install, configure, preview idempotent diffs, and maintain linked state across all 8 harnesses and composed OSS tools.</p>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button class="btn" onclick="copyText('cortical sync --dry-run', 'sync --dry-run')">👁 Copy Dry-Run</button>
+        <button class="btn primary" onclick="copyText('cortical sync --dry-run', 'sync --dry-run')">👁 Preview (--dry-run)</button>
+        <button class="btn" onclick="copyText('cortical sync', 'cortical sync (with backup)')">⟳ Apply with Backup</button>
         <button class="btn" onclick="ST.planHarnesses = (ST.snap.harnesses||[]).filter((h)=>h.drift||h.lifecycle==='installed_unlinked').map((h)=>h.id); renderAll(); toast('ok', ST.planHarnesses.length + ' harness(es) needing repair added to apply plan')">🩹 Plan Repair for All Drift</button>
         <button class="btn" onclick="copyText(VERIFY_REFRESH_CMD, 'verify & refresh')">✅ Verify &amp; Refresh Snapshot</button>
-        <button class="btn primary" onclick="copyText('cortical sync', 'cortical sync')">⟳ Copy Sync All</button>
       </div>
     </div>
 
@@ -919,11 +937,15 @@ function renderModels() {{
     </div>
 
     <div class="card">
-      <div class="card-head"><h2>Direct Client-Side Local Runtime Probes</h2><span class="hint">Direct browser <code>fetch()</code> · falls back cleanly to <code>cortical doctor</code> on CORS/offline</span></div>
-      <div class="grid-3">
+      <div class="card-head">
+        <h2>Direct Client-Side Multi-Runner Probes</h2>
+        <span class="pill info">🧠 Requires Local Runner (Optional Tier 2)</span>
+      </div>
+      <div class="grid-4">
         ${{probeRow('ollama', 'Ollama Native', 'http://127.0.0.1:11434/api/tags')}}
         ${{probeRow('litellm', 'Local Router (LiteLLM)', 'http://127.0.0.1:4000/v1/models')}}
         ${{probeRow('unsloth', 'Unsloth Studio', 'http://127.0.0.1:8888/v1/models')}}
+        ${{probeRow('lm_studio', 'LM Studio / llama.cpp / MLX', 'http://127.0.0.1:1234/v1/models')}}
       </div>
     </div>
 
@@ -1001,6 +1023,7 @@ async function probeLocalRuntimes() {{
     ['ollama', 'http://127.0.0.1:11434/api/tags'],
     ['litellm', 'http://127.0.0.1:4000/v1/models'],
     ['unsloth', 'http://127.0.0.1:8888/v1/models'],
+    ['lm_studio', 'http://127.0.0.1:1234/v1/models'],
   ];
   toast('info', 'Probing local services from browser...');
   for (const [k, url] of targets) {{
@@ -1058,11 +1081,14 @@ function renderVault() {{
     <div class="card">
       <div class="card-head">
         <h2>🔐 Cryptographic SHA-256 Privacy &amp; Fail-Closed Egress Audit Ledger</h2>
-        <span class="pill ${{auditPillCls}}">${{auditPillTxt}}</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <span class="pill ok">⚡ Zero-LLM (Stdlib)</span>
+          <span class="pill ${{auditPillCls}}">${{auditPillTxt}}</span>
+        </div>
       </div>
       <div class="hint">
         Entries: <strong>${{auditEntries}}</strong> · Blocked Remote Egress Events: <strong>${{audit.blocked_egress_count || 0}}</strong> ·
-        Head Hash: <code class="mono">${{esc(String(audit.head_hash || '').slice(0, 16) || 'genesis')}}</code> · Never stores raw PII.
+        Head Hash: <code class="mono">${{esc(String(audit.head_hash || '').slice(0, 16) || 'genesis')}}</code> · Runs 100% in Python stdlib with zero local LLM runner required; never stores raw PII.
       </div>
     </div>
 
@@ -1097,7 +1123,11 @@ function renderVault() {{
     <div class="card">
       <div class="card-head">
         <h2>⬆️ Interactive Zero-Server Upload &amp; Redaction Studio</h2>
-        <span class="pill ${{ST.dirHandle ? 'ok' : 'info'}}">${{ST.dirHandle ? '✓ Linked to ' + esc(ST.dirHandle.name) + '/vault_inbox' : 'Browser Preview + CLI Fallback'}}</span>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <span class="pill ok">⚡ Text/OOXML/PDF: Zero-LLM (Stdlib)</span>
+          <span class="pill info">🧠 Image OCR: Local Runner (@role:vision)</span>
+          <span class="pill ${{ST.dirHandle ? 'ok' : 'info'}}">${{ST.dirHandle ? '✓ Linked to ' + esc(ST.dirHandle.name) + '/vault_inbox' : 'Browser Preview + CLI Fallback'}}</span>
+        </div>
       </div>
       <div class="grid-4">
         <div class="field"><label for="vu-tags">Task Tags (comma-separated)</label><input id="vu-tags" class="input mono" placeholder="cv, finance, architecture" /></div>
@@ -1218,11 +1248,11 @@ function renderSettings() {{
       <div class="card">
         <div class="grid-2">
           <div class="field">
-            <label for="s-runner">Active Local Runner</label>
+            <label for="s-runner">Active Local Runner (Multi-Runner)</label>
             <select id="s-runner" class="select" onchange="setCfg('active_runner', this.value)">
-              ${{['ollama','unsloth','llama_cpp','mlx_lm','openai_compatible'].map((r)=>`<option value="${{r}}" ${{c.active_runner===r?'selected':''}}>${{r}}</option>`).join('')}}
+              ${{['ollama','unsloth','lm_studio','llama_cpp','mlx_lm','vllm','openai_compatible'].map((r)=>`<option value="${{r}}" ${{c.active_runner===r?'selected':''}}>${{r}}</option>`).join('')}}
             </select>
-            <div class="hint">Primary local inference backend used for <code>cortical_local_offload</code> and offline NER.</div>
+            <div class="hint">Supports Ollama (:11434), Unsloth Studio (:8888), LM Studio (:1234), llama.cpp / MLX (:8080), vLLM (:8000) &amp; custom OpenAI-compatible endpoints.</div>
           </div>
           <div class="field">
             <label for="s-ctx">Max Context Window (tokens)</label>
@@ -1354,6 +1384,10 @@ function renderSettings() {{
     const cp = c.compression || {{}};
     body = `
       <div class="card">
+        <div class="card-head">
+          <h2>🗜️ Deterministic Lossless TOON Compression</h2>
+          <span class="pill ok">⚡ Zero-LLM (Stdlib)</span>
+        </div>
         <div class="grid-2">
           <div class="field">
             <label><input type="checkbox" ${{cp.enable_toon!==false?'checked':''}} onchange="setCfg('compression.enable_toon', this.checked)" /> Enable Lossless TOON Compression</label>

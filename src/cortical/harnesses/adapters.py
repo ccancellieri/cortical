@@ -262,8 +262,10 @@ def plan_sync(
     router_cfg = config.get("router") or {}
     router_enabled = bool(router_cfg.get("enabled", False))
     router_url = str(router_cfg.get("base_url") or "http://127.0.0.1:4000/v1") if router_enabled else ""
-    ollama_v1 = "http://127.0.0.1:11434/v1"
-    eff_base_url = router_url or ollama_v1
+    from ..config import resolve_active_runner_endpoint
+
+    active_runner_name, _active_runner_type, runner_v1 = resolve_active_runner_endpoint(config, v1=True)
+    eff_base_url = router_url or runner_v1
     orch = resolve_orchestrator_spec(config, hw=hw, rec_models=rec_models)
 
     rules_body = _build_shared_rules_md(
@@ -321,7 +323,7 @@ def plan_sync(
 
         sp = paths_map["pi"]["settings"]
         cur_s = _read_json_safe(sp)
-        prov_name = "router" if router_enabled else "ollama"
+        prov_name = "router" if router_enabled else (active_runner_name if active_runner_name != "ollama" else "ollama")
         base_pi_models = [daily_model, reasoner_model, router_model]
         if router_enabled:
             base_pi_models.extend(["cortical-fast", "cortical-deep", "local-default"])

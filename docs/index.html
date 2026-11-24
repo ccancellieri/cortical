@@ -3,481 +3,342 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cortical — Cross-Platform Control Plane, Privacy Vault &amp; Lossless TOON Compression</title>
-  <meta name="description" content="Zero-dependency Python 3.10+ Cross-Platform Agent Control Plane across 8 harnesses (macOS, Linux, Windows), Dynamic Privacy Vault (auto/fail_closed/fail_open), Lossless TOON Compression, and Variable-Quant 27B Model Sizing." />
+  <title>Cortical — Zero-Server Privacy Vault, Multi-Runner Control Plane &amp; TOON Token Saver</title>
+  <meta name="description" content="Zero-dependency (Python 3.10+ stdlib only), zero-server control plane, fail-closed Privacy Vault, lossless TOON compression (-78.12%), and multi-runner local/hybrid model orchestration across 8 coding harnesses." />
   <style>
     :root {
-      --bg: #080d1a; --surface: #0f172a; --card: #151f33; --card2: #0c1322; --border: #24324a;
-      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --emerald: #34d399; --amber: #fbbf24; --danger: #f87171;
+      --bg: #070b14;
+      --bg-elev: #0d1424;
+      --surface: #121c30;
+      --surface-hover: #182540;
+      --border: #233250;
+      --border-strong: #354b76;
+      --text: #e6eef8;
+      --muted: #93a6c2;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.14);
+      --ok: #34d399;
+      --ok-soft: rgba(52, 211, 153, 0.14);
+      --warn: #fbbf24;
+      --warn-soft: rgba(251, 191, 36, 0.14);
+      --violet: #a78bfa;
+      --violet-soft: rgba(167, 139, 250, 0.15);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
     }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--sans);
+      background: radial-gradient(circle at 15% 0%, #101f3c 0%, var(--bg) 52%);
+      color: var(--text);
+      line-height: 1.6;
+    }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    code { color: var(--emerald); background: #060a14; padding: 2px 6px; border-radius: 5px; font-size: 0.84em; }
-    .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 20px 72px; }
-    .nav { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0 22px; }
-    .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.15rem; color: var(--text); text-decoration: none; }
-    .nav-links { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 0.9rem; font-weight: 600; }
-    .hero { padding: 38px 30px; border: 1px solid var(--border); border-radius: 18px; background: radial-gradient(circle at top right, rgba(56,189,248,0.18), transparent 55%), radial-gradient(circle at bottom left, rgba(52,211,153,0.10), transparent 45%), var(--surface); margin-bottom: 24px; }
-    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-    .badge { display: inline-block; font-size: 0.75rem; font-weight: 700; padding: 4px 11px; border-radius: 999px; border: 1px solid rgba(56,189,248,0.4); color: var(--accent); background: rgba(56,189,248,0.08); }
-    .badge-em { border-color: rgba(52,211,153,0.4); color: var(--emerald); background: rgba(52,211,153,0.08); }
-    h1 { margin: 0 0 12px; font-size: 2.35rem; line-height: 1.15; letter-spacing: -0.02em; }
-    .lead { color: var(--muted); font-size: 1.05rem; max-width: 860px; margin: 0 0 22px; }
-    .cta-row { display: flex; flex-wrap: wrap; gap: 10px; }
-    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 15px; border-radius: 9px; font-weight: 600; font-size: 0.9rem; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
-    .btn:hover { border-color: var(--accent); text-decoration: none; }
-    .btn-primary { background: var(--accent); color: #082f49; border-color: var(--accent); }
-    .btn-emerald { background: rgba(52,211,153,0.14); color: var(--emerald); border-color: rgba(52,211,153,0.45); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-bottom: 30px; }
-    .kpi { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
-    .kpi-val { font-size: 1.6rem; font-weight: 800; color: var(--emerald); }
-    .kpi-lbl { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
-    h2 { font-size: 1.4rem; margin: 34px 0 14px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-    .tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 16px; }
-    .card { padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
-    .card h3 { margin: 0 0 8px; font-size: 1.05rem; color: var(--accent); }
-    .card p { margin: 0; font-size: 0.9rem; color: var(--muted); }
-    .demo-shell { border: 1px solid rgba(56,189,248,0.35); border-radius: 14px; background: var(--surface); padding: 22px; margin-bottom: 26px; }
-    .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
-    .tab-btn { padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--card2); color: var(--muted); cursor: pointer; font-weight: 600; font-size: 0.86rem; }
-    .tab-btn.active { background: var(--accent); color: #082f49; border-color: var(--accent); }
-    .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-    .pill { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--card2); color: var(--text); cursor: pointer; font-size: 0.82rem; font-weight: 600; }
-    .pill.active { border-color: var(--emerald); background: rgba(52,211,153,0.16); color: var(--emerald); }
-    .bar-track { height: 10px; border-radius: 999px; background: #060a14; border: 1px solid var(--border); overflow: hidden; margin: 10px 0; }
-    .bar-fill { height: 100%; background: linear-gradient(90deg, var(--emerald), var(--accent)); transition: width 0.25s ease; }
-    .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    @media (max-width: 780px) { .demo-grid { grid-template-columns: 1fr; } h1 { font-size: 1.8rem; } }
-    textarea, select, input[type="range"] { width: 100%; border-radius: 8px; border: 1px solid var(--border); background: #060a14; color: var(--text); padding: 10px; font-family: inherit; font-size: 0.86rem; }
-    textarea { min-height: 140px; resize: vertical; }
-    pre { margin: 0; padding: 14px; border-radius: 10px; background: #060a14; border: 1px solid var(--border); overflow-x: auto; font-size: 0.83rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.88rem; }
-    th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    .gate-tag { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 0.78rem; font-weight: 700; margin-bottom: 8px; }
-    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+    .container { max-width: 1180px; margin: 0 auto; padding: 0 1.4rem; }
+    header {
+      position: sticky; top: 0; z-index: 40;
+      background: rgba(7, 11, 20, 0.88);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.9rem 0; gap: 1rem; flex-wrap: wrap;
+    }
+    .logo { display: flex; align-items: center; gap: 0.65rem; font-weight: 800; font-size: 1.15rem; color: var(--text); }
+    .logo-mark {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      color: #070b14; display: grid; place-items: center; font-weight: 900;
+    }
+    .nav-links { display: flex; align-items: center; gap: 1.1rem; flex-wrap: wrap; font-size: 0.92rem; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      padding: 0.22rem 0.68rem; border-radius: 999px; font-size: 0.76rem; font-weight: 650;
+      border: 1px solid var(--border); background: var(--surface); white-space: nowrap;
+    }
+    .pill.ok { color: var(--ok); background: var(--ok-soft); border-color: rgba(52, 211, 153, 0.35); }
+    .pill.info { color: var(--accent); background: var(--accent-soft); border-color: rgba(56, 189, 248, 0.35); }
+    .pill.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(251, 191, 36, 0.35); }
+    .pill.violet { color: var(--violet); background: var(--violet-soft); border-color: rgba(167, 139, 250, 0.35); }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+      padding: 0.68rem 1.2rem; border-radius: 9px; font-weight: 650; font-size: 0.94rem;
+      border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+      cursor: pointer; transition: 0.15s; text-decoration: none !important;
+    }
+    .btn:hover { background: var(--surface-hover); border-color: var(--accent); transform: translateY(-1px); }
+    .btn.primary { background: #0284c7; border-color: #38bdf8; color: #fff; }
+    .btn.primary:hover { background: #0369a1; }
+    .btn.sm { padding: 0.38rem 0.78rem; font-size: 0.82rem; }
+
+    .hero { padding: 4.2rem 0 2.8rem; text-align: center; }
+    .hero-badges { display: flex; justify-content: center; gap: 0.55rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+    h1 {
+      font-size: clamp(2.1rem, 4.6vw, 3.35rem);
+      line-height: 1.13; letter-spacing: -0.025em; max-width: 960px; margin: 0 auto 1.15rem;
+    }
+    .grad { background: linear-gradient(135deg, #38bdf8 0%, #34d399 52%, #a78bfa 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .subtitle { color: var(--muted); font-size: 1.1rem; max-width: 820px; margin: 0 auto 1.9rem; }
+    .cta-row { display: flex; justify-content: center; gap: 0.85rem; flex-wrap: wrap; margin-bottom: 2.5rem; }
+
+    .kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-bottom: 3rem; }
+    .kpi {
+      background: rgba(18, 28, 48, 0.86); border: 1px solid var(--border); border-radius: 12px;
+      padding: 1.15rem 1.2rem; text-align: left;
+    }
+    .kpi-val { font-size: 1.85rem; font-weight: 800; margin: 0.2rem 0; }
+    .kpi-lbl { font-size: 0.8rem; color: var(--muted); }
+
+    section { padding: 2.4rem 0; border-top: 1px solid var(--border); }
+    .sec-head { margin-bottom: 1.5rem; }
+    .sec-head h2 { font-size: 1.65rem; letter-spacing: -0.015em; margin-bottom: 0.35rem; }
+    .sec-head p { color: var(--muted); font-size: 0.98rem; }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.1rem; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.2rem; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 1.35rem 1.45rem; display: flex; flex-direction: column; gap: 0.65rem;
+    }
+    .card h3 { font-size: 1.08rem; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+    .card p, .card li { color: var(--muted); font-size: 0.92rem; }
+    .card ul { padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.35rem; }
+
+    code, pre { font-family: var(--mono); }
+    code { background: #080e1c; border: 1px solid var(--border); border-radius: 5px; padding: 0.1rem 0.38rem; font-size: 0.84em; color: #bae6fd; }
+    pre {
+      background: #060a14; border: 1px solid var(--border); border-radius: 10px;
+      padding: 1rem 1.15rem; overflow-x: auto; font-size: 0.84rem; line-height: 1.55; color: #dbeafe;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    th, td { padding: 0.78rem 0.95rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: #0b1222; color: var(--muted); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    footer { border-top: 1px solid var(--border); padding: 2.2rem 0 3rem; color: var(--muted); font-size: 0.88rem; text-align: center; }
+
+    @media (max-width: 900px) {
+      .kpi-grid, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <nav class="nav">
-      <a class="brand" href="./index.html">
-        <svg width="28" height="28" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-          <rect x="2" y="2" width="28" height="28" rx="8" fill="#0f172a" stroke="#38bdf8" stroke-width="2"/>
-          <circle cx="16" cy="9" r="3" fill="#34d399"/>
-          <circle cx="10" cy="21" r="3" fill="#38bdf8"/>
-          <circle cx="22" cy="21" r="3" fill="#38bdf8"/>
-          <path d="M16 12L10 18M16 12L22 18M13 21H19" stroke="#38bdf8" stroke-width="1.8" stroke-linecap="round"/>
-        </svg>
-        <span>Cortical</span>
-      </a>
-      <div class="nav-links">
-        <a href="#demo" data-i18n="nav_demo">Interactive Demo</a>
-        <a href="#benchmarks" data-i18n="nav_bench">Benchmarks</a>
-        <a href="#install" data-i18n="nav_inst">Install &amp; 8 Harnesses</a>
-        <a href="#reproduce" data-i18n="nav_rep">Reproduce &amp; Test</a>
-        <a href="./help.html" data-i18n="nav_help">Docs</a>
-        <button class="btn" id="idx-lang-btn" onclick="toggleIdxLang()">🇬🇧 EN</button>
+  <header>
+    <div class="container nav">
+      <div class="logo">
+        <span class="logo-mark">C</span>
+        <span>Cortical <span style="color:var(--muted);font-weight:500;font-size:0.86rem;">v0.3.0</span></span>
       </div>
-    </nav>
+      <nav class="nav-links" aria-label="Main navigation">
+        <a href="#vault">Zero-LLM Privacy Vault</a>
+        <a href="#runners">Multi-Runner &amp; @role:*</a>
+        <a href="#tiers">Capability Tiers</a>
+        <a href="#quickstart">Safe 4-Step Setup</a>
+        <a class="btn sm primary" href="./settings.html">🚀 Launch Interactive Control Plane</a>
+        <a class="btn sm" href="./help.html">❓ Help</a>
+        <a class="btn sm" href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
 
-    <section class="hero">
-      <div class="badges">
-        <span class="badge">Apache-2.0</span>
-        <span class="badge">Python 3.10+ Stdlib Only · 0 Dependencies</span>
-        <span class="badge badge-em">Zero-Server by Default</span>
-        <span class="badge badge-em">macOS · Linux · Windows</span>
+  <main class="container">
+    <div class="hero">
+      <div class="hero-badges">
+        <span class="pill ok">⚡ dependencies = [] (Python 3.10+ Stdlib Only)</span>
+        <span class="pill info">🔒 Zero-Server Architecture (0 Daemons · 0 Open Ports · 0 CDNs)</span>
+        <span class="pill violet">🛡️ Zero-LLM Fail-Closed Privacy Vault + SHA-256 Audit Ledger</span>
       </div>
-      <h1>Cortical</h1>
-      <p class="lead">
-        Cross-platform <strong>Control Plane &amp; Declarative Composer</strong> across <strong>8 harnesses</strong>
-        (<code>antigravity</code>, <code>pi</code>, <code>opencode</code>, <code>openclaw</code>, <code>codex</code>,
-        <code>claude-code</code>, <code>dsh</code> DeepSeek Harness, <code>unsloth-studio</code>) with
-        <strong>Dynamic Privacy Vault</strong> (<code>auto</code> | <code>fail_closed</code> | <code>fail_open</code>),
-        <strong>Lossless TOON Compression</strong>, and <strong>Variable-Quant 27B Model Auto-Tuning</strong>.
+      <h1>
+        Protect Private Docs, Cut Cloud Tokens by <span class="grad">78%–95%</span>, and Sync <span class="grad">8 Coding Harnesses</span>
+      </h1>
+      <p class="subtitle">
+        Cortical is a pure-Python stdlib control plane, deterministic <strong>Zero-LLM Privacy Vault</strong>, lossless <strong>TOON compressor</strong>, and <strong>multi-runner local/hybrid orchestrator</strong> supporting Ollama, Unsloth Studio, LM Studio, llama.cpp, MLX, and vLLM.
       </p>
       <div class="cta-row">
-        <a class="btn btn-primary" href="#demo" data-i18n="cta_demo">Interactive Demo</a>
-        <a class="btn btn-emerald" href="#install" data-i18n="cta_inst">Install &amp; Sync</a>
-        <a class="btn" href="#reproduce" data-i18n="cta_rep">Reproduce &amp; Test</a>
-        <a class="btn" href="./help.html" data-i18n="nav_help">Docs</a>
-        <a class="btn" href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">GitHub</a>
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="kpi"><div class="kpi-val">-78.1% / -62.1%</div><div class="kpi-lbl" data-i18n="k1">Lossless TOON token reduction vs pretty (745&rarr;163) &amp; compact JSON (430&rarr;163)</div></div>
-      <div class="kpi"><div class="kpi-val">100% / 0 FP</div><div class="kpi-lbl" data-i18n="k2">Technical Title-Case terms preserved while masking structured PII (fail_closed safe)</div></div>
-      <div class="kpi"><div class="kpi-val">8.1 GB · 27B</div><div class="kpi-lbl" data-i18n="k3">Unsloth variable 4-bit XXS (<code>qwen3.8:27b-q4_xxs</code>) swap-free on 16 GB unified RAM</div></div>
-      <div class="kpi"><div class="kpi-val">7 Tools · ~1–4 ms</div><div class="kpi-lbl" data-i18n="k4">Lean stdio/HTTP MCP + native Resources/Prompts composing Serena, RTK &amp; PinchTab</div></div>
-    </section>
-
-    <h2 id="demo" data-i18n="h_demo">Interactive Demo (Runs 100% Client-Side in Browser)</h2>
-    <section class="demo-shell">
-      <div class="tabs">
-        <button class="tab-btn active" onclick="showDemoTab('toon', this)" data-i18n="d_tab1">1. Lossless TOON Compressor</button>
-        <button class="tab-btn" onclick="showDemoTab('privacy', this)" data-i18n="d_tab2">2. Dynamic Privacy Vault</button>
-        <button class="tab-btn" onclick="showDemoTab('ctx', this)" data-i18n="d_tab3">3. Hardware Tier &amp; 27B XXS Scaler</button>
+        <a class="btn primary" href="./settings.html">⚡ Try Live Browser Control Plane (1-Click Presets A/B/C)</a>
+        <a class="btn" href="#quickstart">🛡️ Safe 60-Second CLI Quickstart (<code>--dry-run</code>)</a>
+        <a class="btn" href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">⭐ View Source &amp; ADRs on GitHub</a>
       </div>
 
-      <div id="demo-toon">
-        <p style="margin:0 0 10px; color:var(--muted); font-size:0.9rem;" data-i18n="d_t_desc">
-          Edit JSON arrays below to preview deterministic <strong>lossless TOON encoding</strong> with Cortical's <code>&gt;=10%</code> guard vs compact JSON:
-        </p>
-        <div style="display:flex; justify-content:space-between; font-size:0.86rem; font-weight:700;">
-          <span id="toon-tok-label">Calculating...</span>
-          <span style="color:var(--emerald);" id="toon-fmt-label">Format: TOON</span>
+      <div class="kpi-grid">
+        <div class="kpi">
+          <span class="pill ok">⚡ Zero-LLM Stdlib</span>
+          <div class="kpi-val" style="color:var(--ok);">100%</div>
+          <div class="kpi-lbl">Privacy Vault (MD/DOCX/XLSX/PPTX/PDF + SHA-256 Ledger) runs with <strong>zero local LLM</strong></div>
         </div>
-        <div class="bar-track"><div class="bar-fill" id="toon-bar" style="width:25%;"></div></div>
-        <div class="demo-grid">
-          <textarea id="toon-input" oninput="runToonDemo()">{
-  "results": [
-    {"id": 1, "module": "hardware.probe", "status": "ok", "tok": 128, "local": true},
-    {"id": 2, "module": "privacy.vault", "status": "ok", "tok": 240, "local": true},
-    {"id": 3, "module": "compression.toon", "status": "ok", "tok": 163, "local": true},
-    {"id": 4, "module": "harnesses.adapters", "status": "ok", "tok": 312, "local": true}
-  ]
-}</textarea>
-          <pre id="toon-output"></pre>
+        <div class="kpi">
+          <span class="pill ok">⚡ Lossless Roundtrip</span>
+          <div class="kpi-val">-78.12%</div>
+          <div class="kpi-lbl">TOON tabular compression vs pretty JSON (<strong>-62.09%</strong> vs compact JSON · 0 cloud tokens)</div>
+        </div>
+        <div class="kpi">
+          <span class="pill info">🧠 Hardware Auto-Ceiling</span>
+          <div class="kpi-val">65,536 ctx</div>
+          <div class="kpi-lbl">Safe 27B variable-quant context on 16 GB Unified RAM (fixes silent <code>4096</code> clipping)</div>
+        </div>
+        <div class="kpi">
+          <span class="pill violet">🔌 Lean MCP 2026</span>
+          <div class="kpi-val">7 Tools</div>
+          <div class="kpi-lbl">Core <code>cortical-mcp</code> stdio surface (~4.7 ms handshake) + opt-in 5-tool <code>cortical-wiki</code></div>
         </div>
       </div>
-
-      <div id="demo-privacy" style="display:none;">
-        <p style="margin:0 0 10px; color:var(--muted); font-size:0.9rem;" data-i18n="d_p_desc">
-          Choose policy (<code>auto</code>, <code>fail_closed</code>, <code>fail_open</code>) and profile to inspect technical-term preservation and Channel 1-3 PII gating:
-        </p>
-        <div class="pill-row">
-          <button class="pill active" onclick="setPrivProfile('max_security', this)">max_security (Local Only)</button>
-          <button class="pill" onclick="setPrivProfile('low', this)">low (Sanitized Summary)</button>
-          <button class="pill" onclick="setPrivProfile('medium', this)">medium (Zero False Positives)</button>
-          <button class="pill" onclick="setPrivProfile('max_context', this)">max_context (fail_open Public)</button>
-        </div>
-        <div class="demo-grid">
-          <div>
-            <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Input File / Prompt</label>
-            <textarea id="priv-input" oninput="runPrivacyDemo()">Architecture Note: Cortical Control Plane composes Serena Language Server and Python Stdlib under Apache License.
-Client contact: Alice Rossi (alice.rossi@example.org, +39 347 111 2233), IBAN IT60X0542811101000000123456.</textarea>
-          </div>
-          <div>
-            <div id="priv-gate-badge" class="gate-tag" style="background:rgba(248,113,113,0.18); color:var(--danger); border:1px solid rgba(248,113,113,0.4);">MAX_SECURITY · LOCAL ONLY</div>
-            <pre id="priv-output" style="min-height:140px;"></pre>
-          </div>
-        </div>
-      </div>
-
-      <div id="demo-ctx" style="display:none;">
-        <p style="margin:0 0 12px; color:var(--muted); font-size:0.9rem;" data-i18n="d_c_desc">
-          Compare Tier 1A Hybrid Laptops (16 GB RAM + 4 GB VRAM) and Tier 1B Unified Macs running Unsloth variable-quantized <strong>27B (8.1 GB)</strong> models:
-        </p>
-        <div class="demo-grid">
-          <div class="card">
-            <label style="display:block; font-size:0.84rem; color:var(--muted); margin-bottom:6px;">Hardware / Model Preset</label>
-            <select id="ctx-model" onchange="updateCtxDemo()">
-              <option value="27b_4xxs">Tier 1B · qwen3.8:27b-q4_xxs (8.1 GB Unsloth Variable 4-bit XXS)</option>
-              <option value="9b">Tier 1B · qwen3.5:9b-q3_k_xl (5.1 GB UD-Q3_K_XL · 131K native)</option>
-              <option value="1a_hybrid">Tier 1A Hybrid (16 GB + 4 GB VRAM) · qwen2.5:3b (VRAM) + qwen3:8b (Hybrid)</option>
-              <option value="32b">Tier 2 Workstation (32+ GB) · qwen2.5-coder:32b (19.5 GB)</option>
-            </select>
-            <label style="display:block; font-size:0.84rem; color:var(--muted); margin:14px 0 6px;">Available Free RAM / VRAM Headroom: <strong id="ctx-ram-val" style="color:var(--accent);">11 GB</strong></label>
-            <input type="range" id="ctx-ram" min="4" max="32" step="1" value="11" oninput="updateCtxDemo()" />
-          </div>
-          <div class="card">
-            <div style="font-size:0.84rem; color:var(--muted);">Computed Safe <code>num_ctx</code>:</div>
-            <div class="kpi-val" id="ctx-num-val">32,768 tok</div>
-            <div style="font-size:0.86rem; color:var(--muted); margin-top:8px;" id="ctx-note">Fits swap-free on 16 GB unified memory for deep reasoning &amp; multi-agent orchestration.</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <h2 data-i18n="h_tools">Core Architecture (7 Zero-Dependency Subpackages + Lean MCP)</h2>
-    <section class="tools">
-      <div class="card">
-        <h3>1. Hardware Preflight &amp; Model Builder</h3>
-        <p data-i18n="t1">Inspects macOS/Linux/Windows RAM, discrete VRAM, unified memory, and Ollama models via <code>cortical doctor</code> &amp; <code>cortical models</code>. Supports Unsloth variable 4-bit XXS (<code>8.1 GB</code>) + custom user models.</p>
-      </div>
-      <div class="card">
-        <h3>2. OSS Composer &amp; 8-Harness Sync</h3>
-        <p data-i18n="t2">Idempotently configures <code>Serena</code>, <code>RTK</code>, <code>PinchTab</code>/<code>Playwright</code>, and optional HTTP routers across <code>antigravity</code>, <code>pi</code>, <code>opencode</code>, <code>openclaw</code>, <code>codex</code>, <code>claude-code</code>, <code>dsh</code>, and <code>unsloth-studio</code>.</p>
-      </div>
-      <div class="card">
-        <h3>3. Dynamic Privacy Vault &amp; Sanitized Folder Crawl</h3>
-        <p data-i18n="t3">Strips OOXML/PDF metadata, runs <code>cortical crawl &lt;dir&gt; --sanitize</code> in-memory before SQLite/FTS5 indexing with O(1) Merkle skip, serves <code>cortical://private/&lt;alias&gt;</code>, and inspects 4-tier redacted summaries in <code>cortical wiki-dashboard</code>.</p>
-      </div>
-      <div class="card">
-        <h3>4. Lossless Multi-Format TOON Engine</h3>
-        <p data-i18n="t4">Deterministic tabular serialization + XML/YAML/ANSI log compaction with a <code>&gt;=10%</code> saving guard vs compact JSON and auto-sized <code>&lt;=15% num_ctx</code> memory budgets.</p>
-      </div>
-      <div class="card">
-        <h3>5. Lean 7-Tool MCP Server</h3>
-        <p data-i18n="t5">Zero-daemon <code>stdio</code> (or opt-in <code>streamable-http</code>) JSON-RPC server (<code>cortical_vault_read</code>, <code>cortical_ingest_private</code>, <code>cortical_compress</code>, <code>cortical_doctor_status</code>, <code>cortical_local_offload</code>, <code>cortical_roi_report</code>, <code>cortical_handoff</code>) with MCP <code>annotations</code>, <code>outputSchema</code>, <code>resources</code> &amp; <code>prompts</code>.</p>
-      </div>
-      <div class="card">
-        <h3>6. Auto-Tuner, ROI &amp; Static UI</h3>
-        <p data-i18n="t6">Zero-cloud-token Auto-Tuner (<code>cortical tune</code>), comparative benchmarks (<code>cortical bench --compare</code>), ROI metrics (<code>cortical roi</code>), and offline static HTML dashboard (<code>docs/settings.html</code>).</p>
-      </div>
-    </section>
-
-    <h2 id="benchmarks" data-i18n="h_bench">Measured Comparative Benchmarks (Before vs After)</h2>
-    <div class="card">
-      <table>
-        <thead><tr><th data-i18n="th_m">Capability</th><th data-i18n="th_f">Baseline / Before</th><th data-i18n="th_t">Cortical / After</th><th data-i18n="th_r">Measured Gain</th></tr></thead>
-        <tbody>
-          <tr><td>Lossless Structured Compression</td><td>745 pretty / 430 compact JSON tok</td><td><strong>163 tok</strong> (<code>TOON</code>)</td><td><strong>-78.12%</strong> vs pretty · <strong>-62.09%</strong> vs compact</td></tr>
-          <tr><td>Privacy Sanitizer Precision</td><td>Naive Title-Case regex FPs</td><td><strong>100.0%</strong> technical terms kept</td><td><strong>100%</strong> PII masked · <code>fail_closed</code> guarded</td></tr>
-          <tr><td>Tier 1A Hybrid (16 GB + 4 GB VRAM)</td><td>Static defaults / OOM risk</td><td><code>qwen2.5:3b</code> + <code>qwen3.5:9b-q3_k_xl</code></td><td>VRAM router/NER + hybrid coder</td></tr>
-          <tr><td>Tier 1B Unified (16 GB + Unsloth 27B)</td><td>4096 silent clipping / swap</td><td><code>qwen3.8:27b-q4_xxs</code> (<strong>8.1 GB</strong>)</td><td><strong>32,768 ctx</strong> deep reasoner &amp; orchestrator</td></tr>
-          <tr><td>Lean MCP Tool Surface</td><td>12+ tools &amp; legacy HTTP daemon</td><td><strong>7 tools</strong> + Annotations/Schemas/Resources</td><td><strong>~1–4 ms</strong> ingest+read handshake</td></tr>
-        </tbody>
-      </table>
     </div>
 
-    <h2 id="install" data-i18n="h_inst">Install &amp; Sync Across 8 Harnesses</h2>
-    <div class="tabs">
-      <button class="tab-btn active" onclick="showTab('venv', this)">Clone, Doctor &amp; Sync</button>
-      <button class="tab-btn" onclick="showTab('mcp', this)">Antigravity / OpenCode / OpenClaw</button>
-      <button class="tab-btn" onclick="showTab('claude', this)">Claude Code</button>
-      <button class="tab-btn" onclick="showTab('codex', this)">Codex CLI &amp; dsh (DeepSeek)</button>
-      <button class="tab-btn" onclick="showTab('pi', this)">pi &amp; Unsloth Studio</button>
+    <section id="vault">
+      <div class="sec-head">
+        <h2>🛡️ Spotlight: Fail-Closed Privacy Vault — Works 100% Without Any Local LLM Runner</h2>
+        <p>Sanitize contracts, resumes, financial exports, and architecture specs using pure Python 3.10+ stdlib before any cloud agent sees a single token.</p>
+      </div>
+      <div class="grid-3">
+        <div class="card">
+          <h3><span>📄 Multi-Format Metadata Strip</span><span class="pill ok">⚡ Zero-LLM</span></h3>
+          <p>Extracts text while stripping hidden author/company XML metadata from <code>.docx</code>, <code>.xlsx</code>, <code>.pptx</code>, selectable <code>.pdf</code>, <code>.md</code>, <code>.txt</code>, and <code>.json</code>—with zero third-party packages and zero LLM daemons.</p>
+        </div>
+        <div class="card">
+          <h3><span>🔒 3-Channel Fail-Closed Egress</span><span class="pill ok">⚡ Zero-LLM</span></h3>
+          <p>Masks Email, IBAN, Tax IDs, Phone, IPs, API secrets, and custom client/project terms while preserving <strong>100.0% of technical identifiers</strong> (<code>PostgreSQL</code>, <code>FastAPI</code>, <code>Kubernetes</code>). Blocks <code>max_security</code> items from remote cloud MCP egress.</p>
+        </div>
+        <div class="card">
+          <h3><span>🔐 Cryptographic SHA-256 Ledger</span><span class="pill ok">⚡ Zero-LLM</span></h3>
+          <p>Every ingest, sanitized read, and blocked cloud egress event is chained into a tamper-evident SHA-256 audit log (<code>cortical vault audit --verify</code>) that never stores raw PII.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="runners">
+      <div class="sec-head">
+        <h2>🧠 Pluggable Multi-Runner Engine &amp; 10 Reusable <code>@role:*</code> Model Slots</h2>
+        <p>Never hardcode model tags or lock into a single local daemon. Bind semantic roles once and sync across all 8 coding harnesses.</p>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3><span>🏎️ 7 Supported Local Runners</span><span class="pill info">Runner-Neutral</span></h3>
+          <ul>
+            <li><strong>Ollama</strong> (<code>127.0.0.1:11434</code> — native <code>/api/chat</code> + dynamic <code>num_ctx</code>)</li>
+            <li><strong>Unsloth Studio</strong> (<code>127.0.0.1:8888/v1</code> — dynamic UD variable quantization)</li>
+            <li><strong>LM Studio</strong> (<code>127.0.0.1:1234/v1</code> — desktop GUI + OpenAI-compatible VLM/LLM server)</li>
+            <li><strong>llama.cpp</strong> (<code>llama-server :8080/v1</code>) &amp; <strong>Apple MLX</strong> (<code>mlx_lm.server :8080/v1</code>)</li>
+            <li><strong>vLLM</strong> (<code>127.0.0.1:8000/v1</code>) &amp; any custom <strong>OpenAI-compatible</strong> endpoint or LiteLLM Router (<code>:4000/v1</code>)</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><span>🎭 10 Semantic Model Roles</span><span class="pill violet">@role:*</span></h3>
+          <p>Reference abstract roles across rules, MCP offload, and LiteLLM routing instead of fragile model filenames:</p>
+          <p>
+            <code>@role:router</code> · <code>@role:ner</code> · <code>@role:fast_coder</code> · <code>@role:daily_coder</code> ·
+            <code>@role:reviewer</code> · <code>@role:summarizer</code> · <code>@role:deep_reasoner</code> ·
+            <code>@role:orchestrator</code> · <code>@role:vision</code> · <code>@role:embedder</code>
+          </p>
+          <p>Syncs idempotently across <strong>Antigravity, pi, Claude Code, Codex, OpenCode, OpenClaw, dsh, and Unsloth Studio</strong>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="tiers">
+      <div class="sec-head">
+        <h2>⚖️ Transparent 2-Tier Capability Matrix</h2>
+        <p>Everything in Tier 1 works out-of-the-box on any machine with Python 3.10+. Tier 2 activates automatically when you connect any local runner.</p>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Capability</th>
+              <th>Execution Tier</th>
+              <th>Local Runner Needed?</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Privacy Vault (Text, JSON, DOCX/XLSX/PPTX, Selectable PDF)</strong></td>
+              <td><span class="pill ok">⚡ Tier 1 · Zero-LLM Stdlib</span></td>
+              <td><strong>No</strong></td>
+              <td>Deterministic PII + secret + custom-term masking, XML metadata stripping, <code>fail_closed</code> guard, and SHA-256 audit ledger.</td>
+            </tr>
+            <tr>
+              <td><strong>Lossless TOON Compression &amp; 8-Harness Sync</strong></td>
+              <td><span class="pill ok">⚡ Tier 1 · Zero-LLM Stdlib</span></td>
+              <td><strong>No</strong></td>
+              <td><code>cortical_compress</code> (<code>-78.12%</code> vs pretty JSON), <code>cortical doctor</code>, <code>cortical sync --dry-run</code>, and timestamped <code>--rollback</code>.</td>
+            </tr>
+            <tr>
+              <td><strong>Zero-Server Interactive Control Plane (<code>settings.html</code>)</strong></td>
+              <td><span class="pill ok">⚡ Tier 1 · Zero-LLM Stdlib</span></td>
+              <td><strong>No</strong></td>
+              <td>Standalone 6-domain HTML/CSS/JS SPA (zero CDNs, zero open ports) with 1-click Presets A/B/C and in-browser PII preview.</td>
+            </tr>
+            <tr>
+              <td><strong>Image / Scanned-PDF OCR (<code>cortical watch</code>) &amp; <code>--ner</code></strong></td>
+              <td><span class="pill info">🧠 Tier 2 · Local Runner</span></td>
+              <td>Yes (<code>@role:vision</code> / <code>@role:ner</code>)</td>
+              <td>100% offline multimodal OCR and extra unstructured NER via Ollama, Unsloth Studio, LM Studio, llama.cpp, MLX, or vLLM.</td>
+            </tr>
+            <tr>
+              <td><strong>Zero-Cloud-Token Code Offload (<code>cortical_local_offload</code>)</strong></td>
+              <td><span class="pill info">🧠 Tier 2 · Local Runner</span></td>
+              <td>Yes (<code>@role:daily_coder</code> / <code>@role:reviewer</code>)</td>
+              <td>Reads local files directly on disk (<code>-95.80%</code> cloud input tokens) and summarizes/reviews locally.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="quickstart">
+      <div class="sec-head">
+        <h2>🚀 Safe 4-Step Quickstart (Preview First with <code>--dry-run</code> + Instant <code>--rollback</code>)</h2>
+        <p>Cortical never touches harness files silently. Benchmark, diagnose, preview the exact diff, and apply with an automatic rollback snapshot.</p>
+      </div>
+      <div class="grid-2">
+        <div>
+          <pre><code>git clone https://github.com/ccancellieri/cortical.git
+cd cortical &amp;&amp; ./install.sh
+
+# 1. Verify lossless TOON, Zero-LLM Privacy Vault &amp; 7-tool MCP
+.venv/bin/cortical bench --compare
+
+# 2. Inspect OS/RAM/VRAM tier, Tier-1 Stdlib &amp; detected runners
+.venv/bin/cortical doctor
+
+# 3. Preview exact harness diffs FIRST (modifies 0 files)
+.venv/bin/cortical sync --dry-run
+
+# 4. Apply with timestamped backup (undo anytime via --rollback)
+.venv/bin/cortical sync
+# Undo anytime: .venv/bin/cortical sync --rollback &lt;backup_id&gt;</code></pre>
+        </div>
+        <div class="card" style="justify-content:space-between;">
+          <div>
+            <h3><span>🖥️ Test in Browser in 10 Seconds</span><span class="pill ok">0 Install</span></h3>
+            <p style="margin-top:0.5rem;">
+              Want to explore Cortical before cloning? Open the self-contained <strong>6-Domain Zero-Server Control Plane</strong> right here on GitHub Pages:
+            </p>
+            <ul style="margin-top:0.6rem;">
+              <li>Switch between <strong>Preset A (4 GB VRAM Hybrid)</strong>, <strong>Preset B (16 GB Apple Silicon 27B)</strong>, and <strong>Preset C (Remote Supervisor + fail_closed Guard)</strong>.</li>
+              <li>Test live client-side PII masking in the <strong>Privacy Vault Redaction Studio</strong>.</li>
+              <li>Inspect <code>@role:*</code> bindings, multi-runner selection, and export secret-free <code>cortical-profile.json</code> bundles.</li>
+            </ul>
+          </div>
+          <div style="display:flex;gap:0.7rem;flex-wrap:wrap;margin-top:0.8rem;">
+            <a class="btn primary" href="./settings.html">Open Interactive Control Plane (settings.html) →</a>
+            <a class="btn" href="./help.html">Read Interactive Help Guide →</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p><strong>Cortical v0.3.0</strong> — Pure Python 3.10+ Standard Library (<code>dependencies = []</code>) · Zero-Server · MIT License</p>
+      <p style="margin-top:0.4rem;">
+        <a href="./settings.html">Control Plane SPA</a> ·
+        <a href="./help.html">Help</a> ·
+        <a href="https://github.com/ccancellieri/cortical">GitHub Repository</a> ·
+        <a href="https://github.com/ccancellieri/cortical/tree/main/docs/adr">Architecture Decision Records (ADR-001..ADR-016)</a>
+      </p>
     </div>
-    <pre id="code-venv">git clone https://github.com/ccancellieri/cortical.git
-cd cortical
-python3 -m venv .venv
-.venv/bin/pip install --no-deps -e .
-PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
-PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run</pre>
-    <pre id="code-mcp" style="display:none;">{
-  "mcpServers": {
-    "cortical": {
-      "command": "python3",
-      "args": ["-m", "cortical.mcp_server"],
-      "env": {
-        "PYTHONPATH": "/path/to/cortical/src",
-        "CORTICAL_VAULT_DB": "/path/to/cortical/.cortical_data/vault.db"
-      }
-    }
-  }
-}</pre>
-    <pre id="code-claude" style="display:none;">claude mcp add cortical \
-  -e PYTHONPATH=/path/to/cortical/src \
-  -e CORTICAL_VAULT_DB=/path/to/cortical/.cortical_data/vault.db \
-  -- python3 -m cortical.mcp_server</pre>
-    <pre id="code-codex" style="display:none;"># OpenAI Codex (~/.codex/config.toml) + DeepSeek Harness (dsh ~/.dsh/settings.yaml)
-PYTHONPATH=src .venv/bin/python -m cortical.cli sync --harness codex,dsh</pre>
-    <pre id="code-pi" style="display:none;"># pi package (Channel 3 pre-send interceptor + skills)
-pi --package /path/to/cortical
-
-# Configure Unsloth variable-quant 27B &amp; sync Unsloth Studio
-PYTHONPATH=src .venv/bin/python -m cortical.cli models add qwen3.8:27b-q4_xxs --mem 8.1 --ctx 32768 --variable
-PYTHONPATH=src .venv/bin/python -m cortical.cli sync --harness pi,unsloth-studio</pre>
-
-    <h2 id="reproduce" data-i18n="h_rep">Reproduce Benchmarks &amp; Run Offline Tests</h2>
-    <pre># 1. Run full offline unittest suite (zero external dependencies)
-PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q
-
-# 2. Run before-vs-after comparative benchmark
-PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
-PYTHONPATH=src .venv/bin/python scripts/benchmark.py
-
-# 3. Hardware preflight &amp; variable-quant model recommendations
-PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
-PYTHONPATH=src .venv/bin/python -m cortical.cli models recommend
-
-# 4. Ingest &amp; compress offline, tune settings, and export local dashboard
-PYTHONPATH=src .venv/bin/python -m cortical.cli ingest ./notes.md --policy auto --profile medium
-PYTHONPATH=src .venv/bin/python -m cortical.cli tune
-PYTHONPATH=src .venv/bin/python -m cortical.cli dashboard --out-dir html</pre>
-
-    <footer>
-      <span><strong>Cortical</strong> · Apache-2.0 Open Source · Built by <strong>Carlo Cancellieri</strong></span>
-      <span><a href="https://github.com/ccancellieri/cortical" target="_blank" rel="noopener">GitHub Repository</a> · <a href="./help.html">Docs</a></span>
-    </footer>
-  </div>
-
-  <script>
-    function showDemoTab(id, btn) {
-      ['toon', 'privacy', 'ctx'].forEach((k) => {
-        document.getElementById('demo-' + k).style.display = k === id ? 'block' : 'none';
-      });
-      btn.parentElement.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-    }
-
-    function encodeToonJs(data) {
-      if (Array.isArray(data) && data.length >= 2 && data.every((r) => r && typeof r === 'object' && !Array.isArray(r))) {
-        const keys = Object.keys(data[0]);
-        const uniform = data.every((r) => keys.length === Object.keys(r).length && keys.every((k) => k in r && (typeof r[k] !== 'object' || r[k] === null)));
-        if (uniform && keys.length > 0) {
-          const rows = data.map((r) => keys.map((k) => String(r[k])).join(','));
-          return `[${data.length}]{${keys.join(',')}}:\n` + rows.map((line) => '  ' + line).join('\n');
-        }
-      }
-      if (data && typeof data === 'object' && !Array.isArray(data)) {
-        return Object.entries(data).map(([k, v]) => {
-          const inner = encodeToonJs(v);
-          if (inner.startsWith('[')) return `${k}${inner.replace(/\n/g, '\n  ')}`;
-          return `${k}: ${inner}`;
-        }).join('\n');
-      }
-      return String(data);
-    }
-
-    function runToonDemo() {
-      const rawText = document.getElementById('toon-input').value || '';
-      const outEl = document.getElementById('toon-output');
-      const tokEl = document.getElementById('toon-tok-label');
-      const fmtEl = document.getElementById('toon-fmt-label');
-      const barEl = document.getElementById('toon-bar');
-      try {
-        const obj = JSON.parse(rawText);
-        const prettyTok = Math.max(1, Math.round(rawText.length / 4));
-        const compact = JSON.stringify(obj);
-        const compactTok = Math.max(1, Math.round(compact.length / 4));
-        const toon = encodeToonJs(obj);
-        const toonTok = Math.max(1, Math.round(toon.length / 4));
-        const useToon = ((compactTok - toonTok) / compactTok) >= 0.10;
-        const chosen = useToon ? toon : compact;
-        const chosenTok = useToon ? toonTok : compactTok;
-        const savedPct = (((prettyTok - chosenTok) / prettyTok) * 100).toFixed(1);
-        tokEl.textContent = `${prettyTok} pretty / ${compactTok} compact -> ${chosenTok} tok (${savedPct}% saved vs pretty)`;
-        fmtEl.textContent = useToon ? 'Format: TOON (>=10% guard met)' : 'Format: Compact JSON';
-        barEl.style.width = Math.max(8, Math.min(100, Math.round((chosenTok / prettyTok) * 100))) + '%';
-        outEl.textContent = chosen;
-      } catch (e) {
-        tokEl.textContent = 'Invalid JSON';
-        fmtEl.textContent = 'Check syntax';
-        outEl.textContent = String(e);
-      }
-    }
-
-    let ACTIVE_PRIV = 'max_security';
-    function setPrivProfile(prof, btn) {
-      ACTIVE_PRIV = prof;
-      btn.parentElement.querySelectorAll('.pill').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      runPrivacyDemo();
-    }
-
-    function runPrivacyDemo() {
-      const raw = document.getElementById('priv-input').value || '';
-      const badge = document.getElementById('priv-gate-badge');
-      const out = document.getElementById('priv-output');
-      const redact = (s) => s
-        .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL_1]')
-        .replace(/\+?\d[\d\s-]{8,}\d/g, '[PHONE_1]')
-        .replace(/\bIT\d{2}[A-Z0-9]{11,30}\b/gi, '[IBAN_1]');
-      if (ACTIVE_PRIV === 'max_security') {
-        badge.textContent = 'FAIL_CLOSED · MAX_SECURITY (LOCAL ONLY)';
-        badge.style.color = '#f87171';
-        badge.style.background = 'rgba(248,113,113,0.16)';
-        badge.style.borderColor = 'rgba(248,113,113,0.4)';
-        out.textContent = '[VAULT LOCAL-ONLY]\nRaw cloud upload blocked. Technical Title-Case preserved.\n\n' + redact(raw);
-      } else if (ACTIVE_PRIV === 'low') {
-        badge.textContent = 'AUTO · LOW EGRESS (SANITIZED SUMMARY)';
-        badge.style.color = '#fbbf24';
-        badge.style.background = 'rgba(251,191,36,0.16)';
-        badge.style.borderColor = 'rgba(251,191,36,0.4)';
-        out.textContent = '[CHANNEL 2 BUDGETED MEMORY <=15% num_ctx]\n' + redact(raw).split('\n')[0];
-      } else if (ACTIVE_PRIV === 'medium') {
-        badge.textContent = 'AUTO · MEDIUM (STRUCTURED PII MASKED, TECH TERMS KEPT)';
-        badge.style.color = '#38bdf8';
-        badge.style.background = 'rgba(56,189,248,0.16)';
-        badge.style.borderColor = 'rgba(56,189,248,0.4)';
-        out.textContent = redact(raw);
-      } else {
-        badge.textContent = 'FAIL_OPEN · PUBLIC DOCS PASSTHROUGH';
-        badge.style.color = '#34d399';
-        badge.style.background = 'rgba(52,211,153,0.16)';
-        badge.style.borderColor = 'rgba(52,211,153,0.4)';
-        out.textContent = raw;
-      }
-    }
-
-    function updateCtxDemo() {
-      const m = document.getElementById('ctx-model').value;
-      const ram = Number(document.getElementById('ctx-ram').value || 11);
-      document.getElementById('ctx-ram-val').textContent = ram + ' GB';
-      const specs = {
-        '27b_4xxs': { native: 32768, weightsGb: 8.1, note: 'qwen3.8:27b-q4_xxs (Unsloth Variable 4-bit XXS)' },
-        '9b': { native: 131072, weightsGb: 5.1, note: 'qwen3.5:9b-q3_k_xl (Unsloth UD-Q3_K_XL)' },
-        '1a_hybrid': { native: 32768, weightsGb: 5.2, note: 'Tier 1A Hybrid (qwen2.5:3b in 4GB VRAM + qwen3:8b hybrid)' },
-        '32b': { native: 32768, weightsGb: 19.5, note: 'qwen2.5-coder:32b (Workstation 32+ GB)' }
-      }[m];
-      const headroom = Math.max(0.25, ram - specs.weightsGb);
-      const rawCap = headroom < 0.75 ? 4096 : Math.floor((headroom * 8192) / 4096) * 4096;
-      const computed = Math.max(4096, Math.min(specs.native, 200000, rawCap || 4096));
-      document.getElementById('ctx-num-val').textContent = computed.toLocaleString() + ' tok';
-      document.getElementById('ctx-note').textContent = `${specs.note}: native cap ${specs.native.toLocaleString()} tok · headroom ${(ram - specs.weightsGb).toFixed(1)} GB.`;
-    }
-
-    function showTab(id, btn) {
-      ['venv', 'mcp', 'claude', 'codex', 'pi'].forEach((k) => {
-        document.getElementById('code-' + k).style.display = k === id ? 'block' : 'none';
-      });
-      btn.parentElement.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-    }
-
-    let IDX_LANG = localStorage.getItem('cortical_lang') || 'en';
-    const IDX_I18N = {
-      it: {
-        nav_demo: 'Demo Interattiva', nav_bench: 'Benchmark', nav_inst: 'Installa & 8 Harness', nav_rep: 'Riproduci & Test', nav_cfg: 'Config', nav_help: 'Docs',
-        cta_demo: 'Demo Interattiva', cta_inst: 'Installa & Sync', cta_rep: 'Riproduci & Test', cta_cfg: 'Configuratore Statico',
-        k1: 'Riduzione lossless TOON vs JSON pretty (745&rarr;163) e compact (430&rarr;163)',
-        k2: 'Termini tecnici Title-Case preservati al 100% mentre le PII strutturate vengono mascherate',
-        k3: 'Unsloth variable 4-bit XXS (<code>qwen3.8:27b-q4_xxs</code>) senza swap su 16 GB unificati',
-        k4: 'MCP stdio/HTTP snello a 7 tool + Annotations/OutputSchema che compone Serena, RTK e PinchTab',
-        h_demo: 'Demo Interattiva (100% Client-Side nel Browser)',
-        d_tab1: '1. Compressore Lossless TOON', d_tab2: '2. Privacy Vault Dinamico', d_tab3: '3. Tier Hardware & 27B XXS',
-        d_t_desc: 'Modifica il JSON qui sotto per vedere la codifica deterministica lossless <strong>TOON</strong> con guardia <code>&gt;=10%</code> rispetto al JSON compatto:',
-        d_p_desc: 'Scegli policy (<code>auto</code>, <code>fail_closed</code>, <code>fail_open</code>) e profilo per verificare zero falsi positivi tecnici e blocco PII:',
-        d_c_desc: 'Confronta laptop ibridi Tier 1A (16 GB RAM + 4 GB VRAM) e Mac unificati Tier 1B con modelli <strong>27B (8.1 GB)</strong> quantizzati in modo variabile:',
-        h_tools: 'Architettura Core (7 Subpackage Zero-Dipendenze + MCP Snello)',
-        h_bench: 'Benchmark Comparativi Misurati (Prima vs Dopo)',
-        h_inst: 'Installa & Sincronizza su 8 Harness',
-        h_rep: 'Riproduci i Benchmark ed Esegui i Test Offline',
-      },
-      en: {
-        nav_demo: 'Interactive Demo', nav_bench: 'Benchmarks', nav_inst: 'Install & 8 Harnesses', nav_rep: 'Reproduce & Test', nav_cfg: 'Config', nav_help: 'Docs',
-        cta_demo: 'Interactive Demo', cta_inst: 'Install & Sync', cta_rep: 'Reproduce & Test', cta_cfg: 'Static Configurator',
-        k1: 'Lossless TOON token reduction vs pretty (745&rarr;163) &amp; compact JSON (430&rarr;163)',
-        k2: 'Technical Title-Case terms preserved while masking structured PII (fail_closed safe)',
-        k3: 'Unsloth variable 4-bit XXS (<code>qwen3.8:27b-q4_xxs</code>) swap-free on 16 GB unified RAM',
-        k4: 'Lean stdio MCP + native Resources/Prompts composing Serena, RTK &amp; PinchTab',
-        h_demo: 'Interactive Demo (Runs 100% Client-Side in Browser)',
-        d_tab1: '1. Lossless TOON Compressor', d_tab2: '2. Dynamic Privacy Vault', d_tab3: '3. Hardware Tier & 27B XXS Scaler',
-        d_t_desc: 'Edit JSON arrays below to preview deterministic <strong>lossless TOON encoding</strong> with Cortical\'s <code>&gt;=10%</code> guard vs compact JSON:',
-        d_p_desc: 'Choose policy (<code>auto</code>, <code>fail_closed</code>, <code>fail_open</code>) and profile to inspect technical-term preservation and Channel 1-3 PII gating:',
-        d_c_desc: 'Compare Tier 1A Hybrid Laptops (16 GB RAM + 4 GB VRAM) and Tier 1B Unified Macs running Unsloth variable-quantized <strong>27B (8.1 GB)</strong> models:',
-        h_tools: 'Core Architecture (7 Zero-Dependency Subpackages + Lean MCP)',
-        h_bench: 'Measured Comparative Benchmarks (Before vs After)',
-        h_inst: 'Install & Sync Across 8 Harnesses',
-        h_rep: 'Reproduce Benchmarks & Run Offline Tests',
-      }
-    };
-
-    function applyIdxLang() {
-      document.getElementById('idx-lang-btn').textContent = IDX_LANG === 'it' ? '🇮🇹 IT' : '🇬🇧 EN';
-      const dict = IDX_I18N[IDX_LANG] || IDX_I18N.en;
-      document.querySelectorAll('[data-i18n]').forEach((el) => {
-        const k = el.getAttribute('data-i18n');
-        if (dict[k]) el.innerHTML = dict[k];
-      });
-    }
-
-    function toggleIdxLang() {
-      IDX_LANG = IDX_LANG === 'it' ? 'en' : 'it';
-      localStorage.setItem('cortical_lang', IDX_LANG);
-      applyIdxLang();
-    }
-
-    runToonDemo();
-    runPrivacyDemo();
-    updateCtxDemo();
-    applyIdxLang();
-  </script>
+  </footer>
 </body>
 </html>

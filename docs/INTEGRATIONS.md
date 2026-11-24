@@ -6,19 +6,32 @@ Cortical runs **Zero-Server by default** (`python3 -m cortical.mcp_server` over 
 
 ---
 
-## 1. One-Shot Cross-Platform Harness Sync (`cortical sync`)
+## 1. Safe 4-Step Cross-Platform Harness Sync (`cortical sync`)
 
 ```bash
-# Preview changes across all 8 harnesses without writing files
+# 1. Benchmark lossless TOON, Zero-LLM Privacy Vault & 7-tool MCP
+PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare
+
+# 2. Inspect OS/RAM/VRAM tier, Tier-1 Zero-LLM Stdlib & active local runner
+PYTHONPATH=src .venv/bin/python -m cortical.cli doctor
+
+# 3. Preview exact diffs across all 8 harnesses FIRST (modifies 0 files)
 PYTHONPATH=src .venv/bin/python -m cortical.cli sync --dry-run
 
-# Apply idempotently (creates timestamped backups for clean rollback)
+# 4. Apply idempotently (prints timestamped backup ID for instant rollback)
 PYTHONPATH=src .venv/bin/python -m cortical.cli sync
-
-# Sync only specific harnesses (e.g. deepseek-harness & pi) or rollback
-PYTHONPATH=src .venv/bin/python -m cortical.cli sync --harness dsh,pi
 PYTHONPATH=src .venv/bin/python -m cortical.cli sync --rollback <backup_id>
 ```
+
+### Pluggable Local Runners (`active_runner` in `cortical.config.json` / `settings.html`)
+Cortical is **runner-neutral**—Tier-1 features (Privacy Vault MD/DOCX/XLSX/PPTX/PDF + SHA-256 audit ledger, `TOON` compression, `doctor`, `sync`) require **no local LLM runner at all**, while Tier-2 features (`cortical_local_offload`, `cortical watch` image OCR, `--ner`, LiteLLM router generation) work across **7 local backends**:
+- `ollama` (`http://127.0.0.1:11434`)
+- `unsloth` (`http://127.0.0.1:8888/v1` — Unsloth Studio)
+- `lm_studio` (`http://127.0.0.1:1234/v1` — LM Studio)
+- `llama_cpp` (`http://127.0.0.1:8080/v1` — `llama-server`)
+- `mlx_lm` (`http://127.0.0.1:8080/v1` — Apple Silicon `mlx_lm.server`)
+- `vllm` (`http://127.0.0.1:8000/v1`)
+- `openai_compatible` (`http://127.0.0.1:4000/v1` or any custom local endpoint)
 
 | Harness | Pre-Send Attachment Interception | Config Synced (`macOS` / `Linux` / `Windows`) |
 | --- | --- | --- |

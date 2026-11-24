@@ -92,22 +92,52 @@ def register_vision_adapter(fn: Optional[Callable[[bytes, str], str]]) -> None:
 
 
 def ocr_image_local(image_bytes: bytes, *, model: Optional[str], config: Optional[dict[str, Any]] = None, timeout: float = 180.0) -> str:
-    """Transcribes text from an image with a LOCAL vision model (Ollama). Never contacts remote services."""
+    """Transcribes text from an image with a LOCAL vision model across Ollama or OpenAI-compatible local runners. Never contacts remote services."""
     if not model:
-        raise FailClosedError("No local vision model selected (Privacy > vision_model). Choose one in settings.html, e.g. qwen2.5vl:3b.")
+        raise FailClosedError(
+            "No local vision model configured (@role:vision / privacy.vision_model). "
+            "Tier-1 Zero-LLM Privacy Vault remains 100% active for MD/TXT/JSON/DOCX/XLSX/PPTX and selectable PDFs. "
+            "For image or scanned-PDF OCR, configure @role:vision in settings.html using any local runner "
+            "(Ollama, Unsloth Studio, LM Studio, llama.cpp, MLX, or vLLM)."
+        )
     if _VISION_ADAPTER is not None:
         return str(_VISION_ADAPTER(image_bytes, model))
-    base = (((config or {}).get("runners") or {}).get("ollama") or {}).get("base_url") or "http://127.0.0.1:11434"
-    body = json.dumps({
-        "model": model,
-        "stream": False,
-        "messages": [{
-            "role": "user",
-            "content": "Transcribe ALL text visible in this image verbatim, line by line. Output only the text.",
-            "images": [base64.b64encode(image_bytes).decode("ascii")],
-        }],
-    }).encode("utf-8")
-    req = urllib.request.Request(f"{str(base).rstrip('/')}/api/chat", data=body, headers={"Content-Type": "application/json"}, method="POST")
+
+    from ..config import resolve_active_runner_endpoint
+
+    r_name, r_type, _ = resolve_active_runner_endpoint(config, v1=False)
+    b64_img = base64.b64encode(image_bytes).decode("ascii")
+    ocr_prompt = "Transcribe ALL text visible in this image verbatim, line by line. Output only the text."
+
+    if r_type == "ollama":
+        _, _, base = resolve_active_runner_endpoint(config, runner_name=r_name, v1=False)
+        endpoint_url = f"{base}/api/chat"
+        body = json.dumps({
+            "model": model,
+            "stream": False,
+            "messages": [{
+                "role": "user",
+                "content": ocr_prompt,
+                "images": [b64_img],
+            }],
+        }).encode("utf-8")
+    else:
+        _, _, v1_base = resolve_active_runner_endpoint(config, runner_name=r_name, v1=True)
+        endpoint_url = f"{v1_base}/chat/completions"
+        body = json.dumps({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": ocr_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}},
+                ],
+            }],
+            "max_tokens": 2048,
+            "temperature": 0.0,
+        }).encode("utf-8")
+
+    req = urllib.request.Request(endpoint_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -117,14 +147,23 @@ def ocr_image_local(image_bytes: bytes, *, model: Optional[str], config: Optiona
             detail = exc.read().decode("utf-8", errors="ignore")
         except Exception:  # noqa: BLE001
             detail = str(exc)
-        if "multimodal" in detail.lower():
+        if "multimodal" in detail.lower() or "vision" in detail.lower() or "image" in detail.lower():
             raise FailClosedError(
-                f"Model '{model}' lacks a multimodal vision projector (mmproj). Pull a real vision model (e.g. 'ollama pull qwen2.5vl:3b') and select it in Privacy > Vision."
+                f"Model '{model}' on local runner '{r_name}' lacks multimodal vision support ({detail[:140]}). "
+                "Select a vision-capable model for @role:vision in settings.html (e.g. minicpm-ocr, qwen2.5vl, or an MLX/Unsloth VLM)."
             ) from exc
-        raise FailClosedError(f"Local vision model '{model}' HTTP {exc.code}: {detail or exc}") from exc
+        raise FailClosedError(f"Local vision runner '{r_name}' ({endpoint_url}, model='{model}') HTTP {exc.code}: {detail or exc}") from exc
     except Exception as exc:  # noqa: BLE001
-        raise FailClosedError(f"Local vision model '{model}' unavailable ({exc}). Run: ollama pull {model}") from exc
-    return str(((data.get("message") or {}).get("content")) or "")
+        raise FailClosedError(
+            f"Local vision runner '{r_name}' ({endpoint_url}, model='{model}') is unavailable ({exc}). "
+            "Tier-1 Zero-LLM Privacy Vault remains active for text/OOXML/selectable-PDF files. "
+            "Start your local runner (Ollama, Unsloth Studio, LM Studio, llama.cpp, MLX, or vLLM) to process images."
+        ) from exc
+
+    if r_type == "ollama":
+        return str(((data.get("message") or {}).get("content")) or "")
+    choices = data.get("choices") or []
+    return str((choices[0].get("message") or {}).get("content") or "") if choices else ""
 
 
 def extract_text_and_strip_metadata(

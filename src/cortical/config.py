@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -52,6 +53,24 @@ ORCHESTRATOR_PRESETS: dict[str, dict[str, Any]] = {
         "api_key_env": "",
         "endpoint": "http://127.0.0.1:8888/v1",
         "label": "Local · Unsloth Studio",
+        "native_ctx": 131072,
+    },
+    "local_lm_studio": {
+        "mode": "local",
+        "provider": "lm_studio",
+        "model": "local-model",
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:1234/v1",
+        "label": "Local · LM Studio",
+        "native_ctx": 131072,
+    },
+    "local_llama_cpp": {
+        "mode": "local",
+        "provider": "llama_cpp",
+        "model": "local-model",
+        "api_key_env": "",
+        "endpoint": "http://127.0.0.1:8080/v1",
+        "label": "Local · llama.cpp / MLX Server",
         "native_ctx": 131072,
     },
     "gemini": {
@@ -172,6 +191,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "base_url": "http://127.0.0.1:8080/v1",
             "default_model": "mlx-community/Qwen3.5-9B-Instruct-4bit",
             "heavy_model": "mlx-community/Qwen3.5-9B-Instruct-4bit",
+            "enabled": False,
+        },
+        "lm_studio": {
+            "type": "openai_compatible",
+            "base_url": "http://127.0.0.1:1234/v1",
+            "default_model": "local-model",
+            "heavy_model": "local-model",
+            "enabled": False,
+        },
+        "vllm": {
+            "type": "openai_compatible",
+            "base_url": "http://127.0.0.1:8000/v1",
+            "default_model": "local-model",
+            "heavy_model": "local-model",
             "enabled": False,
         },
         "openai_compatible": {
@@ -455,6 +488,57 @@ def _record_runner_telemetry(
         pass
 
 
+SUPPORTED_LOCAL_RUNNERS: tuple[str, ...] = (
+    "ollama",
+    "unsloth",
+    "llama_cpp",
+    "mlx_lm",
+    "lm_studio",
+    "vllm",
+    "openai_compatible",
+)
+
+
+def resolve_active_runner_endpoint(
+    config: Optional[dict[str, Any]] = None,
+    *,
+    runner_name: Optional[str] = None,
+    v1: bool = True,
+) -> tuple[str, str, str]:
+    """Resolves `(runner_name, runner_type, normalized_base_url)` across Ollama and OpenAI-compatible local runners."""
+    cfg = config or load_cortical_config()
+    r_name = str(runner_name or cfg.get("active_runner") or "ollama").strip() or "ollama"
+    runners = cfg.get("runners") or {}
+    r_cfg = dict(runners.get(r_name) or DEFAULT_CONFIG["runners"].get(r_name) or {})
+    r_type = str(r_cfg.get("type") or ("ollama" if r_name == "ollama" else "openai_compatible")).lower()
+    default_url = "http://127.0.0.1:11434" if r_type == "ollama" else "http://127.0.0.1:8080/v1"
+    base = str(r_cfg.get("base_url") or default_url).strip().rstrip("/")
+    if v1:
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+    elif base.endswith("/v1"):
+        base = base[:-3]
+    return (r_name, r_type, base)
+
+
+def _format_runner_unavailable_error(r_name: str, endpoint_url: str, model: str, exc: Exception) -> RuntimeError:
+    detail = str(exc)
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read().decode("utf-8", errors="ignore").strip()
+            detail = f"HTTP {exc.code}: {body[:200] or exc.reason}"
+        except Exception:  # noqa: BLE001
+            detail = f"HTTP {exc.code}"
+    return RuntimeError(
+        f"Local runner '{r_name}' ({endpoint_url}, model='{model}') is unreachable ({detail}). "
+        "Tier-1 Zero-LLM Stdlib capabilities remain 100% active (Privacy Vault MD/TXT/JSON/DOCX/XLSX/PPTX/PDF masking, "
+        "TOON compression, SHA-256 audit ledger, cortical doctor, cortical sync). "
+        "To use Tier-2 local model inference/NER/OCR, start any supported local runner "
+        "(Ollama :11434, Unsloth Studio :8888, LM Studio :1234, llama.cpp / MLX :8080, vLLM :8000) "
+        "or switch 'active_runner' in settings.html / cortical.config.json."
+    )
+
+
 def invoke_configured_runner(
     user_prompt: str,
     system_prompt: str = "",
@@ -471,13 +555,13 @@ def invoke_configured_runner(
     record_telemetry: bool = True,
     db_path: Optional[Path] = None,
 ) -> str:
-    """Invokes the configured local runner (`ollama`, `unsloth`, `llama_cpp`, `mlx_lm`, `openai_compatible`, custom)."""
+    """Invokes the configured local runner (`ollama`, `unsloth`, `llama_cpp`, `mlx_lm`, `lm_studio`, `vllm`, `openai_compatible`, custom)."""
     cfg = config or load_cortical_config()
     from .roles import normalize_role_or_model
 
     r_name = str(runner_name or cfg.get("active_runner") or "ollama").strip()
-    r_cfg = dict((cfg.get("runners") or {}).get(r_name) or {})
-    r_type = str(r_cfg.get("type") or r_name).lower()
+    r_cfg = dict((cfg.get("runners") or {}).get(r_name) or DEFAULT_CONFIG["runners"].get(r_name) or {})
+    r_type = str(r_cfg.get("type") or ("ollama" if r_name == "ollama" else "openai_compatible")).lower()
     raw_model = str(model_override or cfg.get("active_model") or r_cfg.get("default_model") or "").strip()
     model = normalize_role_or_model(raw_model, cfg, default_role="daily_coder")
     t0 = time.perf_counter()
@@ -499,10 +583,8 @@ def invoke_configured_runner(
             )
         return reply
 
-    base = str(r_cfg.get("base_url") or "http://127.0.0.1:11434").strip().rstrip("/")
     if r_type == "ollama":
-        if base.endswith("/v1"):
-            base = base[:-3]
+        _, _, base = resolve_active_runner_endpoint(cfg, runner_name=r_name, v1=False)
         if num_ctx is not None:
             eff_num_ctx = max(2048, int(num_ctx))
         else:
@@ -525,14 +607,18 @@ def invoke_configured_runner(
             ],
             "options": {"temperature": float(temperature), "num_predict": max_tokens, "num_ctx": eff_num_ctx},
         }
+        endpoint_url = f"{base}/api/chat"
         req = urllib.request.Request(
-            f"{base}/api/chat",
+            endpoint_url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise _format_runner_unavailable_error(r_name, endpoint_url, model, exc) from exc
         reply = str((data.get("message") or {}).get("content") or "").strip()
         elapsed_sec = round(time.perf_counter() - t0, 2)
         if record_telemetry:
@@ -549,8 +635,7 @@ def invoke_configured_runner(
             )
         return reply
 
-    if not base.endswith("/v1"):
-        base += "/v1"
+    _, _, base = resolve_active_runner_endpoint(cfg, runner_name=r_name, v1=True)
     payload = {
         "model": model,
         "messages": [
@@ -560,14 +645,18 @@ def invoke_configured_runner(
         "max_tokens": max_tokens,
         "temperature": float(temperature),
     }
+    endpoint_url = f"{base}/chat/completions"
     req = urllib.request.Request(
-        f"{base}/chat/completions",
+        endpoint_url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _format_runner_unavailable_error(r_name, endpoint_url, model, exc) from exc
     choices = data.get("choices") or []
     reply = str((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
     elapsed_sec = round(time.perf_counter() - t0, 2)

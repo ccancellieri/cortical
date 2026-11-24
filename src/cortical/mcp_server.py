@@ -346,17 +346,32 @@ class CorticalMCPServer:
             role_or_model = str(args.get("model") or args.get("role") or "").strip()
             used_model = normalize_role_or_model(role_or_model, cfg, default_role="daily_coder")
             t0 = _t.perf_counter()
-            out = invoke_configured_runner(
-                prompt,
-                system_prompt="Reply concisely offline using only provided context.",
-                config=cfg,
-                model_override=used_model,
-                role=str(args.get("role") or "mcp_local_offload"),
-            )
+            try:
+                out = invoke_configured_runner(
+                    prompt,
+                    system_prompt="Reply concisely offline using only provided context.",
+                    config=cfg,
+                    model_override=used_model,
+                    role=str(args.get("role") or "mcp_local_offload"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                elapsed = round(_t.perf_counter() - t0, 2)
+                return {
+                    "completed_locally": False,
+                    "zero_llm_stdlib_active": True,
+                    "active_runner": str(cfg.get("active_runner") or "ollama"),
+                    "model_used": used_model,
+                    "files_read_locally": files_read,
+                    "raw_file_tokens_saved_est": max(0, raw_file_chars // 4),
+                    "elapsed_sec": elapsed,
+                    "response": str(exc),
+                }
             elapsed = round(_t.perf_counter() - t0, 2)
             export_roi_json(self.vault.db_path.parent, config=cfg)
             return {
                 "completed_locally": True,
+                "zero_llm_stdlib_active": True,
+                "active_runner": str(cfg.get("active_runner") or "ollama"),
                 "model_used": used_model,
                 "files_read_locally": files_read,
                 "raw_file_tokens_saved_est": max(0, raw_file_chars // 4),
@@ -373,13 +388,16 @@ class CorticalMCPServer:
             local_note = ""
             if args.get("include_local_summary"):
                 router_m = str((cfg.get("models_by_role") or {}).get("router") or "qwen2.5:1.5b")
-                local_note = invoke_configured_runner(
-                    f"Summarize in 1 short sentence the token optimization from this table:\n{md}",
-                    system_prompt="Be concise (max 25 words).",
-                    config=cfg,
-                    model_override=router_m,
-                    role="roi_recap",
-                )
+                try:
+                    local_note = invoke_configured_runner(
+                        f"Summarize in 1 short sentence the token optimization from this table:\n{md}",
+                        system_prompt="Be concise (max 25 words).",
+                        config=cfg,
+                        model_override=router_m,
+                        role="roi_recap",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    local_note = f"(Local summary skipped: {exc})"
             return {
                 "markdown": md,
                 "local_note": local_note,

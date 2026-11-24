@@ -23,6 +23,7 @@ from .config import (
     default_data_dir,
     load_cortical_config,
     remote_orchestrator_active,
+    resolve_active_runner_endpoint,
     resolve_orchestrator_spec,
     save_cortical_config,
 )
@@ -112,12 +113,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     mcp_d = diag["mcp_stdio"]
     ign_ok = [k for k, v in (diag.get("ignore_files") or {}).items() if v]
     run_ok = [k for k, v in (diag.get("local_runners") or {}).items() if v]
-    print("  Diagnostics:")
+    act_runner, _act_rtype, act_ep = resolve_active_runner_endpoint(cfg, v1=False)
+    print("  Capability Tiers & Diagnostics:")
+    print("    - Tier-1 Stdlib: ACTIVE (Zero-LLM Privacy Vault MD/DOCX/PDF, TOON Compression, SHA-256 Ledger, Sync)")
+    print(
+        f"    - Tier-2 Runner: active={act_runner} ({act_ep}) · detected="
+        f"{', '.join(run_ok) if run_ok else 'none (optional — only needed for image OCR, --ner, and cortical_local_offload)'}"
+    )
     print(f"    - Python:       {py_d['version']} ({'OK' if py_d['supported'] else 'UNSUPPORTED <3.10'})")
     print(f"    - Workspace:    {ws_d['cortical_dir'] or 'not initialized'} (writable={ws_d['writable']})")
     print(f"    - MCP stdio:    {'OK (' + str(mcp_d.get('server_name') or 'cortical-mcp') + ')' if mcp_d.get('ok') else 'FAIL: ' + str(mcp_d.get('error', ''))}")
     print(f"    - Ignore files: {', '.join(ign_ok) if ign_ok else 'none'}")
-    print(f"    - Runners:      {', '.join(run_ok) if run_ok else 'none'}")
     print(f"    - IDEs/Agents:  {', '.join(diag.get('detected_integrations') or []) or 'none'}")
     return 0
 
@@ -263,6 +269,10 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     print(f"Cortical Sync [{mode}]: changed={res['changed_count']} unchanged={res['unchanged_count']}")
     for ch in res["changes"]:
         print(f"  - [{ch['action']:9s}] {ch['harness']:14s} -> {ch['path']} ({ch['detail']})")
+    if res["dry_run"]:
+        print("  Preview complete (0 files modified). Apply with backup: cortical sync")
+    elif res.get("backup_id"):
+        print(f"  Undo anytime: cortical sync --rollback {res['backup_id']}")
     return 0
 
 

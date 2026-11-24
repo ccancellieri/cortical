@@ -18,3 +18,4 @@ This directory is Cortical's in-repo Architecture Decision Record (ADR) index, s
 | [ADR-013](./ADR-013-hybrid-local-first-remote-orchestrator-architecture.md) | Hybrid Local-First + Remote Orchestrator Architecture & 8-Harness Mapping | Core / Harnesses | Accepted | #54 |
 | [ADR-014](./ADR-014-dynamic-hardware-ceiling-auto-ctx-and-adaptive-timeouts.md) | Dynamic Hardware-Ceiling Context Window (`auto_ctx`) & Adaptive Timeout Sizing | Hardware / Models | Accepted | #55 |
 | [ADR-015](./ADR-015-zero-leakage-remote-orchestrator-egress-defense.md) | Zero-Leakage Remote Orchestrator Egress Defense (`fail_closed` Vault + 3-Channel Isolation) | Privacy / Security | Accepted | #56 |
+| [ADR-016](./ADR-016-release-readiness-zero-llm-tier-and-multi-runner-standard.md) | Release Readiness Standard — 2-Tier Zero-LLM Stdlib Transparency, Multi-Runner Generalization & Safe `--dry-run` Onboarding | Release / Architecture | Accepted | #58 |
