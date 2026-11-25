@@ -17,6 +17,14 @@ Cortical is a zero-server, Python 3.10+ standard-library (`dependencies = []`) M
 
 ---
 
+## 90-Second Video Demos
+
+1. **[Privacy Vault + Lossless TOON (-78% Tokens) in pi CLI](https://youtu.be/zjdRGFkU8Cg)** - Zero-LLM `fail_closed` PII/metadata masking, deterministic TOON compression, and `$0` local offload.
+2. **[Sync 8 AI Coding Harnesses with 1 Command + Rollback](https://youtu.be/HUvxYmrvhZc)** - Idempotent `--dry-run` sync, timestamped `--rollback`, and the static zero-CDN control plane (`settings.html`).
+3. **[Run 27B Local Models at 65K Context on a 16GB Laptop](https://youtu.be/U5Cm3XAgsKM)** - Hardware preflight (`cortical doctor`), variable-quant 27B at `65,536` context in `9.08 GiB` VRAM, and local offload across 7 runners.
+
+---
+
 ## Why Cortical
 
 Most MCP servers are thin API wrappers that introduce heavy runtime dependencies, leave sensitive files exposed to cloud prompts, and force every developer to maintain separate configs for Claude Desktop, Cursor, Windsurf, OpenCode, Codex, and local runners.
