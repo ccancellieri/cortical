@@ -33,9 +33,14 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "alias": {"type": "string", "description": "Vault alias or cortical://private/<alias> URI"},
-                "task_tag": {"type": "string", "description": "Optional task tag to fetch compact context for all tagged documents"},
-                "tier": {"type": "string", "enum": ["light", "medium", "high", "max"], "default": "max"},
+                "alias": {"type": "string", "description": "Vault alias or cortical://private/<alias> URI to read."},
+                "task_tag": {"type": "string", "description": "Optional task tag to fetch compact sanitized context for all matching documents."},
+                "tier": {
+                    "type": "string",
+                    "enum": ["light", "medium", "high", "max"],
+                    "default": "max",
+                    "description": "3+1 detail depth tier to return (light=executive summary, medium=structured outline, high=key facts, max=full sanitized text).",
+                },
             },
             "required": [],
         },
@@ -70,11 +75,31 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path_or_text": {"type": "string"},
-                "alias": {"type": "string"},
-                "policy": {"type": "string", "enum": ["auto", "fail_closed", "fail_open"], "default": "auto"},
-                "profile": {"type": "string", "enum": ["max_security", "low", "medium", "max_context"], "default": "medium"},
-                "task_tags": {"type": "array", "items": {"type": "string"}},
+                "path_or_text": {
+                    "type": "string",
+                    "description": "Local file path, directory path (recursive Second Brain ingest), or raw text to sanitize and store in the Privacy Vault.",
+                },
+                "alias": {
+                    "type": "string",
+                    "description": "Optional stable identifier for the stored vault entry (auto-derived from filename or content hash if omitted).",
+                },
+                "policy": {
+                    "type": "string",
+                    "enum": ["auto", "fail_closed", "fail_open"],
+                    "default": "auto",
+                    "description": "Egress security policy: auto (classify by sensitivity), fail_closed (block cloud egress), or fail_open (allow sanitized egress).",
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["max_security", "low", "medium", "max_context"],
+                    "default": "medium",
+                    "description": "Redaction strictness profile: max_security (local-only, never sent to cloud), low, medium, or max_context.",
+                },
+                "task_tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of task tags used to group and retrieve related vault documents.",
+                },
             },
             "required": ["path_or_text"],
         },
@@ -107,8 +132,16 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string"},
-                "format": {"type": "string", "enum": ["auto", "json", "xml", "yaml", "log"], "default": "auto"},
+                "text": {
+                    "type": "string",
+                    "description": "Raw JSON, XML, YAML, or verbose log text to compress deterministically without losing information.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["auto", "json", "xml", "yaml", "log"],
+                    "default": "auto",
+                    "description": "Input payload format hint; use auto to detect JSON, XML, YAML, or logs automatically.",
+                },
             },
             "required": ["text"],
         },
@@ -161,18 +194,21 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string"},
+                "prompt": {
+                    "type": "string",
+                    "description": "Task instruction or question to execute locally via the configured runner at zero cloud token cost.",
+                },
                 "role": {
                     "type": "string",
-                    "description": "Semantic model role (router, ner, fast_coder, daily_coder, reviewer, summarizer, deep_reasoner, orchestrator, vision)",
+                    "description": "Semantic model role (router, ner, fast_coder, daily_coder, reviewer, summarizer, deep_reasoner, orchestrator, vision, tech_communicator).",
                 },
-                "model": {"type": "string", "description": "Optional explicit model ID or @role:<name> alias"},
+                "model": {"type": "string", "description": "Optional explicit model ID or @role:<name> alias overriding the default role mapping."},
                 "file_paths": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional local file paths read directly from disk by the local LLM (0 cloud input tokens; private vault paths blocked).",
                 },
-                "vault_alias": {"type": "string", "description": "Optional vault alias (including max_security) processed strictly offline"},
+                "vault_alias": {"type": "string", "description": "Optional vault alias (including max_security) processed strictly offline."},
             },
             "required": ["prompt"],
         },
@@ -201,9 +237,17 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "conversation_id": {"type": "string"},
-                "include_local_summary": {"type": "boolean", "default": False},
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional conversation or session identifier to scope telemetry metrics (defaults to global workspace rollup).",
+                },
+                "include_local_summary": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, append a short qualitative summary generated by the local summarizer model.",
+                },
             },
+            "required": [],
         },
         "outputSchema": {
             "type": "object",
@@ -233,12 +277,24 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["save", "load"], "default": "load"},
-                "goal": {"type": "string"},
-                "summary": {"type": "string"},
-                "modified_files": {"type": "array", "items": {"type": "string"}},
-                "next_step": {"type": "string"},
-                "source_harness": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["save", "load"],
+                    "default": "load",
+                    "description": "Whether to save the current task handoff state or load the latest saved handoff.",
+                },
+                "goal": {"type": "string", "description": "Short statement of the active objective when saving a handoff."},
+                "summary": {"type": "string", "description": "Concise summary of progress, decisions, and current state."},
+                "modified_files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of file paths modified during the session.",
+                },
+                "next_step": {"type": "string", "description": "Exact next action for the receiving agent or harness to execute."},
+                "source_harness": {
+                    "type": "string",
+                    "description": "Name of the harness creating the handoff (e.g. antigravity, pi, opencode, claude-code, codex).",
+                },
             },
             "required": ["action"],
         },
@@ -266,19 +322,63 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "seed": {"type": "string", "description": "Short rough idea, seed request, or empty when resume=true"},
-                "mode": {"type": "string", "enum": ["browser", "tui", "auto", "auto_if_confident"], "default": "auto"},
-                "persona": {"type": "string", "enum": ["auto", "colleague", "technical"], "default": "auto"},
-                "lang": {"type": "string", "enum": ["auto", "en", "it"], "default": "auto"},
-                "detail_tier": {"type": "string", "enum": ["light", "medium", "high", "max_security"], "default": "medium"},
-                "attach_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional files or directories to privatize into Second Brain"},
-                "reconcile_brain": {"type": "boolean", "default": True},
-                "auto_curate_skill": {"type": "boolean", "default": False},
-                "target": {"type": "string", "description": "Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, antigravity, opencode, dsh)"},
-                "issue": {"type": "integer", "description": "Optional GitHub Issue number to anchor on"},
-                "resume": {"type": "boolean", "default": False},
-                "browser": {"type": "string", "enum": ["default", "chrome"], "default": "default"},
-                "timeout_sec": {"type": "number", "default": 180},
+                "seed": {"type": "string", "description": "Short rough idea, seed request, or empty when resume=true."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["browser", "tui", "auto", "auto_if_confident"],
+                    "default": "auto",
+                    "description": "Execution mode: browser (ephemeral 127.0.0.1:0 questionnaire), tui, auto, or auto_if_confident.",
+                },
+                "persona": {
+                    "type": "string",
+                    "enum": ["auto", "colleague", "technical"],
+                    "default": "auto",
+                    "description": "Questioning style: auto-detect, plain-spoken colleague mode, or technical engineering mode.",
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["auto", "en", "it"],
+                    "default": "auto",
+                    "description": "Response and questionnaire language (auto-detected from seed or explicit en/it).",
+                },
+                "detail_tier": {
+                    "type": "string",
+                    "enum": ["light", "medium", "high", "max_security"],
+                    "default": "medium",
+                    "description": "Privacy detail tier applied when privatizing attached files or directories.",
+                },
+                "attach_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional files or directories to privatize into the 3+1 Second Brain before synthesizing.",
+                },
+                "reconcile_brain": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "When true, reconcile cross-document concepts and detect numeric/date discrepancies.",
+                },
+                "auto_curate_skill": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, generate a reusable zero-PII SKILL.md from the reconciled session.",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, antigravity, opencode, dsh).",
+                },
+                "issue": {"type": "integer", "description": "Optional GitHub Issue number to anchor repository context on."},
+                "resume": {"type": "boolean", "default": False, "description": "Resume from the latest saved loop memory snapshot."},
+                "browser": {
+                    "type": "string",
+                    "enum": ["default", "chrome"],
+                    "default": "default",
+                    "description": "Browser launcher preference when mode=browser.",
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "default": 180,
+                    "description": "Timeout in seconds before the ephemeral loopback elicitor server closes automatically.",
+                },
             },
             "required": [],
         },

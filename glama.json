@@ -2,7 +2,7 @@
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "name": "cortical-mcp",
   "version": "0.3.0",
-  "description": "Zero-server, Python 3.10+ stdlib-only MCP server with Dynamic Privacy Vault (auto/fail_closed/fail_open), lossless TOON compression, hardware/variable-quant preflight, zero-token ROI telemetry, and cross-harness handoff.",
+  "description": "Zero-server, Python 3.10+ stdlib-only MCP server providing a fail-closed Privacy Vault, lossless TOON compression, hardware preflight, zero-cloud-token local LLM offload, ROI telemetry, cross-harness handoff, and Prompt Studio.",
   "type": "mcp_server",
   "status": "active",
   "maintainers": [
@@ -21,7 +21,9 @@
     "local-llm",
     "ollama",
     "unsloth",
-    "cross-harness"
+    "cross-harness",
+    "prompt-studio",
+    "second-brain"
   ],
   "tools": [
     "cortical_vault_read",
@@ -30,7 +32,8 @@
     "cortical_doctor_status",
     "cortical_local_offload",
     "cortical_roi_report",
-    "cortical_handoff"
+    "cortical_handoff",
+    "cortical_next_prompt"
   ],
   "features": {
     "resources": true,

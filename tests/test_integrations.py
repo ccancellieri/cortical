@@ -113,7 +113,7 @@ class TestCorticalIntegrations(unittest.TestCase):
             self.assertEqual(srv_json["version"], "0.3.0")
             glama = json.loads((repo_root / "glama.json").read_text(encoding="utf-8"))
             self.assertEqual(glama["version"], "0.3.0")
-            self.assertEqual(len(glama["tools"]), 7)
+            self.assertEqual(len(glama["tools"]), 8)
 
     def test_mcp_stdio_initialize_ping_and_doctor_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
