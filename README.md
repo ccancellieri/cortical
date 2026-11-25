@@ -3,6 +3,7 @@
 [![Live Demo & Docs](https://img.shields.io/badge/Demo_&_Docs-ccancellieri.github.io%2Fcortical-38bdf8)](https://ccancellieri.github.io/cortical/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-34d399)](LICENSE)
 [![Python 3.10+ Stdlib Only](https://img.shields.io/badge/Dependencies-0_External_(Stdlib_Only)-fbbf24)](pyproject.toml)
+[![ccancellieri/cortical MCP server](https://glama.ai/mcp/servers/ccancellieri/cortical/badges/score.svg)](https://glama.ai/mcp/servers/ccancellieri/cortical)
 
 **Cross-Platform Zero-Server Agent Control Plane & Declarative Composer** · **Dynamic Privacy Vault (`auto` | `fail_closed` | `fail_open`)** · **Deterministic Lossless `TOON` Compression** · **Hardware/Variable-Quant Model Manager & Auto-Tuner**
 
