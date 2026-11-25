@@ -1,7 +1,21 @@
-# Cortical Upstream OSS Contribution Drafts (6–7 Strategic High-Visibility Repositories)
+# Cortical Upstream OSS Contribution Drafts & Strategic Priority Matrix
 
 > **Status:** `DRAFT — HUMAN REVIEW & CONFIRMATION REQUIRED BEFORE OPENING ANY EXTERNAL PR OR ISSUE`
-> Follows **ADR-012** (Value-First Contract): every proposal solves a concrete maintainer/user pain point with zero forced dependencies on Cortical.
+> Follows **ADR-012** (Value-First Contract) & **ADR-018** (Anonymized Second Brain + AI Colleague): every proposal solves a concrete maintainer/user pain point with zero forced dependencies on Cortical.
+
+---
+
+## Executive Priority Ranking (Updated Post-ADR-017 & ADR-018)
+
+| Rank | Target Repository / Registry | Effort | Acceptance Likelihood | Strategic Impact | Recommendation |
+| --- | --- | --- | --- | --- | --- |
+| **#1 (Must-Do First)** | **Official MCP Registry (`modelcontextprotocol/registry`) + `punkpeye/awesome-mcp-servers` + Glama** | Very Low (30m) | **Very High (~95%)** | Canonical discovery for anyone searching *"privacy vault MCP"*, *"second brain MCP"*, *"token compression"*, or *"local LLM offload"*. | **Execute immediately upon your GO** (`server.json` & `glama.json` are already schema-validated). |
+| **#2 (Highest Viral Local-LLM Reach)** | **`unslothai/unsloth` (Docs / Discussions Recipe)** | Low (45m) | **High (~85%)** | Reaches tens of thousands of 16–24 GB laptop users struggling with silent `num_ctx=4096` truncation & 300s `<think>` timeouts on `27B`/`9B` Dynamic GGUFs. | **Top technical backlink** — pure empirical Metal VRAM math (`9.08 GiB` @ `65,536` ctx) + natural link to Cortical's stdlib tuner & Second Brain. |
+| **#3 (Best Fit for Privacy + Hybrid Escalation)** | **`BerriAI/litellm` (Cookbook / Custom Guardrail PR)** | Low–Med (1h) | **High (~80%)** | Directly showcases Cortical's **ADR-018** killer flow: `$0` local runner first -> `fail_closed` zero-PII + `TOON` escalation to remote frontier APIs. | **High enterprise/professional appeal** (lawyers, finance, healthcare, consultants using hybrid proxies). |
+| **#4 (Fastest-Growing Agent Audience)** | **`anomalyco/opencode` (Community Plugin + `/next` & `/private` Commands)** | Low (45m) | **High (~80%)** | Drop-in 20-line `.mjs` `TOON` hook (`-62%` to `-78%` JSON savings) + `/next` Colleague Browser Elicitor & `@private:<alias>` Second Brain. | **Great UX showcase** for interactive `127.0.0.1:0` Colleague Mode. |
+| **#5 (Core Dogfooding Community)** | **`earendil-works/pi` (Community Extension Listing)** | Low (30m) | **High (~85%)** | Solves `max_tokens=1` clamp + adds Channel 3 pre-send attachment privatization (`3.48M` local tokens verified). | **High conversion** among local-first CLI power users. |
+| **#6 (Cross-Project Goodwill)** | **`oraios/serena` / `rtk-ai/rtk` (Discussion: 4-Layer Composable Benchmark)** | Very Low (20m) | **High (~90% as Discussion)** | Positions Cortical as an amplifier of Serena (`-95.79%`) & RTK (`-51.35%`) rather than a competitor. | Post as constructive Show & Tell Discussion (zero maintainer review burden). |
+| **#7 (Opportunistic / Later)** | **`deepseek-ai/deepseek-harness` (`dsh`)** | Low (30m) | **Medium (~60%)** | Early ecosystem foothold via Cordis `onBeforeDispatch` hook, smaller current audience than #1–#5. | Defer to Wave 2 after #1–#4 land. |
 
 ---
 

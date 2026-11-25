@@ -92,6 +92,305 @@ _KNOWN_DOMAIN_RE = re.compile(
     r"\b(?:cortical|vault|toon|mcp|sync|harness|runner|adr|wiki|dashboard|settings\.html|cli|doctor|bench|prompt|next|privacy|role)\b",
     re.IGNORECASE,
 )
+_ITALIAN_LANG_RE = re.compile(
+    r"\b(?:vorrei|aiutami|riassumi|analizza|contratt[oi]|cartella|document[oi]|fattur[ae]|client[ei]|"
+    r"progetto|quale|perch[eé]|come|quest[oaie]|bilancio|portafoglio|studio|lavoro|domand[ae]|spiega)\b",
+    re.IGNORECASE,
+)
+_CODE_INTENT_RE = re.compile(
+    r"\b(?:git|commit|unittest|pytest|refactor|bug|issue|pr\b|adr|cli|mcp|endpoint|function|class|module|test|lint|build)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_persona_and_language(
+    seed: str,
+    *,
+    repo_root: Optional[Path] = None,
+    persona: str = "auto",
+    lang: str = "auto",
+    has_attachments: bool = False,
+) -> tuple[str, str]:
+    """Resolves `('colleague' | 'technical', 'it' | 'en')` from seed text, repo state, and attachments."""
+    raw_lang = str(lang or "auto").strip().lower()
+    if raw_lang in {"it", "ita", "italian", "italiano"}:
+        eff_lang = "it"
+    elif raw_lang in {"en", "eng", "english"}:
+        eff_lang = "en"
+    else:
+        eff_lang = "it" if len(_ITALIAN_LANG_RE.findall(seed or "")) >= 1 else "en"
+
+    raw_p = str(persona or "auto").strip().lower()
+    if raw_p in {"colleague", "simple", "human", "assistant", "collega"}:
+        return "colleague", eff_lang
+    if raw_p in {"technical", "dev", "developer", "code"}:
+        return "technical", eff_lang
+
+    root = Path(repo_root or Path.cwd()).expanduser()
+    in_git_repo = (root / ".git").exists()
+    if has_attachments and not _CODE_INTENT_RE.search(seed or ""):
+        return "colleague", eff_lang
+    if _CODE_INTENT_RE.search(seed or "") or _KNOWN_DOMAIN_RE.search(seed or ""):
+        return "technical", eff_lang
+    if not in_git_repo:
+        return "colleague", eff_lang
+    return "colleague" if seed.strip() else "technical", eff_lang
+
+
+def generate_colleague_questions(
+    context: dict[str, Any],
+    *,
+    lang: str = "en",
+    detail_tier: str = "medium",
+    discrepancies: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    """Plain-language, zero-jargon Colleague questionnaire in Italian or English."""
+    is_it = str(lang or "en").lower().startswith("it")
+    prefs = (context.get("loop_memory") or {}).get("answered_preferences") or {}
+    eff_tier = str(prefs.get("detail_tier") or detail_tier or "medium")
+
+    if is_it:
+        qs: list[dict[str, Any]] = [
+            {
+                "id": "colleague_goal",
+                "title": "Qual è il risultato concreto che ti serve adesso?",
+                "type": "radio",
+                "default": prefs.get("colleague_goal") or "actionable_summary",
+                "options": [
+                    {
+                        "value": "actionable_summary",
+                        "label": "(Recommended) Sintesi chiara + punti chiave + prossimi passi concreti",
+                        "tradeoff": "Ideale per capire subito il quadro completo e decidere rapidamente.",
+                    },
+                    {
+                        "value": "deep_comparison",
+                        "label": "Analisi approfondita, verifica rischi e confronto tra documenti",
+                        "tradeoff": "Controlla clausole, numeri, date e possibili incongruenze tra i file.",
+                    },
+                    {
+                        "value": "ready_draft",
+                        "label": "Bozza pronta da usare (report, risposta, piano o documento)",
+                        "tradeoff": "Produce un testo già strutturato pronto da rivedere.",
+                    },
+                    {
+                        "value": "reusable_skill",
+                        "label": "Procedura / Skill riutilizzabile per ripetere questo lavoro in futuro",
+                        "tradeoff": "Trasforma questo flusso in una competenza automatica del tuo Second Brain.",
+                    },
+                ],
+            },
+            {
+                "id": "detail_tier",
+                "title": "Quanto dettaglio dei tuoi documenti vuoi condividere (Second Brain Anonimo)?",
+                "type": "radio",
+                "default": eff_tier,
+                "options": [
+                    {
+                        "value": "medium",
+                        "label": "(Recommended) Medio — Riassunto strutturato anonimizzato (~70% token risparmiati)",
+                        "tradeoff": "Nasconde nomi, email, IBAN e codici fiscali mantenendo tutti i concetti importanti.",
+                    },
+                    {
+                        "value": "light",
+                        "label": "Leggero — Solo punti essenziali e cifre chiave (~85% token risparmiati)",
+                        "tradeoff": "Massimo risparmio economico e minima esposizione informativa.",
+                    },
+                    {
+                        "value": "high",
+                        "label": "Alto — Testo completo pseudonimizzato (es. PERSON_01, ORG_01)",
+                        "tradeoff": "Ideale per contratti o testi complessi senza mai esporre identità reali.",
+                    },
+                    {
+                        "value": "max_security",
+                        "label": "Massima riservatezza — 100% offline solo sul tuo computer ($0 cloud)",
+                        "tradeoff": "Nessun dato (nemmeno anonimizzato) può uscire dal tuo dispositivo.",
+                    },
+                ],
+            },
+            {
+                "id": "ai_routing_mode",
+                "title": "Come vuoi che il tuo collega AI elabori la richiesta?",
+                "type": "radio",
+                "default": prefs.get("ai_routing_mode") or "smart_local_first",
+                "options": [
+                    {
+                        "value": "smart_local_first",
+                        "label": "(Recommended) AI locale gratis prima; usa AI remota anonimizzata solo se serve",
+                        "tradeoff": "Risparmia denaro ($0 in locale) e passa al cloud (compresso TOON) solo per compiti troppo complessi.",
+                    },
+                    {
+                        "value": "strict_local_only",
+                        "label": "Solo AI locale sul mio computer (zero costi cloud)",
+                        "tradeoff": "Tutto resta in locale anche se il modello impiega più tempo.",
+                    },
+                    {
+                        "value": "anonymized_remote_boost",
+                        "label": "Prepara subito pacchetto anonimo + compresso TOON per AI remota avanzata",
+                        "tradeoff": "Massima qualità di ragionamento spendendo una frazione dei token normali.",
+                    },
+                ],
+            },
+            {
+                "id": "second_brain_learning",
+                "title": "Come aggiorniamo il tuo Second Brain con quello che impariamo oggi?",
+                "type": "checkbox",
+                "default": prefs.get("second_brain_learning") or ["reconcile_knowledge", "auto_skill"],
+                "options": [
+                    {
+                        "value": "reconcile_knowledge",
+                        "label": "(Recommended) Salva e riconcilia queste risposte nel Second Brain anonimo",
+                        "tradeoff": "Così la prossima volta Cortical ricorderà già il contesto senza rifarti le stesse domande.",
+                    },
+                    {
+                        "value": "auto_skill",
+                        "label": "Crea/aggiorna automaticamente una Skill e un Prompt riutilizzabili",
+                        "tradeoff": "Salva una guida automatica zero-PII pronta per i prossimi incarichi simili.",
+                    },
+                ],
+            },
+        ]
+        if discrepancies:
+            d0 = discrepancies[0]["summary"]
+            qs.append({
+                "id": "discrepancy_resolution",
+                "title": f"Ho notato valori diversi tra i tuoi documenti ({d0[:85]}): come procedo?",
+                "type": "radio",
+                "default": "highlight_both",
+                "options": [
+                    {
+                        "value": "highlight_both",
+                        "label": "(Recommended) Evidenzia entrambe le versioni e segnala la differenza nel report",
+                        "tradeoff": "Ti permette di verificare subito quale documento fa fede.",
+                    },
+                    {
+                        "value": "prefer_newest",
+                        "label": "Considera valido il documento più recente e annota il vecchio come storico",
+                        "tradeoff": "Utile quando ci sono revisioni successive dello stesso documento.",
+                    },
+                ],
+            })
+        return qs[:5]
+
+    qs_en: list[dict[str, Any]] = [
+        {
+            "id": "colleague_goal",
+            "title": "What concrete outcome would help you most right now?",
+            "type": "radio",
+            "default": prefs.get("colleague_goal") or "actionable_summary",
+            "options": [
+                {
+                    "value": "actionable_summary",
+                    "label": "(Recommended) Clear summary + key takeaways + practical next steps",
+                    "tradeoff": "Fastest way to understand the full picture and make decisions.",
+                },
+                {
+                    "value": "deep_comparison",
+                    "label": "Deep review, risk check & cross-document comparison",
+                    "tradeoff": "Checks clauses, numbers, dates, and subtle inconsistencies across files.",
+                },
+                {
+                    "value": "ready_draft",
+                    "label": "Ready-to-use draft (report, reply, plan, or structured memo)",
+                    "tradeoff": "Produces polished text ready for quick human review.",
+                },
+                {
+                    "value": "reusable_skill",
+                    "label": "Reusable Skill & workflow recipe so we can repeat this anytime",
+                    "tradeoff": "Turns your answers into an automated Second-Brain skill.",
+                },
+            ],
+        },
+        {
+            "id": "detail_tier",
+            "title": "How much detail from your documents should we include (Anonymized Second Brain)?",
+            "type": "radio",
+            "default": eff_tier,
+            "options": [
+                {
+                    "value": "medium",
+                    "label": "(Recommended) Medium — Anonymized structured summary (~70% tokens saved)",
+                    "tradeoff": "Masks names, emails, IBANs, and IDs while keeping all important facts.",
+                },
+                {
+                    "value": "light",
+                    "label": "Light — Key takeaways & headline figures only (~85% tokens saved)",
+                    "tradeoff": "Maximum cost savings and minimal context exposure.",
+                },
+                {
+                    "value": "high",
+                    "label": "High — Full pseudonymized text (e.g. PERSON_01, ORG_01)",
+                    "tradeoff": "Best for detailed contracts or technical prose with zero real identities exposed.",
+                },
+                {
+                    "value": "max_security",
+                    "label": "Maximum Privacy — Strictly 100% offline on this computer ($0 cloud)",
+                    "tradeoff": "Nothing (not even anonymized text) is allowed to leave your machine.",
+                },
+            ],
+        },
+        {
+            "id": "ai_routing_mode",
+            "title": "How should your AI colleague process this task?",
+            "type": "radio",
+            "default": prefs.get("ai_routing_mode") or "smart_local_first",
+            "options": [
+                {
+                    "value": "smart_local_first",
+                    "label": "(Recommended) Try free local AI first; escalate anonymized packet to cloud AI only if needed",
+                    "tradeoff": "Spends $0 locally whenever possible and compresses via TOON if remote help is needed.",
+                },
+                {
+                    "value": "strict_local_only",
+                    "label": "Strictly local AI on my computer only ($0 cloud cost)",
+                    "tradeoff": "Guaranteed zero cloud spend even on longer tasks.",
+                },
+                {
+                    "value": "anonymized_remote_boost",
+                    "label": "Prepare anonymized + TOON-compressed packet for frontier cloud AI immediately",
+                    "tradeoff": "Maximum reasoning depth at a fraction of raw token cost.",
+                },
+            ],
+        },
+        {
+            "id": "second_brain_learning",
+            "title": "How should we grow your Second Brain from this session?",
+            "type": "checkbox",
+            "default": prefs.get("second_brain_learning") or ["reconcile_knowledge", "auto_skill"],
+            "options": [
+                {
+                    "value": "reconcile_knowledge",
+                    "label": "(Recommended) Reconcile & save these clarifications into my anonymized Second Brain",
+                    "tradeoff": "Avoids repeating the same questions in future sessions.",
+                },
+                {
+                    "value": "auto_skill",
+                    "label": "Auto-generate / update a reusable Skill & Prompt template",
+                    "tradeoff": "Creates a zero-PII SKILL.md ready for similar future tasks.",
+                },
+            ],
+        },
+    ]
+    if discrepancies:
+        d0 = discrepancies[0]["summary"]
+        qs_en.append({
+            "id": "discrepancy_resolution",
+            "title": f"I noticed differing figures across your documents ({d0[:85]}): how should we treat them?",
+            "type": "radio",
+            "default": "highlight_both",
+            "options": [
+                {
+                    "value": "highlight_both",
+                    "label": "(Recommended) Highlight both versions clearly so I can verify the authoritative source",
+                    "tradeoff": "Safest way to surface hidden conflicts across files.",
+                },
+                {
+                    "value": "prefer_newest",
+                    "label": "Treat the newest document as authoritative and note older values as historical",
+                    "tradeoff": "Best when later files supersede earlier drafts.",
+                },
+            ],
+        })
+    return qs_en[:5]
 
 
 def normalize_target_profile(target: Optional[str], preferred: str = "general") -> tuple[str, str]:
@@ -754,12 +1053,42 @@ def synthesize_continuation_prompt(
         "```text",
         str(context.get("toon_packet") or "{}"),
         "```",
-        "",
-        "## 6. Mandatory Acceptance & Verification Gate",
-        "- Preserve `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only) and zero persistent background daemons.",
-        "- Use `@role:*` semantic model abstractions (`@role:daily_coder`, `@role:reviewer`, `@role:deep_reasoner`) instead of hardcoded model tags.",
-        "- Run the test suite in one shot via `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` and ensure 100% pass before completion.",
     ])
+
+    suff = context.get("sufficiency")
+    if isinstance(suff, dict):
+        lines.extend([
+            "",
+            "## 6. Local-vs-Remote AI Sufficiency & Anonymized Escalation Assessment",
+            f"- **Verdict:** `{suff.get('verdict')}` (`recommended_role={suff.get('recommended_role')}`, `complexity={suff.get('complexity_score')}`)",
+            f"- **Colleague Guidance:** {suff.get('explanation')}",
+        ])
+    esc_pkt = context.get("escalation_packet")
+    if isinstance(esc_pkt, dict) and esc_pkt.get("packet"):
+        lines.extend([
+            "",
+            f"## 7. Anonymized Second-Brain Context Packet (`tier={esc_pkt.get('detail_tier')}`, `{esc_pkt.get('format_used')}`, `{esc_pkt.get('saving_pct')}%` saved)",
+            "```text",
+            str(esc_pkt["packet"]),
+            "```",
+        ])
+
+    if context.get("persona") == "colleague":
+        lines.extend([
+            "",
+            "## Mandatory Privacy & Colleague Quality Gate",
+            "- Respond in clear, plain, well-structured language tailored to the user's goal (no unnecessary technical jargon).",
+            "- Never invent or Attempt to deanonymize masked placeholders (`PERSON_01`, `ORG_01`, `IBAN_REDACTED`, `@private:<alias>`).",
+            "- Highlight any cross-document discrepancies clearly and propose concrete next steps.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "## Mandatory Acceptance & Verification Gate",
+            "- Preserve `dependencies = []` in `pyproject.toml` (Python 3.10+ stdlib only) and zero persistent background daemons.",
+            "- Use `@role:*` semantic model abstractions (`@role:daily_coder`, `@role:reviewer`, `@role:deep_reasoner`) instead of hardcoded model tags.",
+            "- Run the test suite in one shot via `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` and ensure 100% pass before completion.",
+        ])
     return "\n".join(lines)
 
 
@@ -864,6 +1193,8 @@ def render_elicitor_html(
     answers: JSON.parse(JSON.stringify(DATA.defaultAnswers || {{}})),
     comments: {{}},
     directives: '',
+    folderPath: '',
+    uploadedFiles: [],
     manualPrompt: null,
     activeQ: 0,
     done: false,
@@ -917,6 +1248,10 @@ def render_elicitor_html(
     render();
   }}
 
+  async function handleFileSelect(ev) {{
+    const files = Array.from(ev.target.files || []).slice(0, 12);
+    for (const f of files) {{\n      if (f.size > 1500000) continue;\n      const text = await f.text();\n      ST.uploadedFiles.push({{ name: f.name, content: text }});\n    }}\n    render();\n  }}
+
   async function submitAction(kind) {{
     const promptText = buildLivePrompt();
     if (kind === 'template') {{
@@ -941,6 +1276,8 @@ def render_elicitor_html(
         answers: ST.answers,
         comments: ST.comments,
         directives: ST.directives,
+        folderPath: ST.folderPath,
+        uploadedFiles: ST.uploadedFiles,
         prompt: promptText,
       }}),
     }});
@@ -1013,6 +1350,24 @@ def render_elicitor_html(
           </div>
         </div>
         ${{qCards}}
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <strong>📎 Second Brain Documents &amp; Folder Privatizer (100% Local Loopback)</strong>
+            <span class="pill ok">Auto-Sanitized · 3+1 Tiers</span>
+          </div>
+          <div class="hint" style="margin:4px 0 8px;">Attach documents or paste a local folder/drive path to privatize into your anonymized Second Brain before synthesizing the prompt.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div>
+              <label class="hint"><strong>Local Folder / Drive Path (optional)</strong></label>
+              <input class="input" placeholder="e.g. ~/Documents/ClientDossier" value="${{esc(ST.folderPath)}}" oninput="ST.folderPath=this.value" />
+            </div>
+            <div>
+              <label class="hint"><strong>Quick Attach Text/Doc Files</strong></label>
+              <input class="input" type="file" multiple onchange="handleFileSelect(event)" />
+            </div>
+          </div>
+          ${{ST.uploadedFiles.length ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">${{ST.uploadedFiles.map((f) => `<span class="pill info">📄 ${{esc(f.name)}}</span>`).join('')}}</div>` : ''}}
+        </div>
         <div class="card">
           <label><strong>Additional Directives / Global Constraints</strong></label>
           <textarea class="textarea" rows="3" style="margin-top:6px;" placeholder="Add specific file paths, acceptance rules, or 'Avoid ...' notes (persisted to loop_memory.json)..." oninput="ST.manualPrompt=null;ST.directives=this.value;document.getElementById('live-preview').value=buildLivePrompt()">${{esc(ST.directives)}}</textarea>
@@ -1145,7 +1500,7 @@ def create_ephemeral_elicitor_server(
                 self._send_bytes(404, json.dumps({"error": "Not found"}).encode("utf-8"))
                 return
             try:
-                length = min(262144, int(self.headers.get("Content-Length") or 0))
+                length = min(4_194_304, int(self.headers.get("Content-Length") or 0))
                 raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
                 body = json.loads(raw) if raw.strip() else {}
             except Exception:  # noqa: BLE001
@@ -1268,6 +1623,15 @@ def run_next_prompt_flow(
     seed: str = "",
     *,
     mode: str = "browser",
+    persona: str = "auto",
+    lang: str = "auto",
+    detail_tier: str = "medium",
+    attach_paths: Optional[list[str | Path]] = None,
+    reconcile_brain: bool = True,
+    auto_curate_skill: bool = False,
+    execute_local_if_sufficient: bool = False,
+    skills_dir: Optional[Path | str] = None,
+    runner_probe_fn: Optional[Callable[[str], bool]] = None,
     preferred_browser: str = "default",
     target: Optional[str] = None,
     focus_issue: Optional[int] = None,
@@ -1283,25 +1647,76 @@ def run_next_prompt_flow(
     config: Optional[dict[str, Any]] = None,
     on_browser_ready: Optional[Callable[[str, int, str], None]] = None,
 ) -> dict[str, Any]:
-    """End-to-end orchestrator for `cortical next` across `browser`, `tui`, and `auto` (`auto_if_confident`) modes."""
+    """End-to-end orchestrator for `cortical next` / `cortical colleague` across `browser`, `tui`, and `auto` modes."""
+    from ..privacy.second_brain import (
+        build_anonymized_escalation_packet,
+        curate_colleague_skill,
+        evaluate_local_sufficiency,
+        normalize_detail_tier,
+        privatize_second_brain,
+        reconcile_second_brain,
+    )
+
     cfg = config or load_cortical_config()
     root = Path(repo_root or Path.cwd()).expanduser().resolve()
     store = LoopMemoryStore(repo_root=root, data_dir=data_dir)
+    v_db = Path(vault_db or os.environ.get("CORTICAL_VAULT_DB") or DEFAULT_VAULT_DB).expanduser()
+    eff_tier = normalize_detail_tier(detail_tier)
 
     raw_seed = str(seed or "")
+    eff_persona, eff_lang = detect_persona_and_language(
+        raw_seed,
+        repo_root=root,
+        persona=persona,
+        lang=lang,
+        has_attachments=bool(attach_paths),
+    )
+
+    privatized_runs: list[dict[str, Any]] = []
+    ingested_aliases: list[str] = []
+    for ap in (attach_paths or []):
+        ap_path = Path(ap).expanduser()
+        if ap_path.exists():
+            p_res = privatize_second_brain(
+                ap_path,
+                vault_db=v_db,
+                detail_tier=eff_tier,
+                reconcile=False,
+                curate_skill=False,
+                config=cfg,
+            )
+            privatized_runs.append(p_res)
+            ingested_aliases.extend(p_res.get("aliases") or [])
+
+    pre_reconcile: Optional[dict[str, Any]] = None
+    if (privatized_runs or eff_persona == "colleague") and reconcile_brain and v_db.is_file():
+        pre_reconcile = reconcile_second_brain(vault_db=v_db, detail_tier=eff_tier)
+
     ctx = harvest_prompt_context(
         raw_seed,
         repo_root=root,
-        vault_db=vault_db,
+        vault_db=v_db,
         loop_store=store,
         target=target,
         focus_issue=focus_issue,
         resume=resume,
-        allow_gh=allow_gh,
+        allow_gh=allow_gh and (eff_persona != "colleague"),
         config=cfg,
     )
+    ctx["persona"] = eff_persona
+    ctx["lang"] = eff_lang
+    ctx["detail_tier"] = eff_tier
+
     gate = evaluate_five_trigger_gate(ctx, raw_seed=raw_seed, confidence_threshold=confidence_threshold)
-    questions = generate_adaptive_questions(ctx, use_local_llm=use_local_llm, config=cfg)
+    if eff_persona == "colleague":
+        questions = generate_colleague_questions(
+            ctx,
+            lang=eff_lang,
+            detail_tier=eff_tier,
+            discrepancies=(pre_reconcile or {}).get("discrepancies"),
+        )
+    else:
+        questions = generate_adaptive_questions(ctx, use_local_llm=use_local_llm, config=cfg)
 
     req_mode = str(mode or "browser").strip().lower()
     if req_mode == "auto_if_confident":
@@ -1356,8 +1771,35 @@ def run_next_prompt_flow(
                 if isinstance(pl.get("comments"), dict):
                     comments = {str(k): str(v) for k, v in pl["comments"].items() if str(v).strip()}
                 directives = str(pl.get("directives") or "")
-                # Re-verify privacy firewall even if user edited live prompt manually in browser
-                if pl.get("prompt"):
+
+                b_folder = str(pl.get("folderPath") or "").strip()
+                if b_folder and Path(b_folder).expanduser().exists():
+                    pf_res = privatize_second_brain(
+                        Path(b_folder).expanduser(),
+                        vault_db=v_db,
+                        detail_tier=normalize_detail_tier(str(answers.get("detail_tier") or eff_tier)),
+                        reconcile=False,
+                        config=cfg,
+                    )
+                    privatized_runs.append(pf_res)
+                    ingested_aliases.extend(pf_res.get("aliases") or [])
+
+                b_files = pl.get("uploadedFiles")
+                if isinstance(b_files, list) and b_files:
+                    v_inst = PrivacyVault(v_db)
+                    sel_t = normalize_detail_tier(str(answers.get("detail_tier") or eff_tier))
+                    for uf in b_files[:12]:
+                        if isinstance(uf, dict) and uf.get("content"):
+                            ing_u = v_inst.ingest(
+                                str(uf["content"]),
+                                alias=Path(str(uf.get("name") or "attached_doc")).stem,
+                                policy="fail_closed" if sel_t == "max_security" else "auto",
+                                profile="max_security" if sel_t == "max_security" else "medium",
+                                config=cfg,
+                            )
+                            ingested_aliases.append(ing_u["alias"])
+
+                if pl.get("prompt") and not b_folder and not b_files and eff_persona != "colleague":
                     p_key, r_tgt = normalize_target_profile(chosen_target)
                     rem = is_remote_target(p_key, r_tgt, cfg)
                     c_terms = list((cfg.get("privacy") or {}).get("custom_terms") or []) or None
@@ -1375,7 +1817,81 @@ def run_next_prompt_flow(
         directives = tui_res["directives"]
         mode_used = "tui"
 
+    eff_tier = normalize_detail_tier(str(answers.get("detail_tier") or eff_tier))
+    ctx["detail_tier"] = eff_tier
     ctx["seed"] = final_seed
+
+    learning_sel = answers.get("second_brain_learning") or []
+    if isinstance(learning_sel, str):
+        learning_sel = [learning_sel]
+    qa_notes: list[str] = []
+    for q in questions:
+        qid = q["id"]
+        val = answers.get(qid)
+        note = comments.get(qid)
+        if val is not None:
+            qa_notes.append(f"{q['title']} -> {val}" + (f" ({note})" if note else ""))
+    if directives.strip():
+        qa_notes.append(f"User directive: {directives.strip()}")
+
+    final_reconcile: Optional[dict[str, Any]] = pre_reconcile
+    if reconcile_brain and ("reconcile_knowledge" in learning_sel or privatized_runs) and mode_used != "browser_cancelled":
+        final_reconcile = reconcile_second_brain(
+            vault_db=v_db,
+            qa_notes=qa_notes,
+            episode_title=final_seed[:80],
+            detail_tier=eff_tier,
+        )
+
+    doc_count = sum(int(r.get("files_privatized") or 0) for r in privatized_runs) or len(ctx.get("safe_vault_aliases") or [])
+    ctx_tok_est = sum(int((r.get("token_economics") or {}).get("selected_tier_tokens_est") or 0) for r in privatized_runs)
+    routing_pref = str(answers.get("ai_routing_mode") or "smart_local_first")
+    sufficiency = evaluate_local_sufficiency(
+        final_seed,
+        context_tokens_est=ctx_tok_est,
+        doc_count=doc_count,
+        discrepancy_count=len((final_reconcile or {}).get("discrepancies") or []),
+        detail_tier=eff_tier,
+        execution_pref=routing_pref,
+        lang=eff_lang,
+        config=cfg,
+        runner_probe_fn=runner_probe_fn,
+    )
+    ctx["sufficiency"] = sufficiency
+
+    escalation_packet: Optional[dict[str, Any]] = None
+    if sufficiency["verdict"] == "escalate_anonymized_remote" and eff_tier != "max_security":
+        c_terms = list((cfg.get("privacy") or {}).get("custom_terms") or []) or None
+        escalation_packet = build_anonymized_escalation_packet(
+            final_seed,
+            vault_db=v_db,
+            aliases=ingested_aliases or None,
+            detail_tier=eff_tier,
+            qa_decisions=qa_notes,
+            discrepancies=(final_reconcile or {}).get("discrepancies"),
+            custom_terms=c_terms,
+        )
+        ctx["escalation_packet"] = escalation_packet
+        if target is None and eff_persona == "colleague":
+            chosen_target = "hybrid"
+    elif sufficiency["verdict"] in {"local_sufficient", "local_only_required"} and target is None and eff_persona == "colleague":
+        chosen_target = "pi"
+
+    curated_skill: Optional[dict[str, Any]] = None
+    interactive_used = mode_used in {"browser_submitted", "auto_escalated_browser_submitted", "tui"}
+    want_skill = auto_curate_skill or (interactive_used and ("auto_skill" in learning_sel or answers.get("colleague_goal") == "reusable_skill"))
+    if want_skill and mode_used != "browser_cancelled" and (v_db.is_file() or qa_notes):
+        curated_skill = curate_colleague_skill(
+            topic=final_seed[:60] or "colleague-workflow",
+            vault_db=v_db,
+            qa_summary="\n".join(f"- {n}" for n in qa_notes[:8]),
+            discrepancies=(final_reconcile or {}).get("discrepancies"),
+            detail_tier=eff_tier,
+            skills_dir=skills_dir or (root / ".agents" / "skills"),
+            config=cfg,
+            use_local_llm=use_local_llm,
+        )
+
     synthesized = manual_prompt_override or synthesize_continuation_prompt(
         ctx,
         questions,
@@ -1385,6 +1901,19 @@ def run_next_prompt_flow(
         target_override=chosen_target,
         config=cfg,
     )
+
+    local_response: Optional[str] = None
+    if execute_local_if_sufficient and sufficiency.get("local_sufficient") and mode_used != "browser_cancelled":
+        try:
+            local_response = invoke_configured_runner(
+                synthesized,
+                system_prompt="You are Cortical, a helpful, privacy-first AI colleague. Reply clearly in the user's language.",
+                config=cfg,
+                model_override=sufficiency["recommended_role"],
+                role="colleague_local_solver",
+            )
+        except Exception as exc:  # noqa: BLE001
+            local_response = f"(Local execution unavailable: {exc})"
 
     outcome = store.record_outcome(
         seed=final_seed,
@@ -1401,12 +1930,21 @@ def run_next_prompt_flow(
 
     return {
         "ok": mode_used != "browser_cancelled",
+        "persona": eff_persona,
+        "lang": eff_lang,
+        "detail_tier": eff_tier,
         "mode_requested": mode,
         "mode_used": mode_used,
         "escalated": escalated,
         "target": chosen_target,
         "seed": final_seed,
         "confidence_gate": gate,
+        "sufficiency": sufficiency,
+        "privatized": privatized_runs,
+        "reconciliation": final_reconcile,
+        "escalation_packet": escalation_packet,
+        "curated_skill": curated_skill,
+        "local_response": local_response,
         "questions": questions,
         "answers": answers,
         "comments": comments,

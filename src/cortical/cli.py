@@ -1111,6 +1111,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     nxt.add_argument("seed", nargs="?", default="", help="Brief seed idea or request (omit with --resume)")
     nxt.add_argument("--mode", choices=["browser", "tui", "auto", "auto_if_confident"], default="browser")
+    nxt.add_argument("--persona", choices=["auto", "colleague", "technical"], default="auto", help="Question persona: plain-language 'colleague' or 'technical' studio")
+    nxt.add_argument("--lang", choices=["auto", "en", "it"], default="auto", help="Questionnaire language (auto-detected from seed)")
+    nxt.add_argument("--tier", choices=["light", "medium", "high", "max_security"], default="medium", help="Second Brain detail tier")
+    nxt.add_argument("--attach", action="append", default=[], help="Attach file or folder path to privatize into Second Brain (repeatable)")
+    nxt.add_argument("--curate-skill", action="store_true", help="Auto-generate reusable domain SKILL.md from reconciled knowledge")
+    nxt.add_argument("--solve-local", action="store_true", help="Execute directly on local LLM when evaluate_local_sufficiency passes")
     nxt.add_argument("--browser", choices=["default", "chrome"], default="default")
     nxt.add_argument("--target", default=None, help="Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, ...)")
     nxt.add_argument("--issue", type=int, default=None, help="Anchor on a specific GitHub Issue number")
@@ -1123,6 +1129,44 @@ def build_parser() -> argparse.ArgumentParser:
     nxt.add_argument("--out", default=None, help="Write synthesized Markdown prompt to file")
     nxt.add_argument("--json", action="store_true")
     nxt.set_defaults(func=_cmd_next)
+
+    col = sub.add_parser(
+        "colleague",
+        aliases=["ask"],
+        help="Plain-language AI Colleague: ask simple questions, privatize attached docs/folders, reconcile Second Brain & check local-vs-remote AI",
+    )
+    col.add_argument("seed", nargs="?", default="", help="Plain-language goal or question (IT/EN auto-detected)")
+    col.add_argument("--mode", choices=["browser", "tui", "auto", "auto_if_confident"], default="browser")
+    col.add_argument("--lang", choices=["auto", "en", "it"], default="auto")
+    col.add_argument("--tier", choices=["light", "medium", "high", "max_security"], default="medium")
+    col.add_argument("--attach", action="append", default=[], help="File or folder to privatize into your anonymized Second Brain")
+    col.add_argument("--curate-skill", action="store_true", help="Generate/update reusable zero-PII SKILL.md")
+    col.add_argument("--solve-local", action="store_true", help="Solve locally at $0 when local LLM is sufficient")
+    col.add_argument("--browser", choices=["default", "chrome"], default="default")
+    col.add_argument("--target", default=None)
+    col.add_argument("--timeout", type=float, default=240.0)
+    col.add_argument("--no-open", action="store_true")
+    col.add_argument("--repo-root", default=".")
+    col.add_argument("--db", default=None)
+    col.add_argument("--out", default=None)
+    col.add_argument("--json", action="store_true")
+    col.set_defaults(func=_cmd_colleague)
+
+    prv = sub.add_parser(
+        "privatize",
+        help="Privatize an entire folder, drive, or file into a 3+1 Tier Anonymized Second Brain with knowledge reconciliation",
+    )
+    prv.add_argument("path", help="Folder, mounted drive, or file path to privatize locally")
+    prv.add_argument("--tier", choices=["light", "medium", "high", "max_security"], default="medium", help="Default Second Brain detail tier")
+    prv.add_argument("--custom-term", action="append", default=[], help="Extra sensitive project/client names to mask")
+    prv.add_argument("--local-ner", action="store_true", help="Enable optional local NER refinement (@role:ner)")
+    prv.add_argument("--no-reconcile", action="store_true", help="Skip cross-document concept & discrepancy reconciliation")
+    prv.add_argument("--curate-skill", action="store_true", help="Generate a reusable zero-PII SKILL.md from privatized knowledge")
+    prv.add_argument("--skill-name", default=None, help="Optional name for generated SKILL.md")
+    prv.add_argument("--dry-run", action="store_true", help="Preview file count & token compression savings without writing DB")
+    prv.add_argument("--db", default=None)
+    prv.add_argument("--json", action="store_true")
+    prv.set_defaults(func=_cmd_privatize)
 
     return p
 
@@ -1545,12 +1589,18 @@ def _cmd_next(args: argparse.Namespace) -> int:
     res = run_next_prompt_flow(
         args.seed or "",
         mode=args.mode,
+        persona=getattr(args, "persona", "auto"),
+        lang=getattr(args, "lang", "auto"),
+        detail_tier=getattr(args, "tier", "medium"),
+        attach_paths=list(getattr(args, "attach", []) or []),
+        auto_curate_skill=bool(getattr(args, "curate_skill", False)),
+        execute_local_if_sufficient=bool(getattr(args, "solve_local", False)),
         preferred_browser=args.browser,
         target=args.target,
-        focus_issue=args.issue,
-        resume=bool(args.resume) or not bool((args.seed or "").strip()),
+        focus_issue=getattr(args, "issue", None),
+        resume=bool(getattr(args, "resume", False)) or (getattr(args, "persona", "auto") != "colleague" and not bool((args.seed or "").strip())),
         timeout_sec=float(args.timeout or 240.0),
-        use_local_llm=bool(args.local_llm),
+        use_local_llm=bool(getattr(args, "local_llm", False)),
         open_browser=not bool(args.no_open),
         repo_root=Path(args.repo_root).resolve(),
         vault_db=resolve_default_db(args.db) if args.db else None,
@@ -1563,8 +1613,60 @@ def _cmd_next(args: argparse.Namespace) -> int:
     if args.json:
         _print_json(res)
         return 0 if res.get("ok", True) else 1
-    print(res["prompt"])
+    if res.get("local_response"):
+        print(res["local_response"])
+    else:
+        print(res["prompt"])
     return 0 if res.get("ok", True) else 1
+
+
+def _cmd_colleague(args: argparse.Namespace) -> int:
+    setattr(args, "persona", "colleague")
+    setattr(args, "issue", None)
+    setattr(args, "resume", False)
+    setattr(args, "local_llm", False)
+    if not (args.seed or "").strip():
+        args.seed = "Help me organize, analyze, and answer questions on my documents safely"
+    return _cmd_next(args)
+
+
+def _cmd_privatize(args: argparse.Namespace) -> int:
+    from .privacy.second_brain import privatize_second_brain
+
+    res = privatize_second_brain(
+        args.path,
+        vault_db=resolve_default_db(args.db) if args.db else None,
+        detail_tier=args.tier,
+        custom_terms=_parse_custom_terms(raw_list=args.custom_term) or None,
+        use_local_ner=bool(args.local_ner),
+        reconcile=not bool(args.no_reconcile),
+        curate_skill=bool(args.curate_skill),
+        skill_name=args.skill_name,
+        dry_run=bool(args.dry_run),
+    )
+    if args.json:
+        _print_json(res)
+        return 0
+    econ = res["token_economics"]
+    mode = "DRY-RUN" if res["dry_run"] else f"PRIVATIZED ({res['detail_tier']})"
+    print(
+        f"Cortical Second Brain [{mode}]: files={res['files_privatized']} "
+        f"masked_entities={res['entities_masked_total']} "
+        f"tokens={econ['raw_tokens_est']}->{econ['selected_tier_tokens_est']} (-{econ['tier_saving_pct']}%) "
+        f"est_saved=${econ['estimated_cloud_usd_saved']}"
+    )
+    rec = res.get("reconciliation") or {}
+    if rec:
+        print(
+            f"  Reconciled: concepts={rec.get('concepts_count', 0)} "
+            f"clusters={rec.get('merged_clusters', 0)} "
+            f"discrepancies={len(rec.get('discrepancies') or [])}"
+        )
+        for d in (rec.get("discrepancies") or [])[:3]:
+            print(f"    ! Discrepancy: {d['summary']}")
+    if res.get("curated_skill"):
+        print(f"  Auto-Skill [{res['curated_skill']['action']}]: {res['curated_skill']['path']}")
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:

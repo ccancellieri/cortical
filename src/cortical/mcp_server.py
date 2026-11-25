@@ -268,6 +268,12 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
             "properties": {
                 "seed": {"type": "string", "description": "Short rough idea, seed request, or empty when resume=true"},
                 "mode": {"type": "string", "enum": ["browser", "tui", "auto", "auto_if_confident"], "default": "auto"},
+                "persona": {"type": "string", "enum": ["auto", "colleague", "technical"], "default": "auto"},
+                "lang": {"type": "string", "enum": ["auto", "en", "it"], "default": "auto"},
+                "detail_tier": {"type": "string", "enum": ["light", "medium", "high", "max_security"], "default": "medium"},
+                "attach_paths": {"type": "array", "items": {"type": "string"}, "description": "Optional files or directories to privatize into Second Brain"},
+                "reconcile_brain": {"type": "boolean", "default": True},
+                "auto_curate_skill": {"type": "boolean", "default": False},
                 "target": {"type": "string", "description": "Target profile/harness (pi, argon, neon, hybrid, general, claude-code, codex, antigravity, opencode, dsh)"},
                 "issue": {"type": "integer", "description": "Optional GitHub Issue number to anchor on"},
                 "resume": {"type": "boolean", "default": False},
@@ -338,8 +344,36 @@ class CorticalMCPServer:
         if name == "cortical_ingest_private":
             cfg = load_cortical_config()
             priv = cfg.get("privacy") or {}
+            raw_pt = str(args.get("path_or_text") or "")
+            cand_dir = Path(raw_pt).expanduser() if "\n" not in raw_pt and len(raw_pt) < 400 else None
+            if cand_dir is not None and cand_dir.is_dir():
+                from .privacy.second_brain import privatize_second_brain
+
+                prof = str(args.get("profile") or priv.get("default_profile") or "medium")
+                d_tier = "max_security" if prof == "max_security" else ("light" if prof == "low" else ("high" if prof == "max_context" else "medium"))
+                sb = privatize_second_brain(
+                    cand_dir,
+                    vault_db=self.vault.db_path,
+                    detail_tier=d_tier,
+                    policy=str(args.get("policy") or priv.get("default_policy") or "auto"),
+                    custom_terms=list(priv.get("custom_terms") or []),
+                    task_tags=args.get("task_tags"),
+                    config=cfg,
+                )
+                first_alias = (sb.get("aliases") or [cand_dir.name])[0]
+                return {
+                    "alias": first_alias,
+                    "uri": f"cortical://private/{first_alias}",
+                    "resolved_policy": "fail_closed" if sb["local_only"] else "auto",
+                    "profile": prof,
+                    "local_only": sb["local_only"],
+                    "entity_count": sb["entities_masked_total"],
+                    "tokens_est": sb["token_economics"]["selected_tier_tokens_est"],
+                    "saving_pct": sb["token_economics"]["tier_saving_pct"],
+                    "second_brain": sb,
+                }
             return self.vault.ingest(
-                str(args.get("path_or_text") or ""),
+                raw_pt,
                 alias=args.get("alias"),
                 policy=str(args.get("policy") or priv.get("default_policy") or "auto"),
                 profile=str(args.get("profile") or priv.get("default_profile") or "medium"),
@@ -479,6 +513,12 @@ class CorticalMCPServer:
             return run_next_prompt_flow(
                 str(args.get("seed") or ""),
                 mode=req_mode,
+                persona=str(args.get("persona") or "auto"),
+                lang=str(args.get("lang") or "auto"),
+                detail_tier=str(args.get("detail_tier") or "medium"),
+                attach_paths=list(args.get("attach_paths") or []),
+                reconcile_brain=bool(args.get("reconcile_brain", True)),
+                auto_curate_skill=bool(args.get("auto_curate_skill", False)),
                 preferred_browser=str(args.get("browser") or "default"),
                 target=args.get("target"),
                 focus_issue=int(args["issue"]) if args.get("issue") is not None else None,

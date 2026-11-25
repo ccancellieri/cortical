@@ -11,8 +11,8 @@ Single source of truth for **Cortical** (`https://github.com/ccancellieri/cortic
 | Metric | Verified Baseline (`2026-11-24`) | Target (30-Day) | Verification Command |
 | --- | --- | --- | --- |
 | **External Runtime Dependencies** | **`0`** (`dependencies = []`) | `0` (invariant) | `grep dependencies pyproject.toml` |
-| **Unit & Integration Tests** | **`60 / 60` PASS** (`0` failures, `0` skips, `2,997` test LOC) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
-| **Codebase Size (`src/cortical/`)** | **`20,799` total LOC** (**`16,600` Core Python/CLI/Prompt Studio/Wiki** + **`4,199` embedded zero-CDN HTML/CSS/JS SPA templates**; `-34.6%` vs `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
+| **Unit & Integration Tests** | **`64 / 64` PASS** (`0` failures, `0` skips, `3,224` test LOC) | `>= 60` (`100%` pass) | `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q` |
+| **Codebase Size (`src/cortical/`)** | **`22,230` total LOC** (**`18,139` Core Python/CLI/Second Brain/Prompt Studio/Wiki** + **`4,091` embedded zero-CDN HTML/CSS/JS SPA modules**; `-30.1%` vs `~31.8K` LOC `legacy-v0.2`) | Modular 7-package core | `wc -l src/cortical/*.py src/cortical/*/*.py` |
 | **Zero-LLM Privacy Vault Independence** | **`100%` offline stdlib** (MD/DOCX/XLSX/PPTX/PDF + SHA-256 ledger verified on unreachable runner port `:9`) + **7 local runners** (`ollama`, `unsloth`, `lm_studio`, `llama_cpp`, `mlx_lm`, `vllm`, `openai_compatible`) | `100%` Tier-1 zero-LLM | `unittest` `test_zero_runner_privacy_vault_and_toon_operate_100pct_offline` |
 | **TOON Lossless Compression** | **`-78.12%` vs pretty JSON** · **`-62.09%` vs compact JSON** (`745`/`430` -> `163` tok) | `>= 60%` vs compact | `PYTHONPATH=src .venv/bin/python -m cortical.cli bench --compare` |
 | **Privacy Sanitizer Precision** | **`100.0%` tech prose preserved** · `policy=fail_closed` · `pii_masked=True` | `100.0%` | `cortical bench --compare` |
@@ -49,7 +49,7 @@ Single source of truth for **Cortical** (`https://github.com/ccancellieri/cortic
 | **GitHub Forks** | `0` | `>= 10` |
 | **14-Day Repo Views** | `9` views (`7` unique) | `>= 500` views |
 | **14-Day Repo Clones** | `218` clones (`106` unique) | `>= 300` clones |
-| **Verified LinkedIn Posts Ready / Published** | `3` ready (`EN` + `IT`) / `0` published | `3` published |
+| **Verified LinkedIn Posts Ready / Published** | `3` scheduled across separate days (`Nov 25`, `Nov 27`, `Nov 30`) + `3` 1080p demo videos | `3` published |
 
 ---
 

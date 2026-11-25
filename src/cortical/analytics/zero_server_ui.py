@@ -235,8 +235,11 @@ const ST = {{
   planHarnesses: [],
   privacySampleText: '',
   promptStudio: {{
-    seed: 'Implement and verify the next priority slice with zero external dependencies',
-    target: 'general',
+    persona: 'colleague',
+    detailTier: 'medium',
+    folderPath: '~/Documents',
+    seed: 'Summarize my documents, flag any conflicting figures, and propose clear next steps',
+    target: 'hybrid',
     execStrat: 'targeted_tdd',
     guards: ['toon_serena', 'fail_closed_vault', 'local_offload'],
     safety: 'dry_run_backup',
@@ -1733,28 +1736,52 @@ function buildStudioPromptText() {{
     commit_and_push: 'Commit verified changes & push once full unittest suite is green',
   }};
   const adrs = (ST.snap.adrs || []).slice(-4).map((a) => a.id + ':' + a.title.slice(0, 48)).join(' | ');
+  const tierLabels = {{
+    light: 'Light (~85% tokens saved · headline takeaways only)',
+    medium: 'Medium (~70% tokens saved · structured anonymized summary)',
+    high: 'High (Full pseudonymized prose · PERSON_01 / ORG_01)',
+    max_security: 'Max Security (100% Offline Local-Only · remote blocked)',
+  }};
+  const isCol = ps.persona === 'colleague';
+  const effPriv = ps.detailTier === 'max_security' ? '100% Local Air-Gapped (max_security)' : priv;
   return [
-    `# Role & Execution Target: ${{roleHdr}}`,
+    `# Role & Execution Target: ${{isCol ? 'Privacy-First AI Colleague & Second Brain Analyst' : roleHdr}}`,
+    `- **Persona & Detail Tier:** \\`${{ps.persona || 'colleague'}}\\` · \\`${{ps.detailTier || 'medium'}}\\` (${{tierLabels[ps.detailTier] || tierLabels.medium}})`,
     `- **Target Profile:** \\`${{ps.target}}\\``,
-    `- **Privacy & Egress Posture:** \\`${{priv}}\\``,
+    `- **Privacy & Egress Posture:** \\`${{effPriv}}\\``,
     ``,
     `## 1. Primary Objective`,
     sanSeed,
     ``,
-    `## 2. Elicited Architectural & Execution Decisions`,
-    `- **Execution Depth:** ${{stratMap[ps.execStrat] || ps.execStrat}}${{sanNote ? ' *(Note: ' + sanNote + ')*' : ''}}`,
-    `- **Token & Privacy Guardrails:** ${{ps.guards.join(', ') || 'toon_serena'}}`,
-    `- **Workspace Mutation Safety:** ${{safeMap[ps.safety] || ps.safety}}`,
+    `## 2. Elicited Decisions`,
+    ...(isCol
+      ? [
+          `- **Second Brain Folder / Source:** \\`${{ps.folderPath || '(attached locally)'}}\\``,
+          `- **Routing Rule:** Try local LLM (@role:daily_coder / @role:deep_reasoner) at $0 first; escalate anonymized + TOON-compressed packet only if local capacity is insufficient.`,
+          `- **Knowledge Reconciliation:** Flag cross-document figure/date conflicts and save clarifications + reusable SKILL.md.`,
+        ]
+      : [
+          `- **Execution Depth:** ${{stratMap[ps.execStrat] || ps.execStrat}}${{sanNote ? ' *(Note: ' + sanNote + ')*' : ''}}`,
+          `- **Token & Privacy Guardrails:** ${{ps.guards.join(', ') || 'toon_serena'}}`,
+          `- **Workspace Mutation Safety:** ${{safeMap[ps.safety] || ps.safety}}`,
+        ]),
     ...(sanDir ? [``, `## 3. Additional User Directives`, sanDir] : []),
     ``,
     `## 4. Snapshot Context (Zero-CDN Browser Studio)`,
     `- **Hardware Tier:** \\`${{ST.snap.hardware?.classification?.tier || 'tier_1b'}}\\` (\\`num_ctx=${{ST.snap.hardware?.dynamic_num_ctx || 65536}}\\`)`,
-    `- **Recent ADRs:** ${{adrs || 'ADR-001..ADR-017'}}`,
+    `- **Recent ADRs:** ${{adrs || 'ADR-001..ADR-018'}}`,
     ``,
-    `## 5. Mandatory Acceptance Gate`,
-    `- Preserve \\`dependencies = []\\` in \\`pyproject.toml\\` (Python 3.10+ stdlib only) and zero persistent daemons.`,
-    `- Reference \\`@role:*\\` model slots instead of hardcoded model tags.`,
-    `- Verify in one shot via \\`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q\\`.`,
+    `## 5. Mandatory Quality & Privacy Gate`,
+    ...(isCol
+      ? [
+          `- Reply in clear, plain language without technical jargon; never attempt to deanonymize masked placeholders.`,
+          `- Highlight any cross-document discrepancies clearly and propose concrete next steps.`,
+        ]
+      : [
+          `- Preserve \\`dependencies = []\\` in \\`pyproject.toml\\` (Python 3.10+ stdlib only) and zero persistent daemons.`,
+          `- Reference \\`@role:*\\` model slots instead of hardcoded model tags.`,
+          `- Verify in one shot via \\`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -q\\`.`,
+        ]),
   ].join('\\n');
 }}
 
@@ -1767,17 +1794,22 @@ function toggleStudioGuard(g) {{
 function renderPromptStudio() {{
   const ps = ST.promptStudio;
   const promptTxt = buildStudioPromptText();
-  const cliCmd = `cortical next "${{(ps.seed || '').replace(/"/g, '\\\\"')}}" --target ${{ps.target}} --mode browser`;
+  const isCol = ps.persona === 'colleague';
+  const cliCmd = isCol
+    ? `cortical colleague "${{(ps.seed || '').replace(/"/g, '\\\\"')}}" --attach "${{(ps.folderPath || '~/Documents').replace(/"/g, '')}}" --tier ${{ps.detailTier || 'medium'}} --curate-skill`
+    : `cortical next "${{(ps.seed || '').replace(/"/g, '\\\\"')}}" --target ${{ps.target}} --mode browser`;
+  const privCmd = `cortical privatize "${{(ps.folderPath || '~/Documents').replace(/"/g, '')}}" --tier ${{ps.detailTier || 'medium'}} --curate-skill`;
   return `
     <div class="page-head">
       <div>
-        <h1>✨ Prompt Studio &amp; Ephemeral Browser Elicitor (<code>cortical next</code>)</h1>
-        <p>Compose privacy-safe, role-targeted continuation prompts right in the browser, or launch <code>cortical next</code> on <code>127.0.0.1:0</code> across all 8 harnesses.</p>
+        <h1>✨ AI Colleague, Second Brain &amp; Prompt Studio (<code>cortical colleague</code> / <code>cortical next</code>)</h1>
+        <p>Privatize entire folders into a 3+1 Tier Anonymized Second Brain, answer simple Colleague questions, reconcile knowledge, auto-create skills, and escalate safely to remote AI only when local AI isn't enough.</p>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <span class="pill ok">⚡ Zero-LLM Stdlib Ready</span>
-        <button class="btn" onclick="copyText('cortical next --resume --mode auto', 'cortical next --resume')">🤖 Copy Autonomous CLI</button>
-        <button class="btn primary" data-cmd="${{esc(cliCmd)}}" onclick="copyText(this.dataset.cmd, 'cortical next CLI')">🚀 Copy Live Browser Elicitor CLI</button>
+        <button class="btn ${{isCol?'primary':''}}" onclick="ST.promptStudio.persona='colleague';renderAll()">🤝 Simple Colleague Mode</button>
+        <button class="btn ${{!isCol?'primary':''}}" onclick="ST.promptStudio.persona='technical';renderAll()">⚙️ Technical Dev Studio</button>
+        <button class="btn" data-cmd="${{esc(privCmd)}}" onclick="copyText(this.dataset.cmd, 'cortical privatize CLI')">🛡️ Copy Folder Privatize CLI</button>
+        <button class="btn primary" data-cmd="${{esc(cliCmd)}}" onclick="copyText(this.dataset.cmd, 'Colleague / Next CLI')">🚀 Copy Live Browser CLI</button>
       </div>
     </div>
 
@@ -1785,13 +1817,26 @@ function renderPromptStudio() {{
       <div>
         <div class="card">
           <div class="card-head">
-            <h2>1. Seed Intent &amp; Target Execution Persona</h2>
-            <span class="pill violet">ADR-017 · 8 Harnesses</span>
+            <h2>1. Goal, Second-Brain Detail Tier &amp; Folder Privatizer</h2>
+            <span class="pill violet">ADR-017 + ADR-018 · 3+1 Tiers</span>
           </div>
           <div class="field">
-            <label for="ps-seed">Seed Request / Rough Idea</label>
+            <label for="ps-seed">${{isCol ? 'Ask Your AI Colleague (Plain Language — IT/EN)' : 'Seed Request / Engineering Objective'}}</label>
             <input id="ps-seed" class="input" value="${{esc(ps.seed)}}" oninput="ST.promptStudio.seed=this.value;document.getElementById('ps-out').value=buildStudioPromptText()" />
-            <div class="hint">Client-side PII redaction automatically masks emails, IBANs, phones &amp; API secrets before export.</div>
+            <div class="hint">Client-side PII redaction masks names, emails, IBANs, phones &amp; API secrets automatically.</div>
+          </div>
+          <div class="field">
+            <label for="ps-tier">Second Brain Detail Tier (Privacy vs Token Cost)</label>
+            <select id="ps-tier" class="select" onchange="ST.promptStudio.detailTier=this.value;renderAll()">
+              <option value="medium" ${{ps.detailTier==='medium'?'selected':''}}>(Recommended) Medium — Anonymized structured summary (~70% tokens saved)</option>
+              <option value="light" ${{ps.detailTier==='light'?'selected':''}}>Light — Key takeaways &amp; figures only (~85% tokens saved)</option>
+              <option value="high" ${{ps.detailTier==='high'?'selected':''}}>High — Full pseudonymized prose (PERSON_01, ORG_01)</option>
+              <option value="max_security" ${{ps.detailTier==='max_security'?'selected':''}}>Max Security — Strictly 100% offline on this computer ($0 cloud)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ps-folder">Folder or Drive Path to Privatize (<code>cortical privatize</code>)</label>
+            <input id="ps-folder" class="input" value="${{esc(ps.folderPath || '')}}" oninput="ST.promptStudio.folderPath=this.value;renderAll()" />
           </div>
           <div class="field">
             <label for="ps-target">Target Execution Profile</label>
